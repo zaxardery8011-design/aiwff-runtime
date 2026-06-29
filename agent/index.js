@@ -214,69 +214,188 @@ function renderHome() {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AIWFF Runtime — Cockpit</title>
   <style>
-    :root { color-scheme: dark; font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; background: #1e1e2e; color: #cdd6f4; }
+    :root {
+      color-scheme: dark;
+      --bg-0: oklch(13% 0.018 250);
+      --bg-1: oklch(17% 0.018 250);
+      --bg-2: oklch(22% 0.02 250);
+      --bg-3: oklch(28% 0.024 250);
+      --fg-0: oklch(88% 0.025 250);
+      --fg-1: oklch(70% 0.035 250);
+      --fg-2: oklch(52% 0.035 250);
+      --accent: oklch(72% 0.15 250);
+      --accent-2: oklch(70% 0.16 278);
+      --green: oklch(76% 0.16 160);
+      --yellow: oklch(82% 0.14 78);
+      --red: oklch(68% 0.17 24);
+      --border: oklch(30% 0.026 250);
+      --border-soft: color-mix(in oklch, var(--border), transparent 34%);
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; height: 100vh; overflow: hidden; background: #1e1e2e; color: #cdd6f4; }
-    #shell { display: grid; grid-template-columns: 240px 1fr 320px; height: 100vh; min-width: 860px; }
-    .panel { min-height: 0; overflow: hidden; background: #181825; border-right: 1px solid #313244; display: flex; flex-direction: column; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 12% -8%, rgba(110,168,255,0.14), transparent 34%),
+        radial-gradient(circle at 92% 8%, rgba(139,110,255,0.12), transparent 30%),
+        var(--bg-0);
+      color: var(--fg-0);
+      font-family: "Inter", -apple-system, "Segoe UI", "Noto Sans TC", sans-serif;
+      font-size: 13px;
+      line-height: 1.5;
+      display: flex;
+      flex-direction: column;
+    }
+    .topbar {
+      min-height: 54px;
+      padding: 10px 18px;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 14px;
+      background: color-mix(in oklch, var(--bg-1), transparent 8%);
+      border-bottom: 1px solid var(--border-soft);
+      flex-shrink: 0;
+    }
+    .topbar h1 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.2;
+      letter-spacing: 0;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .topbar-pid {
+      justify-self: end;
+      color: var(--fg-2);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .stat-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 28px;
+      padding: 4px 10px;
+      border: 1px solid var(--border-soft);
+      border-radius: 999px;
+      background: linear-gradient(180deg, color-mix(in oklch, var(--bg-2), white 3%), var(--bg-2));
+      color: var(--fg-1);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .stat-label { color: var(--fg-2); }
+    #active-state { color: var(--fg-2); font-weight: 600; }
+    #active-state.active { color: var(--accent); }
+    #shell {
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr) 320px;
+      min-width: 860px;
+      min-height: 0;
+      flex: 1;
+    }
+    .panel {
+      min-height: 0;
+      overflow: hidden;
+      background: var(--bg-1);
+      border-right: 1px solid var(--border-soft);
+      display: flex;
+      flex-direction: column;
+    }
     .panel:last-child { border-right: 0; }
-    .panel-head { min-height: 48px; padding: 12px 14px; border-bottom: 1px solid #313244; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .panel-title { margin: 0; color: #89b4fa; font-size: 12px; line-height: 1.2; text-transform: uppercase; letter-spacing: 0; }
-    .panel-sub { color: #6c7086; font-size: 11px; white-space: nowrap; }
+    .panel-head {
+      min-height: 48px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border-soft);
+      background: var(--bg-2);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .panel-title { margin: 0; color: var(--accent); font-size: 12px; line-height: 1.2; text-transform: uppercase; letter-spacing: 0; }
+    .panel-sub { color: var(--fg-2); font-size: 11px; white-space: nowrap; }
     .scroll { min-height: 0; flex: 1; overflow-y: auto; padding: 10px; }
     .task-group { margin-bottom: 12px; }
-    .group-title { color: #6c7086; font-size: 10px; margin: 0 0 5px; text-transform: uppercase; letter-spacing: 0; }
-    .task-card { width: 100%; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 6px; min-height: 36px; padding: 7px 8px; margin-bottom: 5px; border: 1px solid #313244; border-radius: 6px; background: #1e1e2e; color: #cdd6f4; cursor: pointer; font: inherit; text-align: left; }
-    .task-card:hover, .task-card.selected { border-color: #89b4fa; background: #242438; }
+    .group-title { color: var(--fg-2); font-size: 10px; margin: 0 0 5px; text-transform: uppercase; letter-spacing: 0; }
+    .task-card {
+      width: 100%;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 6px;
+      min-height: 36px;
+      padding: 7px 8px;
+      margin-bottom: 5px;
+      border: 1px solid var(--border-soft);
+      border-radius: 6px;
+      background: var(--bg-2);
+      color: var(--fg-0);
+      cursor: pointer;
+      font: inherit;
+      text-align: left;
+    }
+    .task-card:hover, .task-card.selected { border-color: var(--accent); background: var(--bg-3); }
     .badge { font-size: 10px; line-height: 1; }
-    .badge.doing { color: #f9e2af; }
-    .badge.pending { color: #89b4fa; }
-    .badge.done { color: #a6e3a1; }
-    .badge.failed { color: #f38ba8; }
+    .badge.doing { color: var(--yellow); }
+    .badge.pending { color: var(--accent); }
+    .badge.done { color: var(--green); }
+    .badge.failed { color: var(--red); }
     .task-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
-    .task-elapsed { color: #6c7086; font-size: 10px; white-space: nowrap; }
-    .feed-panel { background: #1e1e2e; }
+    .task-elapsed { color: var(--fg-2); font-size: 10px; white-space: nowrap; }
+    .feed-panel { background: var(--bg-1); }
     .runtime-title { display: flex; align-items: baseline; gap: 10px; }
-    .runtime-title h1 { margin: 0; color: #cdd6f4; font-size: 14px; line-height: 1.2; letter-spacing: 0; }
-    #active-state { font-size: 11px; color: #6c7086; white-space: nowrap; }
-    #active-state.active { color: #a6e3a1; }
+    .runtime-title h1 { margin: 0; color: var(--fg-0); font-size: 14px; line-height: 1.2; letter-spacing: 0; }
     #event-feed { padding: 12px 14px; }
-    .event-line { display: grid; grid-template-columns: 90px 86px 1fr; gap: 8px; align-items: baseline; min-height: 21px; color: #cdd6f4; font-size: 12px; line-height: 1.45; }
-    .evt-time { color: #6c7086; white-space: nowrap; }
+    .event-line { display: grid; grid-template-columns: 90px 86px 1fr; gap: 8px; align-items: baseline; min-height: 21px; color: var(--fg-0); font-size: 12px; line-height: 1.45; }
+    .evt-time { color: var(--fg-2); white-space: nowrap; }
     .evt-src { white-space: nowrap; }
-    .src-system { color: #89b4fa; }
-    .src-task { color: #a6e3a1; }
-    .src-task.failed { color: #f38ba8; }
-    .src-worker { color: #94e2d5; }
-    .src-error { color: #f38ba8; }
+    .src-system { color: var(--accent); }
+    .src-task { color: var(--green); }
+    .src-task.failed { color: var(--red); }
+    .src-worker { color: oklch(76% 0.16 200); }
+    .src-error { color: var(--red); }
     .evt-msg { min-width: 0; overflow-wrap: anywhere; }
-    #log-title { max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd6f4; font-size: 12px; }
+    #log-title { max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent); font-size: 12px; }
     #log-body { padding: 12px; }
-    .log-line { min-height: 21px; color: #cdd6f4; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
-    .log-line.ok { color: #a6e3a1; }
-    .log-line.err { color: #f38ba8; }
-    .empty { color: #6c7086; font-size: 11px; line-height: 1.5; padding: 8px 0; }
-    .summary { color: #cdd6f4; font-size: 11px; line-height: 1.55; margin-bottom: 10px; overflow-wrap: anywhere; }
-    .artifact { color: #89b4fa; font-size: 10px; line-height: 1.55; border: 1px solid #313244; border-radius: 6px; padding: 8px; overflow-wrap: anywhere; user-select: all; }
+    .log-line { min-height: 21px; color: var(--fg-0); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+    .log-line.ok { color: var(--green); }
+    .log-line.err { color: var(--red); }
+    .empty { color: var(--fg-2); font-size: 11px; line-height: 1.5; padding: 8px 0; }
+    .summary { color: var(--fg-0); font-size: 11px; line-height: 1.55; margin-bottom: 10px; overflow-wrap: anywhere; }
+    .artifact { color: var(--accent); font-size: 10px; line-height: 1.55; border: 1px solid var(--border-soft); border-radius: 6px; padding: 8px; overflow-wrap: anywhere; user-select: all; }
     @media (max-width: 920px) {
-      #shell { grid-template-columns: 220px 1fr 280px; min-width: 760px; }
+      .topbar { grid-template-columns: 1fr auto; }
+      .stat-pill { justify-self: end; }
+      .topbar-pid { display: none; }
+      #shell { grid-template-columns: 220px minmax(0, 1fr) 280px; min-width: 760px; }
     }
   </style>
 </head>
 <body>
+  <header class="topbar">
+    <h1>AIWFF Runtime · 控制台</h1>
+    <div class="stat-pill">
+      <span class="stat-label">active tasks</span>
+      <span id="active-state">○ idle</span>
+    </div>
+    <span class="topbar-pid">pid: ${process.pid}</span>
+  </header>
   <div id="shell">
     <aside id="panel-tasks" class="panel tasks-panel">
       <div class="panel-head">
-        <h2 class="panel-title">控制台</h2>
-        <span class="panel-sub">PID ${process.pid}</span>
+        <h2 class="panel-title">Tasks</h2>
+        <span class="panel-sub">latest 20</span>
       </div>
       <div id="task-list" class="scroll"></div>
     </aside>
     <main id="panel-feed" class="panel feed-panel">
       <div class="panel-head">
         <div class="runtime-title">
-          <h1>AIWFF Runtime</h1>
-          <span id="active-state">○ idle</span>
+          <h1>Activity Feed</h1>
         </div>
         <span class="panel-sub">Cockpit</span>
       </div>
