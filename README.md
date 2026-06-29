@@ -89,6 +89,20 @@ data/tasks/<id>.progress.jsonl   data/artifacts/<id>.result.json
 verifier / smoke test
 ```
 
+## Configuration
+
+The runtime reads one environment variable:
+
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `3100` | HTTP port for the daemon |
+
+Copy `.env.example` to `.env` and edit as needed. `npm install` is a no-op (zero external dependencies) — you can skip it.
+
+> **Note on `config.example.json`**: this file is a roadmap preview of planned options (`data_dir`, `worker.command`, `mock_mode`). The current runtime does **not** read it — only `process.env.PORT` is consumed. Future phases will wire these up.
+
+> **Note on task status**: the worker writes `running` internally; the WebUI maps `running` → `doing` for display. On fast machines the mock worker completes in ~3 seconds, so polling may jump directly from `pending` to `done` without catching `running` mid-flight — this is expected behaviour, not a bug.
+
 ## Roadmap
 
 - Phase 1 mock-first: complete task lifecycle without external services. ✓
