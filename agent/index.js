@@ -349,6 +349,51 @@ function renderHome() {
     .feed-panel { background: var(--bg-1); }
     .runtime-title { display: flex; align-items: baseline; gap: 10px; }
     .runtime-title h1 { margin: 0; color: var(--fg-0); font-size: 14px; line-height: 1.2; letter-spacing: 0; }
+    .create-form {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-soft);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .create-form input,
+    .create-form textarea {
+      width: 100%;
+      background: var(--bg-0);
+      border: 1px solid var(--border);
+      color: var(--fg-0);
+      border-radius: 6px;
+      padding: 7px 10px;
+      font: inherit;
+      outline: none;
+    }
+    .create-form input:focus,
+    .create-form textarea:focus {
+      border-color: var(--accent);
+    }
+    .create-form textarea {
+      resize: vertical;
+      min-height: 52px;
+    }
+    #btn-create-task {
+      min-height: 32px;
+      background: var(--accent);
+      color: oklch(13% 0.018 250);
+      border: 0;
+      border-radius: 6px;
+      padding: 7px 10px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    #btn-create-task:hover {
+      background: color-mix(in oklch, var(--accent), white 12%);
+    }
+    .create-msg {
+      min-height: 16px;
+      color: var(--fg-2);
+      font-size: 11px;
+    }
     #event-feed { padding: 12px 14px; }
     .event-line { display: grid; grid-template-columns: 90px 86px 1fr; gap: 8px; align-items: baseline; min-height: 21px; color: var(--fg-0); font-size: 12px; line-height: 1.45; }
     .evt-time { color: var(--fg-2); white-space: nowrap; }
@@ -398,6 +443,12 @@ function renderHome() {
           <h1>Activity Feed</h1>
         </div>
         <span class="panel-sub">Cockpit</span>
+      </div>
+      <div id="create-task-form" class="create-form">
+        <input id="new-task-title" type="text" placeholder="任務標題" maxlength="80">
+        <textarea id="new-task-instruction" placeholder="指令說明（可選）" rows="2" maxlength="400"></textarea>
+        <button id="btn-create-task" type="button">送出任務</button>
+        <span id="create-task-msg" class="create-msg"></span>
       </div>
       <div id="event-feed" class="scroll"></div>
     </main>
@@ -652,6 +703,39 @@ function renderHome() {
         renderLogLines(['GET /api/tasks/' + taskId + '/progress failed: ' + error.message]);
       }
     }
+
+    document.getElementById('btn-create-task').addEventListener('click', async function() {
+      const title = document.getElementById('new-task-title').value.trim();
+      const instruction = document.getElementById('new-task-instruction').value.trim();
+      const msg = document.getElementById('create-task-msg');
+      if (!title) {
+        msg.style.color = 'var(--red)';
+        msg.textContent = '請填寫標題';
+        return;
+      }
+      try {
+        const res = await fetch('/api/tasks', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ title, instruction: instruction || title })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          msg.style.color = 'var(--green)';
+          msg.textContent = '已建立 ' + data.id.slice(0, 8);
+          document.getElementById('new-task-title').value = '';
+          document.getElementById('new-task-instruction').value = '';
+          setTimeout(function() { msg.textContent = ''; }, 3000);
+          pollTasks();
+        } else {
+          msg.style.color = 'var(--red)';
+          msg.textContent = data.error || 'error';
+        }
+      } catch (e) {
+        msg.style.color = 'var(--red)';
+        msg.textContent = e.message;
+      }
+    });
 
     async function tick() {
       await pollTasks();
