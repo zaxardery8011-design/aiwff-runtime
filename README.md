@@ -51,6 +51,26 @@ Worker: a spawned process that reads a task, performs work, reports progress, an
 
 Verifier: scripts and tests that confirm a task reached `done` and produced a usable artifact.
 
+## Task Record Schema
+
+Every task is stored as `data/tasks/<id>.json` with these fields:
+
+```json
+{
+  "id": "string — unique task identifier",
+  "title": "string — human-readable task name",
+  "instruction": "string — what the worker should do",
+  "status": "pending | running | done | failed",
+  "created_at": "ISO 8601 timestamp",
+  "updated_at": "ISO 8601 timestamp",
+  "artifact_path": "string — path to the result file (set when done)"
+}
+```
+
+> **Note on status terminology**: the worker process writes `running` internally; the WebUI's `normalizeStatus()` maps `running` → `doing` for display. In API responses and on disk the value is `running`.
+
+Progress is streamed line-by-line to `data/tasks/<id>.progress.jsonl`. Artifacts land in `data/artifacts/<id>.result.json`.
+
 ## Architecture
 
 ```text
