@@ -1,4 +1,5 @@
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -8,7 +9,10 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
 const TASKS_DIR = path.join(DATA_DIR, 'tasks');
 const ARTIFACTS_DIR = path.join(DATA_DIR, 'artifacts');
+const MEMORY_DIR = path.join(ROOT_DIR, 'memory');
 const PORT = Number(process.env.PORT || 3100);
+let tgOffset = 0;
+const tgPendingNotify = {};
 
 function ensureDirectories() {
   fs.mkdirSync(TASKS_DIR, { recursive: true });
@@ -33,6 +37,13 @@ function isSafeTaskId(taskId) {
 
 function readJsonFile(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function readTextFileIfExists(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return '';
+  }
+  return fs.readFileSync(filePath, 'utf8').trim();
 }
 
 function writeJsonFile(filePath, value) {
@@ -780,6 +791,150 @@ function spawnMockWorker(taskId) {
   child.unref();
 }
 
+function artifactResultPath(taskId) {
+  return path.join(ARTIFACTS_DIR, `${taskId}.result.md`);
+}
+
+function artifactResultRef(taskId) {
+  return path.relative(ROOT_DIR, artifactResultPath(taskId)).replaceAll(path.sep, '/');
+}
+
+function appendProgressText(taskId, line) {
+  fs.appendFileSync(progressPath(taskId), `${JSON.stringify({ ts: Date.now(), text: line })}\n`);
+}
+
+function pipeStdoutProgress(taskId, stream) {
+  let buffer = '';
+  stream.setEncoding('utf8');
+  stream.on('data', (chunk) => {
+    buffer += chunk;
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop();
+    for (const line of lines) {
+      if (line) {
+        appendProgressText(taskId, line);
+      }
+    }
+  });
+  stream.on('end', () => {
+    if (buffer) {
+      appendProgressText(taskId, buffer);
+    }
+  });
+}
+
+function notifyTelegramTaskDone(task) {
+  const chatId = tgPendingNotify[task.id];
+  if (!chatId || !process.env.TG_BOT_TOKEN) {
+    return;
+  }
+  const resultText =
+    task.status === 'done'
+      ? `✅ 任務完成：${task.title}\n結果：${task.artifact_path}`
+      : `❌ 任務失敗：${task.title}\n原因：${task.error || '未知'}`;
+  tgRequest(process.env.TG_BOT_TOKEN, 'sendMessage', { chat_id: chatId, text: resultText }).catch(() => {});
+  delete tgPendingNotify[task.id];
+}
+
+function buildClaudePrompt(task) {
+  const systemPrompt = readTextFileIfExists(path.join(ROOT_DIR, 'CLAUDE.md'));
+  const facts = readTextFileIfExists(path.join(MEMORY_DIR, 'facts.md'));
+  const preferences = readTextFileIfExists(path.join(MEMORY_DIR, 'preferences.md'));
+
+  return `${systemPrompt}
+
+## 記憶
+${facts}
+${preferences}
+
+## 任務
+標題: ${task.title}
+指令: ${task.instruction}
+任務ID: ${task.id}
+
+結果請寫到: ${artifactResultRef(task.id)}
+最後一行必須寫: DONE: <一句話說你完成了什麼>
+`;
+}
+
+function updateTaskStatus(task, status, extra = {}) {
+  const nextTask = {
+    ...task,
+    ...extra,
+    status,
+    updated_at: nowIso(),
+  };
+  writeJsonFile(taskPath(task.id), nextTask);
+  return nextTask;
+}
+
+function spawnClaudeWorker(task) {
+  ensureDirectories();
+  const claudeCmd = process.env.CLAUDE_CMD || 'claude';
+  const fullPrompt = buildClaudePrompt(task);
+  const runningTask = updateTaskStatus(task, 'running');
+  const child = spawn(claudeCmd, ['--dangerously-bypass-approvals-and-sandbox', '-p', fullPrompt], {
+    cwd: ROOT_DIR,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let spawnError = null;
+
+  pipeStdoutProgress(task.id, child.stdout);
+  child.stderr.resume();
+
+  child.on('error', (error) => {
+    spawnError = error;
+  });
+
+  child.on('close', () => {
+    const currentTask = readTask(task.id) || runningTask;
+    let nextTask;
+    if (spawnError) {
+      nextTask = updateTaskStatus(currentTask, 'failed', { error: spawnError.message });
+    } else if (fs.existsSync(artifactResultPath(task.id))) {
+      nextTask = updateTaskStatus(currentTask, 'done', { artifact_path: artifactResultRef(task.id) });
+    } else {
+      nextTask = updateTaskStatus(currentTask, 'failed', { error: 'no artifact produced' });
+    }
+    notifyTelegramTaskDone(nextTask);
+  });
+}
+
+function shouldUseMockWorker() {
+  return process.env.MOCK_WORKER === '1';
+}
+
+function startTaskWorker(task) {
+  if (shouldUseMockWorker()) {
+    spawnMockWorker(task.id);
+    return;
+  }
+  spawnClaudeWorker(task);
+}
+
+function createTaskObject(title, instruction) {
+  const timestamp = nowIso();
+  const task = {
+    id: crypto.randomUUID(),
+    title,
+    instruction,
+    status: 'pending',
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+
+  writeJsonFile(taskPath(task.id), task);
+  startTaskWorker(task);
+  return task;
+}
+
+function createTaskFromTg({ title, instruction }) {
+  const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Untitled task';
+  const safeInstruction =
+    typeof instruction === 'string' && instruction.trim() ? instruction.trim() : 'Run the task lifecycle.';
+  return createTaskObject(safeTitle, safeInstruction);
+}
+
 async function createTask(req, res) {
   let payload;
   try {
@@ -795,19 +950,86 @@ async function createTask(req, res) {
     typeof payload.instruction === 'string' && payload.instruction.trim()
       ? payload.instruction.trim()
       : 'Run the mock worker lifecycle.';
-  const timestamp = nowIso();
-  const task = {
-    id: crypto.randomUUID(),
-    title,
-    instruction,
-    status: 'pending',
-    created_at: timestamp,
-    updated_at: timestamp,
-  };
-
-  writeJsonFile(taskPath(task.id), task);
-  spawnMockWorker(task.id);
+  const task = createTaskObject(title, instruction);
   sendJson(res, 201, task);
+}
+
+async function tgRequest(token, method, body) {
+  const payload = JSON.stringify(body || {});
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: 'api.telegram.org',
+        path: `/bot${token}/${method}`,
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(payload),
+        },
+      },
+      (res) => {
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          raw += chunk;
+        });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(raw || '{}'));
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function pollTelegram() {
+  const token = process.env.TG_BOT_TOKEN;
+  const adminId = process.env.ADMIN_TG_CHAT_ID;
+  if (!token) {
+    return;
+  }
+
+  const data = await tgRequest(token, 'getUpdates', { offset: tgOffset, timeout: 1, limit: 10 });
+  if (!data.ok || !Array.isArray(data.result) || !data.result.length) {
+    return;
+  }
+
+  for (const update of data.result) {
+    tgOffset = update.update_id + 1;
+    const msg = update.message;
+    if (!msg || !msg.text) {
+      continue;
+    }
+    if (adminId && String(msg.chat.id) !== String(adminId)) {
+      continue;
+    }
+
+    const text = msg.text.trim();
+    if (text === '/start') {
+      await tgRequest(token, 'sendMessage', { chat_id: msg.chat.id, text: '主腦已上線。傳任何指令給我，我會自主執行。' });
+      continue;
+    }
+    if (text === '/tasks') {
+      const tasks = listTasks().slice(0, 5);
+      const lines = tasks.map((task) => `[${task.status}] ${task.title}`).join('\n') || '（無任務）';
+      await tgRequest(token, 'sendMessage', { chat_id: msg.chat.id, text: lines });
+      continue;
+    }
+
+    const title = text.split(/\r?\n/)[0].slice(0, 60);
+    const task = createTaskFromTg({ title, instruction: text });
+    tgPendingNotify[task.id] = msg.chat.id;
+    await tgRequest(token, 'sendMessage', {
+      chat_id: msg.chat.id,
+      text: `✅ 收到，任務建立：${title}\nID: ${task.id.slice(0, 8)}...\n執行中，完成後通知你。`,
+    });
+  }
 }
 
 async function handleRequest(req, res) {
@@ -878,6 +1100,10 @@ function main() {
   server.listen(PORT, '127.0.0.1', () => {
     console.log(`AIWFF Runtime listening on http://127.0.0.1:${PORT}`);
   });
+
+  if (process.env.TG_BOT_TOKEN) {
+    setInterval(() => pollTelegram().catch(() => {}), 2000);
+  }
 }
 
 if (require.main === module) {
