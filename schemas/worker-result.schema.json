@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/aiwff-runtime/worker-result.schema.json",
+  "title": "AIWFF Runtime Worker Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["task_id", "title", "summary", "completed_at"],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "title": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
+

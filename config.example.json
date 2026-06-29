@@ -1,0 +1,10 @@
+{
+  "port": 3100,
+  "data_dir": "data",
+  "worker": {
+    "command": "node",
+    "args": ["examples/mock-worker/worker.js"]
+  },
+  "mock_mode": true
+}
+

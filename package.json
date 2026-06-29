@@ -1,0 +1,18 @@
+{
+  "name": "aiwff-runtime",
+  "version": "0.1.0",
+  "description": "Local-first personal agent runtime — turns LLM CLIs into persistent workers",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node agent/index.js",
+    "doctor": "node scripts/doctor.js",
+    "demo": "node scripts/demo.js",
+    "verify-demo": "node scripts/verify-demo.js",
+    "test": "node tests/smoke.test.js",
+    "web": "node agent/index.js"
+  }
+}
+
