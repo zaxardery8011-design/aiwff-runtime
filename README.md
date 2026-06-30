@@ -126,6 +126,8 @@ Start the runtime:
 npm start
 ```
 
+> **Custom port / Windows note:** the default port is `3100`. To use another port: `PORT=3200 npm start` (bash / macOS / Linux). On **Windows PowerShell** the inline `VAR=value command` form does not work — run `$env:PORT=3200; npm start` instead.
+
 Then verify it:
 
 1. Open `http://127.0.0.1:3100`.
