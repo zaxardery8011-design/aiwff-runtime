@@ -70,7 +70,9 @@ Real Claude mode is explicit opt-in:
 ENABLE_REAL_CLAUDE_WORKER=1
 ```
 
-When real mode is enabled, the daemon spawns `CLAUDE_CMD` with a prompt built from `CLAUDE.md`, `memory/facts.md`, `memory/preferences.md`, the task details, and the required artifact path. Approval and sandbox bypass is not implicit; it is added only when:
+When real mode is enabled, the daemon spawns `CLAUDE_CMD --print` with a prompt built from `CLAUDE.md`, `memory/facts.md`, `memory/preferences.md`, the task details, and the required artifact path. The prompt is written through stdin instead of argv so long prompts do not depend on argv quoting. On Windows, spawn goes through `cmd.exe` so the default `claude` command can resolve `claude.cmd`.
+
+Approval and sandbox bypass is not implicit; `--dangerously-skip-permissions` is added only when:
 
 ```env
 CLAUDE_BYPASS_APPROVALS=1

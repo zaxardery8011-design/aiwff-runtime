@@ -892,19 +892,40 @@ function updateTaskStatus(task, status, extra = {}) {
   return nextTask;
 }
 
+function quoteWindowsCommand(command) {
+  const value = String(command).trim();
+  if (!value || (value.startsWith('"') && value.endsWith('"')) || !/\s/.test(value)) {
+    return value || '""';
+  }
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+function spawnClaudeProcess(claudeCmd, args) {
+  const options = {
+    cwd: ROOT_DIR,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  };
+  if (process.platform !== 'win32') {
+    return spawn(claudeCmd, args, options);
+  }
+
+  const commandLine = [quoteWindowsCommand(claudeCmd), ...args].join(' ');
+  return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], {
+    ...options,
+    windowsVerbatimArguments: true,
+  });
+}
+
 function spawnClaudeWorker(task) {
   ensureDirectories();
   const claudeCmd = process.env.CLAUDE_CMD || 'claude';
   const fullPrompt = buildClaudePrompt(task);
   const runningTask = updateTaskStatus(task, 'running');
-  const args = ['-p', fullPrompt];
+  const args = ['--print'];
   if (envFlag('CLAUDE_BYPASS_APPROVALS')) {
-    args.unshift('--dangerously-bypass-approvals-and-sandbox');
+    args.unshift('--dangerously-skip-permissions');
   }
-  const child = spawn(claudeCmd, args, {
-    cwd: ROOT_DIR,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const child = spawnClaudeProcess(claudeCmd, args);
   let spawnError = null;
   let stderr = '';
 
@@ -917,6 +938,11 @@ function spawnClaudeWorker(task) {
   child.on('error', (error) => {
     spawnError = error;
   });
+
+  child.stdin.on('error', (error) => {
+    stderr += `\nstdin error: ${error.message}`;
+  });
+  child.stdin.end(fullPrompt);
 
   child.on('close', (code, signal) => {
     const currentTask = readTask(task.id) || runningTask;
