@@ -43,6 +43,8 @@ aiwff-runtime is the L5 base: a single-machine agent runtime with persistent tas
 
 The minimal-brain design has 8 components. Phase 2 implements the practical core: daemon, Telegram polling, Claude CLI worker, file-bus, WebUI, `CLAUDE.md` brain configuration, and lightweight memory injection.
 
+For a compact source-oriented map of the runtime loop, see [`docs/architecture.md`](docs/architecture.md).
+
 | Component | Plain meaning | Phase 2 status |
 |---|---|---|
 | A. Daemon | A Node.js process that owns the runtime loop, task queue, HTTP API, WebUI, and worker spawning | Active in `agent/index.js`, listening on `127.0.0.1:${PORT}` |
@@ -144,6 +146,39 @@ For a mock-only run without Claude CLI execution, set:
 
 ```env
 MOCK_WORKER=1
+```
+
+### Codex Install Prompt
+
+Paste this prompt into a local coding agent when you want a mock-only install and verification pass:
+
+```text
+你是我的本機 coding agent。請幫我安裝並驗證 aiwff-runtime。
+
+目標：
+- clone 官方 repo 到本機工作資料夾
+- 只跑 mock demo
+- 不接 Telegram、LINE、Claude OAuth、Task Scheduler
+- 不讀取、上傳或修改我的私人檔案
+- 安裝完成後啟動 WebUI，並回報可開啟的 localhost URL
+
+步驟：
+1. git clone https://github.com/zaxardery8011-design/aiwff-runtime
+2. cd aiwff-runtime
+3. 檢查 Node.js 與 npm：node --version；npm --version。Node.js 必須 >= 18。
+4. npm install
+5. npm run doctor
+6. MOCK_WORKER=1 npm run demo
+   - PowerShell 可用：$env:MOCK_WORKER='1'; npm run demo
+7. npm run verify-demo
+8. npm run web
+9. 回報：
+   - demo task id
+   - artifact path
+   - verifier verdict
+   - localhost URL
+
+如果任何一步失敗，不要亂改系統、不要接 Telegram/OAuth、不要改 Task Scheduler；先停下來回報錯誤與你已執行的命令。
 ```
 
 ## TG Bot Setup
