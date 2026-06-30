@@ -761,11 +761,7 @@ function renderHome() {
         <div class="jov-stream" id="jov-stream">
           <div class="jov-msg ai">等待 daemon…</div>
         </div>
-        <div class="jov-input-box">
-          <input id="hud-task-input" placeholder="輸入任務，Enter 建立">
-          <button class="jov-send" id="hud-send" type="button">➤</button>
-        </div>
-        <div class="jov-hint" data-goto="chat">切到「對話」分頁看活動時間軸 →</div>
+        <div class="jov-hint" data-goto="chat">💬 展示總覽 · 要對話 / 派工請切到「對話」分頁 →</div>
       </div>
     </div>
 
@@ -1326,7 +1322,6 @@ function renderHome() {
       });
     }
 
-    wireSubmit('hud-task-input', 'hud-send');
     wireSubmit('chat-input', 'chat-send');
 
     function tickClock() {
