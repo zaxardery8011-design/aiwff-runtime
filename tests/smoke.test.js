@@ -98,7 +98,7 @@ async function main() {
   const port = await getOpenPort();
   const daemon = spawn('node', ['agent/index.js'], {
     cwd: ROOT_DIR,
-    env: { ...process.env, PORT: String(port) },
+    env: { ...process.env, PORT: String(port), MOCK_WORKER: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -136,4 +136,3 @@ main()
     console.error(`FAIL smoke test: ${error.stack || error.message}`);
     process.exit(1);
   });
-

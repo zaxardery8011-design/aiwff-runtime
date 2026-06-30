@@ -109,7 +109,7 @@ async function main() {
   const port = await choosePort();
   const daemon = spawn('node', ['agent/index.js'], {
     cwd: ROOT_DIR,
-    env: { ...process.env, PORT: String(port) },
+    env: { ...process.env, PORT: String(port), MOCK_WORKER: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -138,4 +138,3 @@ main().catch((error) => {
   console.error(`FAIL demo: ${error.message}`);
   process.exit(1);
 });
-
