@@ -1,5 +1,5 @@
 {
-  "_note": "ROADMAP ONLY — this file is not read by the current runtime. Only process.env.PORT is consumed. Future phases will wire up data_dir, worker.command, and mock_mode.",
+  "_note": "ROADMAP ONLY — this file is not read by the current runtime. Runtime configuration currently comes from environment variables including PORT, CLAUDE_CMD, MOCK_WORKER, ENABLE_REAL_CLAUDE_WORKER, CLAUDE_BYPASS_APPROVALS, TG_BOT_TOKEN, and ADMIN_TG_CHAT_ID. Future phases will wire up data_dir, worker.command, and mock_mode.",
   "port": 3100,
   "data_dir": "data",
   "worker": {

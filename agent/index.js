@@ -6,6 +6,7 @@ const { spawn } = require('child_process');
 const crypto = require('crypto');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
+loadDotEnv();
 const DATA_DIR = path.join(ROOT_DIR, 'data');
 const TASKS_DIR = path.join(DATA_DIR, 'tasks');
 const ARTIFACTS_DIR = path.join(DATA_DIR, 'artifacts');
@@ -13,6 +14,29 @@ const MEMORY_DIR = path.join(ROOT_DIR, 'memory');
 const PORT = Number(process.env.PORT || 3100);
 let tgOffset = 0;
 const tgPendingNotify = {};
+
+function envFlag(name) {
+  return process.env[name] === '1' || String(process.env[name]).toLowerCase() === 'true';
+}
+
+function loadDotEnv() {
+  const envPath = path.join(ROOT_DIR, '.env');
+  if (!fs.existsSync(envPath)) {
+    return;
+  }
+
+  for (const rawLine of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match || process.env[match[1]] != null) {
+      continue;
+    }
+    process.env[match[1]] = match[2].replace(/^['"]|['"]$/g, '');
+  }
+}
 
 function ensureDirectories() {
   fs.mkdirSync(TASKS_DIR, { recursive: true });
@@ -873,24 +897,38 @@ function spawnClaudeWorker(task) {
   const claudeCmd = process.env.CLAUDE_CMD || 'claude';
   const fullPrompt = buildClaudePrompt(task);
   const runningTask = updateTaskStatus(task, 'running');
-  const child = spawn(claudeCmd, ['--dangerously-bypass-approvals-and-sandbox', '-p', fullPrompt], {
+  const args = ['-p', fullPrompt];
+  if (envFlag('CLAUDE_BYPASS_APPROVALS')) {
+    args.unshift('--dangerously-bypass-approvals-and-sandbox');
+  }
+  const child = spawn(claudeCmd, args, {
     cwd: ROOT_DIR,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let spawnError = null;
+  let stderr = '';
 
   pipeStdoutProgress(task.id, child.stdout);
-  child.stderr.resume();
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
 
   child.on('error', (error) => {
     spawnError = error;
   });
 
-  child.on('close', () => {
+  child.on('close', (code, signal) => {
     const currentTask = readTask(task.id) || runningTask;
     let nextTask;
     if (spawnError) {
       nextTask = updateTaskStatus(currentTask, 'failed', { error: spawnError.message });
+    } else if (code !== 0) {
+      const exitReason = code === null ? `signal ${signal || 'unknown'}` : `code ${code}`;
+      const tail = stderr.trim().slice(-1000);
+      nextTask = updateTaskStatus(currentTask, 'failed', {
+        error: `Claude exited with ${exitReason}${tail ? `: ${tail}` : ''}`,
+      });
     } else if (fs.existsSync(artifactResultPath(task.id))) {
       nextTask = updateTaskStatus(currentTask, 'done', { artifact_path: artifactResultRef(task.id) });
     } else {
@@ -901,7 +939,7 @@ function spawnClaudeWorker(task) {
 }
 
 function shouldUseMockWorker() {
-  return process.env.MOCK_WORKER === '1';
+  return envFlag('MOCK_WORKER') || !envFlag('ENABLE_REAL_CLAUDE_WORKER');
 }
 
 function startTaskWorker(task) {
@@ -1101,7 +1139,9 @@ function main() {
     console.log(`AIWFF Runtime listening on http://127.0.0.1:${PORT}`);
   });
 
-  if (process.env.TG_BOT_TOKEN) {
+  if (process.env.TG_BOT_TOKEN && !process.env.ADMIN_TG_CHAT_ID) {
+    console.error('Refusing Telegram polling: ADMIN_TG_CHAT_ID is required when TG_BOT_TOKEN is set.');
+  } else if (process.env.TG_BOT_TOKEN) {
     setInterval(() => pollTelegram().catch(() => {}), 2000);
   }
 }

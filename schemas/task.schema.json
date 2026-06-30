@@ -29,7 +29,12 @@
     "updated_at": {
       "type": "string",
       "format": "date-time"
+    },
+    "artifact_path": {
+      "type": "string"
+    },
+    "error": {
+      "type": "string"
     }
   }
 }
-

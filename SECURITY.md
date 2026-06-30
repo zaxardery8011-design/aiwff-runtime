@@ -1,6 +1,6 @@
 # Security Policy
 
-AIWFF Runtime Phase 1 is mock-first and local-only. It does not require external API credentials, OAuth tokens, chat platform tokens, or cloud services.
+AIWFF Runtime is local-first. The public-safe default is mock-first unless Telegram or real Claude execution is explicitly enabled.
 
 ## Supported Version
 
@@ -17,5 +17,6 @@ Open an issue with a clear description, reproduction steps, affected files, and 
 - The default daemon binds to `127.0.0.1`.
 - Generated runtime data is written under `data/`.
 - Mock workers only read repo-local task files and write repo-local artifacts.
-- Phase 1 does not connect to Telegram, LINE, Claude OAuth, Task Scheduler, or external APIs.
-
+- Telegram polling requires `TG_BOT_TOKEN` and fails closed without `ADMIN_TG_CHAT_ID`.
+- Real Claude CLI workers require explicit `ENABLE_REAL_CLAUDE_WORKER=1` opt-in.
+- Approval/sandbox bypass requires explicit `CLAUDE_BYPASS_APPROVALS=1` opt-in and must never be the public default.

@@ -100,8 +100,8 @@ Prerequisites:
 | Requirement | Check |
 |---|---|
 | Node.js >= 18 | `node --version` |
-| Claude CLI | `claude --version` |
-| Telegram Bot Token | Create one with `@BotFather` |
+| Claude CLI | `claude --version` for real worker mode |
+| Telegram Bot Token | Create one with `@BotFather` for Telegram mode |
 
 10-minute setup:
 
@@ -156,7 +156,7 @@ MOCK_WORKER=1
 6. Copy your numeric chat ID.
 7. Paste it into `.env` as `ADMIN_TG_CHAT_ID`.
 
-`ADMIN_TG_CHAT_ID` is strongly recommended. If it is left empty, the current runtime does not restrict incoming Telegram messages to one admin chat.
+`ADMIN_TG_CHAT_ID` is required when `TG_BOT_TOKEN` is set. If it is left empty, the runtime refuses Telegram polling.
 
 This runtime uses polling. You do not need a webhook, public hostname, reverse proxy, or public IP address.
 
@@ -211,9 +211,11 @@ Copy `.env.example` to `.env`. The current `.env.example` exposes these fields:
 |---|---:|---|---|---|
 | `PORT` | No | `3100` | `agent/index.js` | HTTP port for the daemon and WebUI |
 | `TG_BOT_TOKEN` | Required for Telegram | empty | `agent/index.js` | Telegram Bot token from `@BotFather`; if empty, WebUI still runs but TG polling does not start |
-| `ADMIN_TG_CHAT_ID` | Recommended for Telegram | empty | `agent/index.js` | Restricts accepted TG messages to one admin chat when set |
+| `ADMIN_TG_CHAT_ID` | Required when `TG_BOT_TOKEN` is set | empty | `agent/index.js` | Restricts accepted TG messages to one admin chat |
 | `CLAUDE_CMD` | No | `claude` | `agent/index.js` | Command used to spawn Claude CLI |
-| `MOCK_WORKER` | No | empty | `agent/index.js` | Set to `1` to use the mock worker instead of Claude CLI |
+| `MOCK_WORKER` | No | `1` | `agent/index.js` | Public-safe default: use the mock worker instead of Claude CLI |
+| `ENABLE_REAL_CLAUDE_WORKER` | Required for real Claude worker | empty | `agent/index.js` | Set to `1` only when you intentionally want Claude CLI execution |
+| `CLAUDE_BYPASS_APPROVALS` | Optional unsafe mode | empty | `agent/index.js` | Set to `1` only if you intentionally want Claude approval/sandbox bypass |
 
 Current `.env.example`:
 
@@ -222,7 +224,9 @@ PORT=3100
 TG_BOT_TOKEN=
 ADMIN_TG_CHAT_ID=
 CLAUDE_CMD=claude
-MOCK_WORKER=
+MOCK_WORKER=1
+ENABLE_REAL_CLAUDE_WORKER=
+CLAUDE_BYPASS_APPROVALS=
 ```
 
 `WORK_DIR` appears in the design draft, but it is not present in the current `.env.example` and is not read by the current Phase 2 runtime.
@@ -239,7 +243,7 @@ The rule of this repo: remove multi-node complexity, keep the single-machine age
 
 | Area | Full AIWFF | aiwff-runtime minimal-brain |
 |---|---|---|
-| Brain configuration | `SOUL.md` + `SOUL_GOVERNANCE.md` + `CLAUDE.md` with full governance | `CLAUDE.md` for identity, boundaries, rules, and output contract |
+| Brain configuration | Multi-file governance stack for identity, boundaries, and operating rules | `CLAUDE.md` for identity, boundaries, rules, and output contract |
 | Cross-session memory | Structured memory, typed frontmatter, sedimentation, dedupe | Lightweight Markdown memory files injected into the prompt |
 | Task governance | Inbox, watching, patrol, backlog SSOT | Minimal design target: simplified inbox and watching surfaces |
 | Fleet | Main brain machine + other nodes + cross-machine dispatch | Single-machine only |
@@ -254,9 +258,9 @@ These limitations are intentionally not softened.
 
 | 限制 | 說明 |
 |---|---|
-| 需要 Claude Max Plan | claude CLI `--dangerously-bypass-approvals-and-sandbox` 要訂閱 Claude Max，免費帳號不支援 |
+| 需要 Claude Max Plan | 真實 Claude worker 若開啟 approval/sandbox bypass，需確認帳號與 CLI 模式支援 |
 | 單用戶設計 | 一個 TG Bot 只綁一個管理員 ID，不適合多人共用 |
-| 無多節點 | 只跑在單台機器，不支援 A機+B機 fleet 派工 |
+| 無多節點 | 只跑在單台機器，不支援多節點 fleet 派工 |
 | Windows PATH 設定 | Claude CLI 在 Windows 需要確認 PATH 包含 claude.cmd |
 | 記憶是文字注入非 RAG | 記憶量大時 context 會撐大；建議定期整理 `memory/facts.md` |
 | 不適合長跑任務 | 超過 10 分鐘的任務沒有斷點續傳機制（AIWFF 完整版才有） |
@@ -266,10 +270,10 @@ These limitations are intentionally not softened.
 | Phase | Status | Scope |
 |---|---|---|
 | Phase 1 | ✅ Done | Mock-first task lifecycle, local file-bus, WebUI, demo verification |
-| Phase 2 | ✅ Done | Claude CLI worker, TG Bot polling, `CLAUDE.md` brain configuration, lightweight memory injection |
+| Phase 2 | PR branch / not public baseline until merged | Claude CLI worker, TG Bot polling, `CLAUDE.md` brain configuration, lightweight memory injection |
 | Phase 3 | ⬜ Planned | Memory Layer hardening: better extraction, organization, and long-term context management |
 
-Phase 2 is the current public baseline. Phase 3 should deepen memory management without hiding the file-backed runtime model.
+Until this PR is merged, the public `master` baseline remains Phase 1. Phase 2 is the current PR branch scope.
 
 ## License
 
