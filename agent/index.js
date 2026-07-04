@@ -10,8 +10,11 @@ loadDotEnv();
 const DATA_DIR = path.join(ROOT_DIR, 'data');
 const TASKS_DIR = path.join(DATA_DIR, 'tasks');
 const ARTIFACTS_DIR = path.join(DATA_DIR, 'artifacts');
+const INBOX_DIR = path.join(DATA_DIR, 'inbox');
 const MEMORY_DIR = path.join(ROOT_DIR, 'memory');
 const PORT = Number(process.env.PORT || 3100);
+const DEFAULT_WORKER_TIMEOUT_SEC = 600;
+const MAX_WORKER_TIMEOUT_SEC = 3600;
 let tgOffset = 0;
 const tgPendingNotify = {};
 
@@ -41,6 +44,7 @@ function loadDotEnv() {
 function ensureDirectories() {
   fs.mkdirSync(TASKS_DIR, { recursive: true });
   fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
+  fs.mkdirSync(INBOX_DIR, { recursive: true });
 }
 
 function nowIso() {
@@ -53,6 +57,10 @@ function taskPath(taskId) {
 
 function progressPath(taskId) {
   return path.join(TASKS_DIR, `${taskId}.progress.jsonl`);
+}
+
+function inboxPath(taskId, eventName) {
+  return path.join(INBOX_DIR, `${taskId}.${eventName}.json`);
 }
 
 function isSafeTaskId(taskId) {
@@ -178,6 +186,62 @@ function taskSummary(task) {
   } catch (_) {
     return '';
   }
+}
+
+function taskEventSummary(task) {
+  if (task.status === 'blocked') {
+    return task.blocked_reason ? `blocked: ${task.blocked_reason}` : 'blocked';
+  }
+  if (task.status === 'done') {
+    return taskSummary(task) || task.artifact_path || 'done';
+  }
+  return taskSummary(task) || task.error || task.instruction || '';
+}
+
+function writeInboxEvent(task, eventName) {
+  if (!task || !isSafeTaskId(task.id) || !isSafeTaskId(eventName)) {
+    return;
+  }
+  ensureDirectories();
+  const event = {
+    task_id: task.id,
+    event: eventName,
+    status: task.status,
+    title: task.title || task.id,
+    timestamp: nowIso(),
+    ts: Date.now(),
+    summary: taskEventSummary(task),
+  };
+  writeJsonFile(inboxPath(task.id, eventName), event);
+}
+
+function listInboxEvents() {
+  ensureDirectories();
+  return fs
+    .readdirSync(INBOX_DIR)
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => {
+      try {
+        const event = readJsonFile(path.join(INBOX_DIR, name));
+        return { ...event, file: name };
+      } catch (error) {
+        return {
+          file: name,
+          event: 'unreadable',
+          status: 'blocked',
+          title: 'Unreadable inbox event',
+          timestamp: nowIso(),
+          ts: Date.now(),
+          summary: error.message,
+        };
+      }
+    })
+    .sort((a, b) => {
+      const left = Number(a.ts) || Date.parse(a.timestamp || '') || 0;
+      const right = Number(b.ts) || Date.parse(b.timestamp || '') || 0;
+      return right - left;
+    })
+    .slice(0, 100);
 }
 
 function parseProgressLine(line) {
@@ -344,6 +408,22 @@ function renderHome() {
       border-bottom-color: #5fe6ff;
       text-shadow: 0 0 10px rgba(95,230,255,.4);
     }
+    .tab-badge {
+      display: inline-flex;
+      min-width: 18px;
+      height: 18px;
+      margin-left: 6px;
+      padding: 0 5px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 9px;
+      background: var(--red);
+      color: white;
+      font-size: 10px;
+      font-weight: 700;
+      vertical-align: middle;
+    }
+    .tab-badge.empty { display: none; }
     .tab.locked {
       color: oklch(50% 0.03 250);
       cursor: not-allowed;
@@ -693,6 +773,7 @@ function renderHome() {
     <span class="ws-dot" id="live-dot" title="live"></span>
     <span class="stat">active <span class="num" id="top-active">—</span></span>
     <span class="stat">todo <span class="num" id="top-todo">—</span></span>
+    <span class="stat">inbox <span class="num" id="top-inbox">—</span></span>
     <span class="stat">runtime <span class="num" id="top-runtime">等待 daemon…</span></span>
     <span class="grow"></span>
     <span class="stat" style="color:#3f9fc4">open base · live endpoint</span>
@@ -701,9 +782,9 @@ function renderHome() {
   <nav class="tabs">
     <div class="tab active" data-pane="hud">🛰 HUD</div>
     <div class="tab" data-pane="chat">對話</div>
-    <div class="tab" data-pane="console">控制台</div>
+    <div class="tab" data-pane="console">控制台<span class="tab-badge empty" id="nav-inbox-badge">0</span></div>
     <div class="tab locked">額度/成本</div>
-    <div class="tab locked">工廠直播</div>
+    <div class="tab locked">擴充槽</div>
   </nav>
 
   <main>
@@ -835,12 +916,14 @@ function renderHome() {
       health: null,
       tasks: [],
       events: [],
+      inboxEvents: [],
       progress: {},
       lastEventTs: 0,
       endpoints: {
         health: false,
         tasks: false,
-        events: false
+        events: false,
+        inbox: false
       }
     };
 
@@ -883,6 +966,7 @@ function renderHome() {
       var value = String(status || '').toLowerCase();
       if (value === 'running' || value === 'doing' || value === 'active') return 'run';
       if (value === 'done' || value === 'completed' || value === 'success') return 'done';
+      if (value === 'blocked' || value === 'timeout') return 'blocked';
       if (value === 'failed' || value === 'error' || value === 'fatal') return 'failed';
       return 'todo';
     }
@@ -891,6 +975,7 @@ function renderHome() {
       var value = normalizeStatus(status);
       if (value === 'run') return 'RUN';
       if (value === 'done') return 'OK';
+      if (value === 'blocked') return 'BLOCK';
       if (value === 'failed') return 'ERR';
       return 'IDLE';
     }
@@ -899,6 +984,7 @@ function renderHome() {
       var value = normalizeStatus(status);
       if (value === 'run') return 'run';
       if (value === 'done') return 'done';
+      if (value === 'blocked') return 'fail';
       if (value === 'failed') return 'fail';
       return 'todo';
     }
@@ -907,6 +993,7 @@ function renderHome() {
       var value = normalizeStatus(status);
       if (value === 'run') return 'run';
       if (value === 'done') return 'ok';
+      if (value === 'blocked') return 'fail';
       if (value === 'failed') return 'fail';
       return 'wait';
     }
@@ -915,16 +1002,18 @@ function renderHome() {
       var value = normalizeStatus(status);
       if (value === 'run') return 'run';
       if (value === 'done') return 'ok';
+      if (value === 'blocked') return 'fail';
       if (value === 'failed') return 'fail';
       return 'idle';
     }
 
     function counts() {
-      var result = { total: state.tasks.length, run: 0, todo: 0, done: 0, failed: 0 };
+      var result = { total: state.tasks.length, run: 0, todo: 0, done: 0, failed: 0, blocked: 0 };
       state.tasks.forEach(function(task) {
         var status = normalizeStatus(task.status);
         if (status === 'run') result.run += 1;
         else if (status === 'done') result.done += 1;
+        else if (status === 'blocked') result.blocked += 1;
         else if (status === 'failed') result.failed += 1;
         else result.todo += 1;
       });
@@ -954,6 +1043,7 @@ function renderHome() {
       }
       if (parsed != null) return { pct: parsed, label: parsed + '%', lines: lines };
       if (status === 'done') return { pct: 100, label: 'done', lines: lines };
+      if (status === 'blocked') return { pct: 100, label: 'blocked', lines: lines };
       if (status === 'failed') return { pct: 100, label: 'failed', lines: lines };
       if (status === 'run') return { pct: clamp(18 + lines.length * 12, 18, 92), label: lines.length ? 'log ' + lines.length : 'running', lines: lines };
       return { pct: lines.length ? clamp(lines.length * 12, 8, 60) : 0, label: lines.length ? 'log ' + lines.length : 'pending', lines: lines };
@@ -982,8 +1072,8 @@ function renderHome() {
     }
 
     function endpointText() {
-      if (state.endpoints.health && state.endpoints.tasks && state.endpoints.events) return 'online';
-      if (state.endpoints.tasks || state.endpoints.events || state.endpoints.health) return 'partial';
+      if (state.endpoints.health && state.endpoints.tasks && state.endpoints.events && state.endpoints.inbox) return 'online';
+      if (state.endpoints.tasks || state.endpoints.events || state.endpoints.health || state.endpoints.inbox) return 'partial';
       return '等待 daemon…';
     }
 
@@ -999,9 +1089,16 @@ function renderHome() {
 
     function renderTopbar() {
       var c = counts();
+      var inboxCount = state.inboxEvents.length;
       setText('top-active', String(c.run));
       setText('top-todo', String(c.todo));
+      setText('top-inbox', String(inboxCount));
       setText('top-runtime', endpointText());
+      var badge = document.getElementById('nav-inbox-badge');
+      if (badge) {
+        badge.textContent = String(inboxCount);
+        badge.className = inboxCount ? 'tab-badge' : 'tab-badge empty';
+      }
       var dot = document.getElementById('live-dot');
       if (dot) dot.className = state.endpoints.health ? 'ws-dot' : 'ws-dot down';
     }
@@ -1096,7 +1193,7 @@ function renderHome() {
       setText('kpi-run', String(c.run));
       setText('kpi-todo', String(c.todo));
       setText('kpi-done', String(c.done));
-      setText('kpi-fail', String(c.failed));
+      setText('kpi-fail', String(c.failed + c.blocked));
       var items = latestTasks(8);
       setHtml('console-task-list', items.length ? items.map(function(task) {
         return '<div class="row"><span class="nm">' + escapeHtml(taskTitle(task)) + '</span><span class="pill-s ' + pillClass(task.status) + '">' + escapeHtml(normalizeStatus(task.status)) + '</span></div>';
@@ -1111,6 +1208,7 @@ function renderHome() {
       var status = normalizeStatus(event.status);
       if (status === 'done') return 'ok';
       if (status === 'run') return 'run';
+      if (status === 'blocked') return 'fail';
       if (status === 'failed') return 'fail';
       return '';
     }
@@ -1154,7 +1252,7 @@ function renderHome() {
 
     function renderMiniBars(eventCount) {
       var c = counts();
-      var values = [c.todo, c.run, c.done, c.failed, eventCount, state.progressLineCount || 0, c.total, state.endpoints.health ? 1 : 0];
+      var values = [c.todo, c.run, c.done, c.failed + c.blocked, eventCount, state.progressLineCount || 0, c.total, state.endpoints.health ? 1 : 0];
       var max = Math.max.apply(null, values.concat([1]));
       var html = values.map(function(value) {
         var h = clamp(Math.round((value / max) * 100), value ? 18 : 4, 100);
@@ -1246,6 +1344,19 @@ function renderHome() {
       }
     }
 
+    async function pollInbox() {
+      try {
+        var res = await fetch('/api/inbox');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var data = await res.json();
+        state.inboxEvents = Array.isArray(data.events) ? data.events : [];
+        state.endpoints.inbox = true;
+      } catch (error) {
+        state.inboxEvents = [];
+        state.endpoints.inbox = false;
+      }
+    }
+
     async function pollProgressForVisibleTasks() {
       var items = latestTasks(8);
       var totalLines = 0;
@@ -1283,7 +1394,7 @@ function renderHome() {
     }
 
     async function refresh() {
-      await Promise.all([pollHealth(), pollTasks(), pollEvents()]);
+      await Promise.all([pollHealth(), pollTasks(), pollEvents(), pollInbox()]);
       renderAll();
     }
 
@@ -1472,14 +1583,23 @@ function renderHome() {
 </html>`;
 }
 
-function spawnMockWorker(taskId) {
+function spawnMockWorker(task) {
+  const taskId = task.id;
+  const timeoutMs = normalizeWorkerTimeoutSec(task) * 1000;
+  let timedOut = false;
   const child = spawn('node', ['examples/mock-worker/worker.js', taskId], {
     cwd: ROOT_DIR,
     detached: true,
     stdio: 'ignore',
   });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    markTaskBlockedByTimeout(taskId, task);
+    child.kill();
+  }, timeoutMs);
 
   child.on('error', (error) => {
+    clearTimeout(timer);
     const task = readTask(taskId);
     if (!task) {
       return;
@@ -1488,6 +1608,21 @@ function spawnMockWorker(taskId) {
     task.error = error.message;
     task.updated_at = nowIso();
     writeJsonFile(taskPath(taskId), task);
+  });
+
+  child.on('close', () => {
+    clearTimeout(timer);
+    if (timedOut) {
+      return;
+    }
+    const latestTask = readTask(taskId);
+    if (!latestTask) {
+      return;
+    }
+    if (latestTask.status === 'done' || latestTask.status === 'blocked') {
+      writeInboxEvent(latestTask, latestTask.status);
+      notifyTelegramTaskDone(latestTask);
+    }
   });
 
   child.unref();
@@ -1503,6 +1638,31 @@ function artifactResultRef(taskId) {
 
 function appendProgressText(taskId, line) {
   fs.appendFileSync(progressPath(taskId), `${JSON.stringify({ ts: Date.now(), text: line })}\n`);
+}
+
+function normalizeWorkerTimeoutSec(task) {
+  const value = Number(task && task.timeout_sec);
+  if (!Number.isInteger(value) || value <= 0) {
+    return DEFAULT_WORKER_TIMEOUT_SEC;
+  }
+  return Math.min(value, MAX_WORKER_TIMEOUT_SEC);
+}
+
+function normalizeOptionalTimeoutSec(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.min(parsed, MAX_WORKER_TIMEOUT_SEC);
+}
+
+function markTaskBlockedByTimeout(taskId, fallbackTask) {
+  const currentTask = readTask(taskId) || fallbackTask;
+  if (!currentTask || currentTask.status === 'done' || currentTask.status === 'blocked') {
+    return currentTask;
+  }
+  appendProgressText(taskId, `Worker timed out after ${normalizeWorkerTimeoutSec(currentTask)} seconds`);
+  return updateTaskStatus(currentTask, 'blocked', { blocked_reason: 'timeout' });
 }
 
 function pipeStdoutProgress(taskId, stream) {
@@ -1530,10 +1690,14 @@ function notifyTelegramTaskDone(task) {
   if (!chatId || !process.env.TG_BOT_TOKEN) {
     return;
   }
-  const resultText =
-    task.status === 'done'
-      ? `✅ 任務完成：${task.title}\n結果：${task.artifact_path}`
-      : `❌ 任務失敗：${task.title}\n原因：${task.error || '未知'}`;
+  let resultText;
+  if (task.status === 'done') {
+    resultText = `✅ 任務完成：${task.title}\n結果：${task.artifact_path}`;
+  } else if (task.status === 'blocked') {
+    resultText = `⚠️ 任務卡住：${task.title}\n原因：${task.blocked_reason || '未知'}`;
+  } else {
+    resultText = `❌ 任務失敗：${task.title}\n原因：${task.error || '未知'}`;
+  }
   tgRequest(process.env.TG_BOT_TOKEN, 'sendMessage', { chat_id: chatId, text: resultText }).catch(() => {});
   delete tgPendingNotify[task.id];
 }
@@ -1560,6 +1724,7 @@ ${preferences}
 }
 
 function updateTaskStatus(task, status, extra = {}) {
+  const previousStatus = task.status;
   const nextTask = {
     ...task,
     ...extra,
@@ -1567,6 +1732,9 @@ function updateTaskStatus(task, status, extra = {}) {
     updated_at: nowIso(),
   };
   writeJsonFile(taskPath(task.id), nextTask);
+  if ((status === 'done' || status === 'blocked') && previousStatus !== status) {
+    writeInboxEvent(nextTask, status);
+  }
   return nextTask;
 }
 
@@ -1599,6 +1767,7 @@ function spawnClaudeWorker(task) {
   const claudeCmd = process.env.CLAUDE_CMD || 'claude';
   const fullPrompt = buildClaudePrompt(task);
   const runningTask = updateTaskStatus(task, 'running');
+  const timeoutMs = normalizeWorkerTimeoutSec(task) * 1000;
   const args = ['--print'];
   if (envFlag('CLAUDE_BYPASS_APPROVALS')) {
     args.unshift('--dangerously-skip-permissions');
@@ -1606,6 +1775,15 @@ function spawnClaudeWorker(task) {
   const child = spawnClaudeProcess(claudeCmd, args);
   let spawnError = null;
   let stderr = '';
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    const blockedTask = markTaskBlockedByTimeout(task.id, runningTask);
+    if (blockedTask) {
+      notifyTelegramTaskDone(blockedTask);
+    }
+    child.kill();
+  }, timeoutMs);
 
   pipeStdoutProgress(task.id, child.stdout);
   child.stderr.setEncoding('utf8');
@@ -1623,6 +1801,10 @@ function spawnClaudeWorker(task) {
   child.stdin.end(fullPrompt);
 
   child.on('close', (code, signal) => {
+    clearTimeout(timer);
+    if (timedOut) {
+      return;
+    }
     const currentTask = readTask(task.id) || runningTask;
     let nextTask;
     if (spawnError) {
@@ -1648,14 +1830,15 @@ function shouldUseMockWorker() {
 
 function startTaskWorker(task) {
   if (shouldUseMockWorker()) {
-    spawnMockWorker(task.id);
+    spawnMockWorker(task);
     return;
   }
   spawnClaudeWorker(task);
 }
 
-function createTaskObject(title, instruction) {
+function createTaskObject(title, instruction, options = {}) {
   const timestamp = nowIso();
+  const timeoutSec = normalizeOptionalTimeoutSec(options.timeout_sec);
   const task = {
     id: crypto.randomUUID(),
     title,
@@ -1664,6 +1847,9 @@ function createTaskObject(title, instruction) {
     created_at: timestamp,
     updated_at: timestamp,
   };
+  if (timeoutSec != null) {
+    task.timeout_sec = timeoutSec;
+  }
 
   writeJsonFile(taskPath(task.id), task);
   startTaskWorker(task);
@@ -1692,7 +1878,7 @@ async function createTask(req, res) {
     typeof payload.instruction === 'string' && payload.instruction.trim()
       ? payload.instruction.trim()
       : 'Run the mock worker lifecycle.';
-  const task = createTaskObject(title, instruction);
+  const task = createTaskObject(title, instruction, { timeout_sec: payload.timeout_sec });
   sendJson(res, 201, task);
 }
 
@@ -1797,6 +1983,12 @@ async function handleRequest(req, res) {
     const parsedSince = rawSince == null ? NaN : Number(rawSince);
     const sinceMs = Number.isFinite(parsedSince) ? parsedSince : Date.now() - 30 * 60 * 1000;
     sendJson(res, 200, { ok: true, events: listTaskEvents(sinceMs) });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/inbox') {
+    const events = listInboxEvents();
+    sendJson(res, 200, { ok: true, unread: events.length, events });
     return;
   }
 
