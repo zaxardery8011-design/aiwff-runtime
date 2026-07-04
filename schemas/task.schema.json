@@ -20,7 +20,7 @@
     },
     "status": {
       "type": "string",
-      "enum": ["pending", "running", "done", "failed"]
+      "enum": ["pending", "running", "done", "failed", "blocked"]
     },
     "created_at": {
       "type": "string",
@@ -34,6 +34,14 @@
       "type": "string"
     },
     "error": {
+      "type": "string"
+    },
+    "timeout_sec": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3600
+    },
+    "blocked_reason": {
       "type": "string"
     }
   }
