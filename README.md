@@ -1,5 +1,7 @@
 # aiwff-runtime
 
+> 繁體中文說明 → [README.zh-TW.md](README.zh-TW.md)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)]()
 
