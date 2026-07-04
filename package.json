@@ -11,7 +11,8 @@
     "doctor": "node scripts/doctor.js",
     "demo": "node scripts/demo.js",
     "verify-demo": "node scripts/verify-demo.js",
-    "test": "node tests/smoke.test.js",
+    "test": "node tests/smoke.test.js && node --test tests/reliability.test.js",
+    "scan:ip": "node scripts/ip-redline-scan.js",
     "web": "node agent/index.js"
   }
 }
