@@ -1,0 +1,1600 @@
+<!doctype html>
+<html lang="zh-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIWFF Runtime 控制台</title>
+  <script>
+    (function() {
+      try {
+        var theme = localStorage.getItem('aiwff_runtime_theme');
+        if (theme && theme !== 'default') {
+          document.documentElement.setAttribute('data-theme', theme);
+        }
+      } catch (_) {}
+    })();
+  </script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg-0: oklch(13% 0.018 250);
+      --bg-1: oklch(17% 0.018 250);
+      --bg-2: oklch(22% 0.02 250);
+      --bg-3: oklch(28% 0.024 250);
+      --fg-0: oklch(88% 0.025 250);
+      --fg-1: oklch(70% 0.035 250);
+      --fg-2: oklch(52% 0.035 250);
+      --accent: oklch(72% 0.15 250);
+      --accent-2: oklch(70% 0.16 278);
+      --green: oklch(76% 0.16 160);
+      --yellow: oklch(82% 0.14 78);
+      --red: oklch(68% 0.17 24);
+      --border: oklch(30% 0.026 250);
+      --border-soft: color-mix(in oklch, var(--border), transparent 34%);
+      --panel-glow: 0 16px 50px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.035);
+      --shadow: 0 12px 34px rgba(0,0,0,0.32);
+    }
+
+    [data-theme="dracula"] {
+      --bg-0:#282a36; --bg-1:#22232e; --bg-2:#343746; --bg-3:#44475a;
+      --fg-0:#f8f8f2; --fg-1:#c8cad4; --fg-2:#6272a4;
+      --accent:#bd93f9; --accent-2:#ff79c6;
+      --green:#50fa7b; --yellow:#f1fa8c; --red:#ff5555; --border:#44475a;
+    }
+    [data-theme="nord"] {
+      --bg-0:#2e3440; --bg-1:#2a2f3a; --bg-2:#3b4252; --bg-3:#434c5e;
+      --fg-0:#eceff4; --fg-1:#d8dee9; --fg-2:#7b88a1;
+      --accent:#88c0d0; --accent-2:#81a1c1;
+      --green:#a3be8c; --yellow:#ebcb8b; --red:#bf616a; --border:#4c566a;
+    }
+    [data-theme="tokyonight"] {
+      --bg-0:#1a1b26; --bg-1:#16161e; --bg-2:#24283b; --bg-3:#292e42;
+      --fg-0:#c0caf5; --fg-1:#a9b1d6; --fg-2:#565f89;
+      --accent:#7aa2f7; --accent-2:#bb9af7;
+      --green:#9ece6a; --yellow:#e0af68; --red:#f7768e; --border:#292e42;
+    }
+    [data-theme="gruvbox"] {
+      --bg-0:#282828; --bg-1:#1d2021; --bg-2:#3c3836; --bg-3:#504945;
+      --fg-0:#fbf1c7; --fg-1:#d5c4a1; --fg-2:#a89984;
+      --accent:#fe8019; --accent-2:#fabd2f;
+      --green:#b8bb26; --yellow:#fabd2f; --red:#fb4934; --border:#504945;
+    }
+    [data-theme="everforest"] {
+      --bg-0:#2d353b; --bg-1:#272e33; --bg-2:#333c43; --bg-3:#475258;
+      --fg-0:#d3c6aa; --fg-1:#a6b0a0; --fg-2:#7a8478;
+      --accent:#7fbbb3; --accent-2:#a7c080;
+      --green:#a7c080; --yellow:#dbbc7f; --red:#e67e80; --border:#475258;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: "Inter", -apple-system, "Segoe UI", "Noto Sans TC", sans-serif;
+      background:
+        radial-gradient(circle at 12% -8%, rgba(110,168,255,0.14), transparent 34%),
+        radial-gradient(circle at 92% 8%, rgba(139,110,255,0.12), transparent 30%),
+        var(--bg-0);
+      color: var(--fg-0);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    button, input, textarea, select { font: inherit; }
+    button { cursor: pointer; }
+
+    .shell {
+      height: 100vh;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .topbar {
+      background: color-mix(in oklch, var(--bg-1), transparent 8%);
+      border-bottom: 1px solid var(--border-soft);
+      padding: 10px 18px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-shrink: 0;
+    }
+    .topbar h1 {
+      font-size: 14px;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+    .topbar .grow { flex: 1; }
+    .stat {
+      background: linear-gradient(180deg, color-mix(in oklch, var(--bg-2), white 3%), var(--bg-2));
+      padding: 4px 10px;
+      border-radius: 10px;
+      font-size: 11px;
+      color: var(--fg-1);
+      border: 1px solid var(--border-soft);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
+      white-space: nowrap;
+    }
+    .stat.alert { background: #3a2a00; color: var(--yellow); border-color: #5a4400; }
+    .stat.ok { color: var(--green); border-color: color-mix(in oklch, var(--green), transparent 52%); }
+    .stat .num { color: var(--accent); font-weight: 600; }
+    .ws-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--fg-2);
+      transition: 0.3s;
+      flex-shrink: 0;
+    }
+    .ws-dot.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .top-btn {
+      background: linear-gradient(180deg, color-mix(in oklch, var(--bg-2), white 4%), var(--bg-2));
+      color: var(--fg-0);
+      border: 1px solid var(--border-soft);
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      transition: 0.15s;
+    }
+    .top-btn:hover, .top-btn:focus-visible {
+      background: var(--bg-3);
+      border-color: var(--accent);
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(110,168,255,0.08);
+    }
+
+    .tabs {
+      background: color-mix(in oklch, var(--bg-1), transparent 12%);
+      border-bottom: 1px solid var(--border-soft);
+      display: flex;
+      padding: 0 18px;
+      flex-shrink: 0;
+      overflow-x: auto;
+    }
+    .tab {
+      padding: 10px 18px;
+      color: var(--fg-1);
+      border: 0;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      background: transparent;
+      font-size: 12px;
+      font-weight: 500;
+      transition: 0.15s;
+      white-space: nowrap;
+    }
+    .tab:hover, .tab:focus-visible { color: var(--fg-0); outline: none; }
+    .tab.active, .tab[aria-selected="true"] {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      background: linear-gradient(180deg, transparent, rgba(110,168,255,0.055));
+    }
+
+    main {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+      position: relative;
+    }
+    .view {
+      display: none;
+      height: 100%;
+      overflow-y: auto;
+      padding: 16px;
+    }
+    .view.active { display: block; }
+    #view-hud {
+      padding: 0;
+      overflow: hidden;
+      background:
+        linear-gradient(rgba(74, 198, 255, 0.055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(74, 198, 255, 0.045) 1px, transparent 1px),
+        radial-gradient(circle at 18% 10%, rgba(57, 204, 255, 0.18), transparent 34%),
+        radial-gradient(circle at 82% 4%, rgba(92, 129, 255, 0.15), transparent 28%),
+        var(--bg-0);
+      background-size: 34px 34px, 34px 34px, auto, auto, auto;
+    }
+
+    .grid {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+    .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .split {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: 12px;
+    }
+    .panel {
+      min-width: 0;
+      background: linear-gradient(180deg, color-mix(in oklch, var(--bg-1), white 3%), var(--bg-1));
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      box-shadow: var(--panel-glow);
+      overflow: hidden;
+    }
+    .panel > h2 {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border-soft);
+      color: color-mix(in oklch, var(--fg-1), var(--accent) 22%);
+      font-size: 10.5px;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      font-weight: 700;
+    }
+    .panel-body { padding: 12px 14px; }
+
+    .metric-row, .kv-row, .event-row, .task-row, .memory-row, .check-row {
+      display: grid;
+      gap: 10px;
+      align-items: start;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .metric-row:last-child, .kv-row:last-child, .event-row:last-child,
+    .task-row:last-child, .memory-row:last-child, .check-row:last-child { border-bottom: 0; }
+    .metric-row { grid-template-columns: 1fr auto; }
+    .kv-row { grid-template-columns: 180px minmax(0, 1fr); }
+    .event-row { grid-template-columns: 128px 110px minmax(0, 1fr); }
+    .task-row { grid-template-columns: 96px minmax(0, 1fr) 160px; }
+    .memory-row { grid-template-columns: minmax(0, 1fr) 96px 148px; }
+    .check-row { grid-template-columns: 22px minmax(0, 1fr); }
+    .metric {
+      font-size: 30px;
+      line-height: 1;
+      font-weight: 800;
+      color: var(--fg-0);
+      text-shadow: 0 0 16px rgba(95,230,255,.34);
+    }
+    .muted { color: var(--fg-2); }
+    .soft { color: var(--fg-1); }
+    .accent { color: var(--accent); }
+    .ok { color: var(--green); }
+    .warn { color: var(--yellow); }
+    .fail { color: var(--red); }
+    .mono, code, pre { font-family: "Cascadia Code", "Cascadia Mono", "Consolas", monospace; }
+    .task-title { font-weight: 700; overflow-wrap: anywhere; }
+    .status {
+      display: inline-flex;
+      min-height: 22px;
+      align-items: center;
+      padding: 1px 8px;
+      border-radius: 999px;
+      background: color-mix(in oklch, var(--bg-2), transparent 16%);
+      border: 1px solid var(--border-soft);
+      color: var(--fg-1);
+      white-space: nowrap;
+      font-size: 11px;
+    }
+    .status.done { color: var(--green); }
+    .status.running, .status.pending { color: var(--accent); }
+    .status.blocked { color: var(--yellow); }
+    .status.failed { color: var(--red); }
+    pre {
+      margin: 0;
+      max-height: 460px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--fg-1);
+      background: var(--bg-0);
+      border: 1px solid var(--border-soft);
+      border-radius: 6px;
+      padding: 10px;
+    }
+    form { display: grid; gap: 10px; }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--fg-2);
+      font-size: 12px;
+    }
+    input, textarea, select {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg-2);
+      color: var(--fg-0);
+      padding: 8px 10px;
+    }
+    textarea { min-height: 180px; resize: vertical; }
+    input:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(110,168,255,0.08);
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: flex-end;
+    }
+    .primary {
+      min-height: 38px;
+      padding: 0 13px;
+      background: var(--accent);
+      color: #fff;
+      border: 0;
+      border-radius: 8px;
+      font-weight: 700;
+    }
+    .empty {
+      text-align: center;
+      padding: 24px 12px;
+      color: var(--fg-2);
+      font-style: italic;
+      font-size: 12px;
+    }
+    #view-new-task {
+      padding: 0;
+      overflow: hidden;
+    }
+    #view-new-task.active { display: flex; }
+    .task-chat {
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-0);
+    }
+    .chat-messages {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .msg {
+      max-width: 760px;
+      padding: 10px 14px;
+      border-radius: 10px;
+      word-break: break-word;
+      white-space: pre-wrap;
+      line-height: 1.6;
+      box-shadow: var(--panel-glow);
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #fff;
+      border-bottom-right-radius: 3px;
+    }
+    .msg.assistant {
+      align-self: flex-start;
+      background: var(--bg-2);
+      border: 1px solid var(--border-soft);
+      border-bottom-left-radius: 3px;
+    }
+    .msg.system {
+      align-self: flex-start;
+      max-width: 720px;
+      background: var(--bg-1);
+      border: 1px dashed var(--border-soft);
+      color: var(--fg-1);
+      border-radius: 8px;
+      box-shadow: none;
+    }
+    .msg .meta {
+      display: block;
+      margin-top: 4px;
+      font-size: 10px;
+      color: color-mix(in oklch, var(--fg-2), white 12%);
+    }
+    .chat-input {
+      flex-shrink: 0;
+      padding: 14px 24px;
+      border-top: 1px solid var(--border-soft);
+      background: var(--bg-1);
+    }
+    .chat-input-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 44px auto;
+      gap: 10px;
+      align-items: end;
+    }
+    .chat-input textarea {
+      min-height: 42px;
+      max-height: 180px;
+      resize: none;
+      line-height: 1.5;
+      border-radius: 8px;
+      padding: 10px 14px;
+    }
+    .chat-input textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(110,168,255,0.08);
+    }
+    .chat-submit {
+      width: 44px;
+      height: 42px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 800;
+      font-size: 15px;
+    }
+    .chat-submit:disabled {
+      cursor: not-allowed;
+      background: var(--fg-2);
+    }
+    .chat-state-badge {
+      min-height: 42px;
+      display: inline-flex;
+      align-items: center;
+      white-space: nowrap;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border-soft);
+      background: var(--bg-2);
+      color: var(--fg-1);
+      font-size: 11px;
+      letter-spacing: 0.6px;
+    }
+    .listbox { max-height: 540px; overflow: auto; }
+    .list-button {
+      width: 100%;
+      min-height: 38px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 6px;
+      padding: 7px 9px;
+      text-align: left;
+      border: 1px solid var(--border-soft);
+      border-radius: 6px;
+      background: var(--bg-2);
+      color: var(--fg-0);
+    }
+    .list-button.active {
+      border-color: var(--accent);
+      background: color-mix(in oklch, var(--bg-2), var(--accent) 10%);
+    }
+    .log-block { display: grid; gap: 8px; margin-bottom: 12px; }
+
+    /* JARVIS HUD reactor overlay, adapted to public-safe runtime endpoints. */
+    #view-hud { position: relative; }
+    .jhud {
+      position: absolute;
+      inset: 0;
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 300px 1fr 300px;
+      grid-template-rows: 48px 1fr 1fr;
+      grid-template-areas: "jt jt jt" "ja jc jl" "jw jc jr";
+      font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+      color: #5fe6ff;
+      background: radial-gradient(circle at 50% 48%, rgba(27,159,255,.10), transparent 44%), var(--bg-0);
+    }
+    .jhud::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      background-image:
+        linear-gradient(rgba(95,230,255,.06) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(95,230,255,.06) 1px, transparent 1px);
+      background-size: 44px 44px;
+      -webkit-mask: radial-gradient(circle at 50% 50%, #000 56%, transparent 94%);
+      mask: radial-gradient(circle at 50% 50%, #000 56%, transparent 94%);
+    }
+    .jhud > * { position: relative; z-index: 1; }
+    .jhud-top {
+      grid-area: jt;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      border: 1px solid rgba(95,230,255,.14);
+      border-radius: 8px;
+      padding: 0 16px;
+      background: linear-gradient(180deg, rgba(8,28,48,.5), rgba(4,16,31,.25));
+      clip-path: polygon(0 0, 100% 0, 100% 64%, calc(100% - 16px) 100%, 16px 100%, 0 64%);
+    }
+    .jhud-brand {
+      font-weight: 700;
+      letter-spacing: 3px;
+      font-size: 15px;
+      color: #bff3ff;
+      text-shadow: 0 0 16px rgba(95,230,255,.5);
+      white-space: nowrap;
+    }
+    .jhud-brand b { color: #ffb13b; }
+    .jhud-sub {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 11px;
+      letter-spacing: 1px;
+      color: #3f9fc4;
+    }
+    .jhud-spacer { flex: 1; }
+    .jhud-clock {
+      font-size: 14px;
+      letter-spacing: 2px;
+      color: #5fe6ff;
+      text-shadow: 0 0 12px rgba(95,230,255,.5);
+      white-space: nowrap;
+    }
+    .jhud-panel {
+      border: 1px solid rgba(95,230,255,.34);
+      border-radius: 8px;
+      position: relative;
+      overflow: hidden;
+      background: linear-gradient(180deg, rgba(8,26,46,.4), rgba(3,13,26,.26));
+      box-shadow: inset 0 0 28px rgba(27,159,255,.06), 0 0 14px rgba(95,230,255,.10);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .jhud-panel::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 32px;
+      height: 32px;
+      border-top: 2px solid #5fe6ff;
+      border-left: 2px solid #5fe6ff;
+      border-top-left-radius: 8px;
+      opacity: .85;
+    }
+    .jhud-panel::after {
+      content: "";
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      width: 32px;
+      height: 32px;
+      border-bottom: 2px solid #5fe6ff;
+      border-right: 2px solid #5fe6ff;
+      border-bottom-right-radius: 8px;
+      opacity: .85;
+    }
+    .jhud-ph {
+      font-size: 11px;
+      letter-spacing: 2px;
+      color: #9fe9ff;
+      margin-bottom: 10px;
+      flex-shrink: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      text-shadow: 0 0 8px rgba(95,230,255,.35);
+    }
+    .jhud-ph span:last-child {
+      color: #3f9fc4;
+      letter-spacing: 1px;
+      font-size: 10px;
+    }
+    .jhud-agent { grid-area: ja; }
+    .jhud-work-panel { grid-area: jw; }
+    .jhud-log { grid-area: jl; }
+    .jhud-cost { grid-area: jr; }
+    .jhud-scroll { flex: 1; overflow-y: auto; min-height: 0; }
+    .jhud-core {
+      grid-area: jc;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 0;
+    }
+    #jhud-reactor {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+    .jhud-core-readout {
+      position: relative;
+      z-index: 2;
+      text-align: center;
+      pointer-events: none;
+    }
+    .jhud-core-light {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      margin: 0 auto 10px;
+      background: #4dffb0;
+      box-shadow: 0 0 14px #4dffb0;
+    }
+    .jhud-core-light.warn { background: #ffd76a; box-shadow: 0 0 14px #ffd76a; }
+    .jhud-core-light.bad { background: #ff6b7d; box-shadow: 0 0 14px #ff6b7d; }
+    .jhud-core-state {
+      font-size: 30px;
+      font-weight: 700;
+      letter-spacing: 5px;
+      color: #eafcff;
+      text-shadow: 0 0 22px rgba(95,230,255,.7);
+    }
+    .jhud-core-meta {
+      font-size: 11px;
+      letter-spacing: 2px;
+      color: #3f9fc4;
+      margin-top: 8px;
+    }
+    .jhud-core-sched {
+      margin-top: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      align-items: center;
+    }
+    .jhud-core-sched .hud-readout-row,
+    .jhud-readout .hud-readout-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 10px;
+      letter-spacing: 1px;
+      color: #5fe6ff;
+      border-bottom: 1px solid rgba(74,198,255,0.08);
+      padding-bottom: 5px;
+    }
+    .jhud-core-sched .hud-readout-row b,
+    .jhud-readout .hud-readout-row b {
+      color: #bff3ff;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+    .jhud-readout {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      overflow-y: auto;
+      min-height: 0;
+    }
+    .jhud .metric-row {
+      grid-template-columns: 1fr auto;
+      padding: 6px 0;
+      color: #7fd4ff;
+      border-bottom: 1px solid rgba(74,198,255,0.08);
+    }
+    .jhud .metric-row b { color: #bff3ff; font-weight: 600; }
+    .jhud .metric { font-size: 24px; color: #eafcff; }
+    .hud-log-stream {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+      font-size: 11px;
+      line-height: 1.8;
+      font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+      background: transparent;
+      border: none;
+      padding: 0;
+      color: #7fd4ff;
+      white-space: normal;
+    }
+    .hud-log-line {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: #7fd4ff;
+    }
+    .hud-log-line.warn { color: #ffd76a; }
+    .hud-log-line.error { color: #ff6b7d; }
+
+    @keyframes hudPulse {
+      0%, 100% { transform: scale(0.88); opacity: 0.72; }
+      50% { transform: scale(1.18); opacity: 1; }
+    }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--fg-2); }
+
+    @media (max-width: 1180px) {
+      .jhud {
+        position: relative;
+        min-height: 980px;
+        overflow-y: auto;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        grid-template-rows: 48px 420px minmax(220px, auto) minmax(220px, auto);
+        grid-template-areas: "jt jt" "jc jc" "ja jl" "jw jr";
+      }
+      #view-hud { overflow-y: auto; }
+    }
+    @media (max-width: 980px) {
+      html, body { overflow: auto; }
+      body { min-height: 100%; }
+      .shell { height: auto; min-height: 100vh; }
+      main { overflow: visible; }
+      .view { height: auto; min-height: 0; }
+      .topbar { align-items: flex-start; flex-wrap: wrap; }
+      .topbar .grow { flex-basis: 100%; height: 0; }
+      .grid.cols-2, .grid.cols-3, .split { grid-template-columns: 1fr; }
+      .event-row, .task-row, .memory-row, .kv-row { grid-template-columns: 1fr; }
+      .chat-input-row { grid-template-columns: minmax(0, 1fr) 44px; }
+      .chat-state-badge { grid-column: 1 / -1; justify-content: center; }
+      .jhud {
+        min-height: 0;
+        grid-template-columns: 1fr;
+        grid-template-rows: auto 360px repeat(4, minmax(190px, auto));
+        grid-template-areas: "jt" "jc" "ja" "jw" "jl" "jr";
+      }
+      .jhud-top { clip-path: none; min-height: 54px; flex-wrap: wrap; padding: 8px 12px; }
+      .jhud-core-state { font-size: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <h1>◆ AIWFF Runtime 控制台</h1>
+      <span id="health-dot" class="ws-dot" title="執行狀態"></span>
+      <span class="stat" id="health-chip">狀態 <span class="num" id="health-text">檢查中</span></span>
+      <span class="stat">模式 <span class="num" id="mode-text">-</span></span>
+      <span class="stat">任務 <span class="num" id="task-count">0</span></span>
+      <span class="stat alert" id="blocked-chip">卡住 <span class="num" id="blocked-count">0</span></span>
+      <span class="grow"></span>
+      <select class="top-btn" id="theme-select" title="佈景主題">
+        <option value="default">預設</option>
+        <option value="dracula">Dracula</option>
+        <option value="nord">Nord</option>
+        <option value="tokyonight">Tokyo Night</option>
+        <option value="gruvbox">Gruvbox</option>
+        <option value="everforest">Everforest</option>
+      </select>
+      <button class="top-btn" id="refresh-button" type="button">重新整理</button>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="Runtime 控制台分頁">
+      <button class="tab active" role="tab" aria-selected="true" data-tab="hud" data-tab-label="HUD 儀表">HUD 儀表</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="new-task" data-tab-label="對話 / 新任務">對話 / 新任務</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="tasks" data-tab-label="任務">任務</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="events" data-tab-label="進度 / 事件">進度 / 事件</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="inbox" data-tab-label="收件匣 / 卡住">收件匣 / 卡住</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="memory" data-tab-label="記憶">記憶</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="logs" data-tab-label="紀錄">紀錄</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="doctor" data-tab-label="診斷 / 設定">診斷 / 設定</button>
+    </nav>
+
+    <main>
+      <section id="view-hud" class="view active" aria-labelledby="tab-hud">
+        <div class="jhud">
+          <div class="jhud-top">
+            <div class="jhud-brand">◆ AIWFF <b>·</b> Runtime</div>
+            <div class="jhud-sub" id="hud-summary">等待公開執行資料</div>
+            <div class="jhud-spacer"></div>
+            <div class="jhud-clock" id="hud-clock">--:--:--</div>
+          </div>
+
+          <section class="jhud-panel jhud-agent">
+            <div class="jhud-ph"><span>執行狀態</span><span>/api/hud</span></div>
+            <div class="jhud-scroll" id="hud-runtime"></div>
+          </section>
+
+          <section class="jhud-panel jhud-work-panel">
+            <div class="jhud-ph"><span>工作佇列</span><span>/api/tasks</span></div>
+            <div class="jhud-readout" id="hud-work"></div>
+          </section>
+
+          <div class="jhud-core">
+            <canvas id="jhud-reactor"></canvas>
+            <div class="jhud-core-readout">
+              <div class="jhud-core-light" id="hud-health-light"></div>
+              <div class="jhud-core-state" id="hud-health-text">檢查中</div>
+              <div class="jhud-core-meta" id="hud-health-meta">等待健康狀態</div>
+              <div class="jhud-core-sched" id="hud-schedule-readout">
+                <div class="hud-readout-row"><span>公開邊界</span><b>已啟用</b></div>
+              </div>
+            </div>
+          </div>
+
+          <section class="jhud-panel jhud-log">
+            <div class="jhud-ph"><span>事件串流</span><span>/api/events + /api/logs</span></div>
+            <div class="hud-log-stream" id="hud-log-stream">等待公開事件串流</div>
+          </section>
+
+          <section class="jhud-panel jhud-cost">
+            <div class="jhud-ph"><span>待注意</span><span>/api/inbox</span></div>
+            <div class="jhud-readout" id="hud-attention"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-new-task" class="view">
+        <div class="task-chat" aria-label="用對話建立任務">
+          <div class="chat-messages" id="task-chat-messages" aria-live="polite"></div>
+          <div class="chat-input" id="task-chat-input-box">
+            <div class="chat-input-row">
+              <textarea id="task-chat-text" rows="1" placeholder="輸入新任務… Enter 送出 / Shift+Enter 換行"></textarea>
+              <button class="chat-submit" id="task-chat-send" type="button" title="送出" aria-label="送出">▶</button>
+              <span class="chat-state-badge" id="task-chat-status">IDLE · 待機</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-tasks" class="view">
+        <section class="panel">
+          <h2>任務</h2>
+          <div id="tasks-list" class="panel-body"></div>
+        </section>
+      </section>
+
+      <section id="view-events" class="view">
+        <div class="grid cols-2">
+          <section class="panel">
+            <h2>事件</h2>
+            <div id="events-list" class="panel-body"></div>
+          </section>
+          <section class="panel">
+            <h2>任務進度</h2>
+            <div id="progress-list" class="panel-body"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-inbox" class="view">
+        <div class="grid cols-2">
+          <section class="panel">
+            <h2>收件匣</h2>
+            <div id="inbox-list" class="panel-body"></div>
+          </section>
+          <section class="panel">
+            <h2>卡住</h2>
+            <div id="blocked-list" class="panel-body"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-memory" class="view">
+        <div class="split">
+          <section class="panel">
+            <h2>記憶檔案</h2>
+            <div id="memory-list" class="panel-body listbox"></div>
+          </section>
+          <section class="panel">
+            <h2>記憶內容</h2>
+            <div id="memory-detail" class="panel-body"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-logs" class="view">
+        <section class="panel">
+          <h2>紀錄</h2>
+          <div id="logs-list" class="panel-body"></div>
+        </section>
+      </section>
+
+      <section id="view-doctor" class="view">
+        <div class="grid cols-2">
+          <section class="panel">
+            <h2>診斷</h2>
+            <div id="doctor-list" class="panel-body"></div>
+          </section>
+          <section class="panel">
+            <h2>設定</h2>
+            <div id="settings-list" class="panel-body"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    var state = {
+      health: null,
+      hud: null,
+      tasks: [],
+      events: [],
+      inbox: [],
+      memory: [],
+      logs: null,
+      doctor: null,
+      settings: null,
+      selectedMemory: null,
+      progress: {},
+      chatBusy: false,
+      chatTasks: {},
+      chatMessages: [
+        {
+          role: 'assistant',
+          text: '這裡是 public 版任務入口。輸入一句新任務，我會用既有 task 生命週期建立任務並回報進度。',
+          meta: '系統 · 待機'
+        }
+      ]
+    };
+
+    var routes = {
+      health: '/api/health',
+      hud: '/api/hud',
+      tasks: '/api/tasks',
+      events: '/api/events',
+      inbox: '/api/inbox',
+      memory: '/api/memory',
+      logs: '/api/logs',
+      doctor: '/api/doctor',
+      settings: '/api/settings'
+    };
+
+    var STATUS_TEXT = {
+      pending: '待執行',
+      running: '執行中',
+      done: '完成',
+      blocked: '卡住',
+      failed: '失敗',
+      unreadable: '無法讀取',
+      unknown: '未知'
+    };
+
+    var EVENT_TEXT = {
+      task_update: '任務更新',
+      done: '完成',
+      blocked: '卡住',
+      failed: '失敗'
+    };
+
+    var SETTING_LABELS = {
+      ok: '狀態',
+      port: '連接埠',
+      worker_mode: 'Worker 模式',
+      default_worker_timeout_sec: '預設逾時秒數',
+      max_worker_timeout_sec: '最大逾時秒數',
+      memory_source: '記憶來源',
+      writable_data_dirs: '可寫資料目錄'
+    };
+
+    var DOCTOR_LABELS = {
+      node_version: 'Node 版本',
+      tasks_dir: '任務目錄',
+      inbox_dir: '收件匣目錄',
+      memory_dir: '記憶目錄',
+      worker_mode: 'Worker 模式',
+      port: '連接埠'
+    };
+
+    function byId(id) {
+      return document.getElementById(id);
+    }
+
+    function escapeHtml(value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function setHtml(id, html) {
+      var el = byId(id);
+      if (el) el.innerHTML = html;
+    }
+
+    function setText(id, text) {
+      var el = byId(id);
+      if (el) el.textContent = text;
+    }
+
+    function statusClass(status) {
+      return ['done', 'running', 'pending', 'blocked', 'failed'].indexOf(status) >= 0 ? status : '';
+    }
+
+    function statusText(status) {
+      var key = String(status || 'unknown');
+      return STATUS_TEXT[key] || EVENT_TEXT[key] || key;
+    }
+
+    function statusLabel(status) {
+      return '<span class="status ' + statusClass(status) + '" title="' + escapeHtml(status || 'unknown') + '">' + escapeHtml(statusText(status)) + '</span>';
+    }
+
+    function fmtDate(value) {
+      if (!value) return '-';
+      var date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString();
+    }
+
+    function fmtDuration(seconds) {
+      var total = Math.max(0, Math.floor(Number(seconds) || 0));
+      var h = Math.floor(total / 3600);
+      var m = Math.floor((total % 3600) / 60);
+      var s = total % 60;
+      return (h ? h + '時 ' : '') + (m ? m + '分 ' : '') + s + '秒';
+    }
+
+    function taskTime(task) {
+      return Date.parse(task.updated_at || task.created_at || '') || 0;
+    }
+
+    function taskSummary(task) {
+      if (task.result && task.result.summary) return task.result.summary;
+      return task.result_summary || task.summary || task.error || task.blocked_reason || task.artifact_path || '';
+    }
+
+    function sortedTasks() {
+      return state.tasks.slice().sort(function(a, b) {
+        return taskTime(b) - taskTime(a);
+      });
+    }
+
+    function empty(text) {
+      return '<div class="empty">' + escapeHtml(text) + '</div>';
+    }
+
+    function timeMeta(label) {
+      return label + ' · ' + new Date().toLocaleTimeString('zh-TW', { hour12: false });
+    }
+
+    function safeChatRole(role) {
+      return role === 'user' || role === 'assistant' || role === 'system' ? role : 'system';
+    }
+
+    function chatMessageHtml(message) {
+      return '<div class="msg ' + safeChatRole(message.role) + '">' +
+        '<div class="text">' + escapeHtml(message.text || '') + '</div>' +
+        '<span class="meta">' + escapeHtml(message.meta || '') + '</span>' +
+      '</div>';
+    }
+
+    function setChatBadge(text) {
+      setText('task-chat-status', text);
+    }
+
+    function activeTrackedTask() {
+      var ids = Object.keys(state.chatTasks);
+      for (var i = 0; i < ids.length; i += 1) {
+        var id = ids[i];
+        var task = state.tasks.find(function(item) { return item.id === id; });
+        if (task && ['pending', 'running'].indexOf(task.status) >= 0) return task;
+      }
+      return null;
+    }
+
+    function renderChat() {
+      var box = byId('task-chat-messages');
+      if (!box) return;
+      box.innerHTML = state.chatMessages.map(chatMessageHtml).join('');
+      var active = activeTrackedTask();
+      if (!state.chatBusy) {
+        setChatBadge(active ? ('任務 · ' + statusText(active.status)) : 'IDLE · 待機');
+      }
+      setTimeout(function() {
+        box.scrollTop = box.scrollHeight;
+      }, 0);
+    }
+
+    function appendChatMessage(role, text, meta, deferRender) {
+      state.chatMessages.push({ role: role, text: text, meta: meta || timeMeta('系統') });
+      if (!deferRender) renderChat();
+    }
+
+    function taskTitleFromText(text) {
+      var firstLine = String(text || '').split(/\r?\n/).find(function(line) { return line.trim(); }) || '新任務';
+      var title = firstLine.trim().replace(/\s+/g, ' ');
+      return title.length > 80 ? title.slice(0, 77) + '...' : title;
+    }
+
+    function taskStatusMessage(task, created) {
+      var lines = [];
+      if (created) {
+        lines.push('任務已建立：' + task.id);
+      }
+      lines.push('狀態：' + statusText(task.status));
+      if (task.status === 'running') {
+        lines.push('正在執行：' + (task.title || task.id));
+      } else if (task.status === 'done') {
+        lines.push('完成，產出：' + (task.artifact_path || taskSummary(task) || '已完成'));
+      } else if (task.status === 'blocked') {
+        lines.push('卡住原因：' + (task.blocked_reason || '未提供'));
+      } else if (task.status === 'failed') {
+        lines.push('失敗原因：' + (task.error || '未提供'));
+      }
+      return lines.join('\n');
+    }
+
+    function rememberChatTask(task) {
+      if (!task || !task.id) return;
+      state.chatTasks[task.id] = {
+        lastStatus: task.status || 'pending'
+      };
+    }
+
+    function syncChatTasks() {
+      Object.keys(state.chatTasks).forEach(function(taskId) {
+        var tracked = state.chatTasks[taskId];
+        var task = state.tasks.find(function(item) { return item.id === taskId; });
+        if (!task) return;
+        if (task.status && task.status !== tracked.lastStatus) {
+          tracked.lastStatus = task.status;
+          appendChatMessage('assistant', taskStatusMessage(task, false), timeMeta('系統'), true);
+        }
+      });
+    }
+
+    function runtimeModeText(value) {
+      if (value === 'mock') return 'mock（示範）';
+      if (value === 'claude') return 'claude（真實 worker）';
+      return value || '-';
+    }
+
+    function settingLabel(key) {
+      return SETTING_LABELS[key] || key;
+    }
+
+    function doctorLabel(id) {
+      return DOCTOR_LABELS[id] || id;
+    }
+
+    function doctorDetail(check) {
+      var detail = String(check.detail || '');
+      if (check.id === 'worker_mode') return runtimeModeText(detail);
+      return detail.replace(/ is readable\b/g, ' 可讀取');
+    }
+
+    async function fetchJson(route, options) {
+      var response = await fetch(route, options);
+      var data = await response.json();
+      if (!response.ok || data.ok === false) {
+        throw new Error(data.error || response.statusText);
+      }
+      return data;
+    }
+
+    function renderHeader() {
+      var ok = !!(state.health && state.health.ok);
+      var blocked = state.tasks.filter(function(task) { return task.status === 'blocked'; }).length;
+      var dot = byId('health-dot');
+      if (dot) dot.className = 'ws-dot ' + (ok ? 'on' : '');
+      var chip = byId('health-chip');
+      if (chip) chip.className = 'stat ' + (ok ? 'ok' : 'alert');
+      setText('health-text', ok ? '在線' : '檢查中');
+      setText('mode-text', state.settings ? runtimeModeText(state.settings.worker_mode) : '-');
+      setText('task-count', state.tasks.length);
+      setText('blocked-count', blocked);
+      var blockedChip = byId('blocked-chip');
+      if (blockedChip) blockedChip.style.display = blocked ? '' : 'none';
+    }
+
+    function hudReadoutRow(label, value, className) {
+      return '<div class="hud-readout-row"><span>' + escapeHtml(label) + '</span><b class="' + (className || '') + '">' + escapeHtml(value) + '</b></div>';
+    }
+
+    function renderHudLog() {
+      var lines = [];
+      state.events.slice(-8).reverse().forEach(function(event) {
+        lines.push({
+          level: event.status === 'failed' ? 'error' : (event.status === 'blocked' ? 'warn' : ''),
+          text: '[' + fmtDate(event.ts) + '] ' + statusText(event.status || event.type || 'event') + ' ' + (event.title || event.id || '')
+        });
+      });
+      var progress = state.logs && state.logs.task_progress ? state.logs.task_progress.slice(-6) : [];
+      progress.reverse().forEach(function(line) {
+        lines.push({
+          level: '',
+          text: '[' + (line.task_id || '任務') + '] ' + (line.text || '')
+        });
+      });
+      var files = state.logs && state.logs.files ? state.logs.files.slice(0, 2) : [];
+      files.forEach(function(file) {
+        String(file.tail || '').split(/\r?\n/).slice(-2).forEach(function(text) {
+          if (text) lines.push({ level: /error|fail/i.test(text) ? 'error' : (/warn|block/i.test(text) ? 'warn' : ''), text: text });
+        });
+      });
+      setHtml('hud-log-stream', lines.length ? lines.slice(0, 14).map(function(line) {
+        return '<div class="hud-log-line ' + line.level + '">' + escapeHtml(line.text) + '</div>';
+      }).join('') : '<div class="hud-log-line">尚無公開事件</div>');
+    }
+
+    function renderHud() {
+      var hud = state.hud || {};
+      var counts = hud.task_counts || {};
+      var blocked = Number(counts.blocked || 0);
+      var failed = Number(counts.failed || 0);
+      var ok = !!(state.health && state.health.ok);
+      var coreState = !ok ? '檢查中' : (failed ? '警示' : (blocked ? '注意' : '正常'));
+      var coreClass = failed ? 'bad' : (blocked ? 'warn' : '');
+
+      setText('hud-summary', '任務 ' + (counts.total || 0) + ' · 收件匣 ' + (hud.inbox_count || 0) + ' · 記憶 ' + (hud.memory_count || 0));
+      setText('hud-health-text', coreState);
+      setText('hud-health-meta', '運行 ' + fmtDuration(hud.uptime_sec) + ' · 連接埠 ' + (hud.port || '-') + ' · 模式 ' + runtimeModeText(hud.worker_mode));
+      var light = byId('hud-health-light');
+      if (light) light.className = 'jhud-core-light ' + coreClass;
+
+      setHtml('hud-runtime', [
+        '<div class="metric-row"><span class="muted">狀態</span><b class="' + (ok ? 'ok' : 'warn') + '">' + (ok ? '在線' : '檢查中') + '</b></div>',
+        '<div class="metric-row"><span class="muted">運行時間</span><b>' + escapeHtml(fmtDuration(hud.uptime_sec)) + '</b></div>',
+        '<div class="metric-row"><span class="muted">連接埠</span><b>' + escapeHtml(hud.port || '-') + '</b></div>',
+        '<div class="metric-row"><span class="muted">模式</span><b>' + escapeHtml(runtimeModeText(hud.worker_mode)) + '</b></div>'
+      ].join(''));
+
+      setHtml('hud-work', [
+        hudReadoutRow('全部', counts.total || 0),
+        hudReadoutRow('執行中', counts.running || 0, 'accent'),
+        hudReadoutRow('待執行', counts.pending || 0, 'accent'),
+        hudReadoutRow('完成', counts.done || 0, 'ok')
+      ].join(''));
+
+      setHtml('hud-attention', [
+        hudReadoutRow('卡住', blocked, blocked ? 'warn' : ''),
+        hudReadoutRow('失敗', failed, failed ? 'fail' : ''),
+        hudReadoutRow('收件匣', hud.inbox_count || 0),
+        hudReadoutRow('記憶檔案', hud.memory_count || 0)
+      ].join(''));
+
+      setHtml('hud-schedule-readout', [
+        hudReadoutRow('API 組合', '公開版'),
+        hudReadoutRow('佈景主題', '5 套預設'),
+        hudReadoutRow('更新', '5 秒')
+      ].join(''));
+
+      renderHudLog();
+    }
+
+    function taskRow(task) {
+      return '<div class="task-row">' +
+        '<div>' + statusLabel(task.status) + '</div>' +
+        '<div><div class="task-title">' + escapeHtml(task.title || task.id) + '</div><div class="muted mono">' + escapeHtml(task.id || '') + '</div><div class="soft">' + escapeHtml(taskSummary(task)) + '</div></div>' +
+        '<div class="muted">' + escapeHtml(fmtDate(task.updated_at || task.created_at)) + '</div>' +
+      '</div>';
+    }
+
+    function renderTasks() {
+      var tasks = sortedTasks();
+      setHtml('tasks-list', tasks.length ? tasks.map(taskRow).join('') : empty('目前沒有任務'));
+    }
+
+    function renderEvents() {
+      var html = state.events.length ? state.events.slice().reverse().map(function(event) {
+        return '<div class="event-row"><div class="muted">' + escapeHtml(fmtDate(event.ts)) + '</div><div>' + statusLabel(event.status || event.type) + '</div><div><b>' + escapeHtml(event.title || event.id || event.type) + '</b><div class="soft">' + escapeHtml(event.summary || '') + '</div></div></div>';
+      }).join('') : empty('尚無近期事件');
+      setHtml('events-list', html);
+
+      var progressRows = Object.keys(state.progress).map(function(taskId) {
+        var lines = state.progress[taskId] || [];
+        return '<div class="log-block"><b class="mono">' + escapeHtml(taskId) + '</b><pre>' + escapeHtml(lines.join('\n')) + '</pre></div>';
+      });
+      setHtml('progress-list', progressRows.join('') || empty('尚無進度紀錄'));
+    }
+
+    function renderInbox() {
+      var inboxHtml = state.inbox.length ? state.inbox.map(function(event) {
+        return '<div class="event-row"><div class="muted">' + escapeHtml(fmtDate(event.timestamp || event.ts)) + '</div><div>' + statusLabel(event.status || event.event) + '</div><div><b>' + escapeHtml(event.title || event.task_id || event.file) + '</b><div class="soft">' + escapeHtml(event.summary || '') + '</div></div></div>';
+      }).join('') : empty('收件匣目前是空的');
+      setHtml('inbox-list', inboxHtml);
+
+      var blocked = sortedTasks().filter(function(task) { return task.status === 'blocked'; });
+      setHtml('blocked-list', blocked.length ? blocked.map(taskRow).join('') : empty('目前沒有卡住任務'));
+    }
+
+    function renderMemory() {
+      if (!state.selectedMemory && state.memory.length) {
+        state.selectedMemory = state.memory[0].file;
+      }
+      var list = state.memory.map(function(doc) {
+        var active = doc.file === state.selectedMemory ? ' active' : '';
+        return '<button class="list-button' + active + '" data-memory-file="' + escapeHtml(doc.file) + '"><span>' + escapeHtml(doc.file) + '</span><span class="muted">' + escapeHtml(doc.size_bytes) + ' B</span></button>';
+      }).join('');
+      setHtml('memory-list', list || empty('尚無記憶 Markdown 檔'));
+
+      var doc = state.memory.find(function(item) { return item.file === state.selectedMemory; });
+      if (!doc) {
+        setHtml('memory-detail', empty('尚未選取檔案'));
+        return;
+      }
+      var frontmatter = doc.frontmatter ? '<div class="log-block"><b>前置資料</b><pre>' + escapeHtml(doc.frontmatter) + '</pre></div>' : '';
+      setHtml('memory-detail', frontmatter + '<div class="log-block"><b>' + escapeHtml(doc.file) + '</b><pre>' + escapeHtml(doc.content) + '</pre></div>');
+    }
+
+    function renderLogs() {
+      var data = state.logs || { files: [], task_progress: [] };
+      var fileHtml = data.files.length ? data.files.map(function(file) {
+        return '<div class="log-block"><b>' + escapeHtml(file.file) + '</b><pre>' + escapeHtml(file.tail || '') + '</pre></div>';
+      }).join('') : '';
+      var taskHtml = data.task_progress.length ? '<div class="log-block"><b>任務進度</b><pre>' + escapeHtml(data.task_progress.map(function(line) {
+        return '[' + line.task_id + '] ' + line.text;
+      }).join('\n')) + '</pre></div>' : '';
+      setHtml('logs-list', fileHtml + taskHtml || empty('尚無紀錄'));
+    }
+
+    function renderDoctor() {
+      var report = state.doctor || { checks: [] };
+      var checks = report.checks.map(function(check) {
+        return '<div class="check-row"><span class="' + (check.ok ? 'ok' : 'fail') + '">' + (check.ok ? '●' : '●') + '</span><div><b>' + escapeHtml(doctorLabel(check.id)) + '</b><div class="soft">' + escapeHtml(doctorDetail(check)) + '</div></div></div>';
+      }).join('');
+      setHtml('doctor-list', checks || empty('尚無診斷報告'));
+
+      var settings = state.settings || {};
+      var rows = Object.keys(settings).filter(function(key) {
+        return key !== 'endpoints';
+      }).map(function(key) {
+        return '<div class="kv-row"><div class="muted">' + escapeHtml(settingLabel(key)) + '</div><div class="mono">' + escapeHtml(JSON.stringify(settings[key])) + '</div></div>';
+      }).join('');
+      var endpoints = (settings.endpoints || []).map(function(item) {
+        return '<div class="kv-row"><div class="muted">' + escapeHtml(item.name) + '</div><div class="mono">' + escapeHtml(item.route) + '</div></div>';
+      }).join('');
+      setHtml('settings-list', rows + (endpoints ? '<h3 class="soft">API 端點</h3>' + endpoints : ''));
+    }
+
+    function renderAll() {
+      renderHeader();
+      renderHud();
+      renderTasks();
+      renderChat();
+      renderEvents();
+      renderInbox();
+      renderMemory();
+      renderLogs();
+      renderDoctor();
+    }
+
+    async function refreshProgress() {
+      var visible = sortedTasks().filter(function(task) {
+        return task.status === 'running' || task.status === 'pending' || task.status === 'done' || task.status === 'blocked';
+      }).slice(0, 8);
+      var next = {};
+      await Promise.all(visible.map(async function(task) {
+        try {
+          var data = await fetchJson('/api/tasks/' + encodeURIComponent(task.id) + '/progress');
+          next[task.id] = data.lines || [];
+        } catch (_) {
+          next[task.id] = [];
+        }
+      }));
+      state.progress = next;
+    }
+
+    async function refresh() {
+      try {
+        var results = await Promise.all([
+          fetchJson(routes.health),
+          fetchJson(routes.hud),
+          fetchJson(routes.tasks),
+          fetchJson(routes.events),
+          fetchJson(routes.inbox),
+          fetchJson(routes.memory),
+          fetchJson(routes.logs),
+          fetchJson(routes.doctor),
+          fetchJson(routes.settings)
+        ]);
+        state.health = results[0];
+        state.hud = results[1];
+        state.tasks = results[2].tasks || [];
+        state.events = results[3].events || [];
+        state.inbox = results[4].events || [];
+        state.memory = results[5].documents || [];
+        state.logs = results[6];
+        state.doctor = results[7];
+        state.settings = results[8];
+        await refreshProgress();
+        syncChatTasks();
+      } catch (error) {
+        state.health = null;
+        setText('health-text', error.message);
+      }
+      renderAll();
+    }
+
+    document.querySelectorAll('[role="tab"]').forEach(function(tab) {
+      tab.id = 'tab-' + tab.dataset.tab;
+      tab.addEventListener('click', function() {
+        document.querySelectorAll('[role="tab"]').forEach(function(item) {
+          var selected = item === tab;
+          item.setAttribute('aria-selected', selected ? 'true' : 'false');
+          item.classList.toggle('active', selected);
+        });
+        document.querySelectorAll('.view').forEach(function(view) {
+          view.classList.toggle('active', view.id === 'view-' + tab.dataset.tab);
+        });
+      });
+    });
+
+    var memoryList = byId('memory-list');
+    if (memoryList) {
+      memoryList.addEventListener('click', function(event) {
+        var button = event.target.closest('[data-memory-file]');
+        if (!button) return;
+        state.selectedMemory = button.dataset.memoryFile;
+        renderMemory();
+      });
+    }
+
+    async function sendChatTask() {
+      var input = byId('task-chat-text');
+      var button = byId('task-chat-send');
+      var text = input ? input.value.trim() : '';
+      if (!text || state.chatBusy) return;
+      state.chatBusy = true;
+      if (button) button.disabled = true;
+      setChatBadge('建立中 · 送出中');
+      appendChatMessage('user', text, timeMeta('你'));
+      try {
+        var created = await fetchJson(routes.tasks, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            title: taskTitleFromText(text),
+            instruction: text
+          })
+        });
+        rememberChatTask(created);
+        appendChatMessage('assistant', taskStatusMessage(created, true), timeMeta('系統'));
+        if (input) {
+          input.value = '';
+          input.style.height = 'auto';
+        }
+        await refresh();
+      } catch (error) {
+        appendChatMessage('assistant', '建立失敗：' + error.message, timeMeta('系統'));
+      } finally {
+        state.chatBusy = false;
+        if (button) button.disabled = false;
+        renderChat();
+      }
+    }
+
+    var chatInput = byId('task-chat-text');
+    var chatSend = byId('task-chat-send');
+    if (chatSend) chatSend.addEventListener('click', sendChatTask);
+    if (chatInput) {
+      chatInput.addEventListener('keydown', function(event) {
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault();
+          sendChatTask();
+        }
+      });
+      chatInput.addEventListener('input', function(event) {
+        event.target.style.height = 'auto';
+        event.target.style.height = Math.min(event.target.scrollHeight, 180) + 'px';
+      });
+    }
+
+    var themeSelect = byId('theme-select');
+    if (themeSelect) {
+      try {
+        themeSelect.value = localStorage.getItem('aiwff_runtime_theme') || 'default';
+      } catch (_) {}
+      themeSelect.addEventListener('change', function() {
+        var value = themeSelect.value;
+        try { localStorage.setItem('aiwff_runtime_theme', value); } catch (_) {}
+        if (value === 'default') {
+          document.documentElement.removeAttribute('data-theme');
+        } else {
+          document.documentElement.setAttribute('data-theme', value);
+        }
+      });
+    }
+
+    var refreshButton = byId('refresh-button');
+    if (refreshButton) refreshButton.addEventListener('click', refresh);
+
+    function tickClock() {
+      var now = new Date();
+      setText('hud-clock', now.toLocaleTimeString([], { hour12: false }));
+    }
+    tickClock();
+    setInterval(tickClock, 1000);
+
+    // JARVIS reactor core animation, kept visual-only and data-bound to public HUD state.
+    (function() {
+      var cv = document.getElementById('jhud-reactor');
+      if (!cv) return;
+      var ctx = cv.getContext('2d');
+      var pane = document.getElementById('view-hud');
+      var ph = 0;
+      function ring(cx, cy, r, o) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, o.a0 || 0, o.a1 || Math.PI * 2);
+        ctx.strokeStyle = o.c;
+        ctx.lineWidth = o.w || 1;
+        ctx.globalAlpha = o.al == null ? 1 : o.al;
+        ctx.setLineDash(o.dash || []);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        ctx.setLineDash([]);
+      }
+      function ticks(cx, cy, r, n, len, c, rot) {
+        ctx.strokeStyle = c;
+        ctx.lineWidth = 1.4;
+        ctx.globalAlpha = .65;
+        for (var i = 0; i < n; i++) {
+          var a = rot + i / n * Math.PI * 2;
+          ctx.beginPath();
+          ctx.moveTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+          ctx.lineTo(cx + Math.cos(a) * (r - len), cy + Math.sin(a) * (r - len));
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+      function frame() {
+        requestAnimationFrame(frame);
+        if (!pane.classList.contains('active')) return;
+        var rect = cv.getBoundingClientRect();
+        if (!rect.width) return;
+        var dpr = window.devicePixelRatio || 1;
+        if (cv.width !== Math.round(rect.width * dpr) || cv.height !== Math.round(rect.height * dpr)) {
+          cv.width = Math.round(rect.width * dpr);
+          cv.height = Math.round(rect.height * dpr);
+        }
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        var w = rect.width;
+        var h = rect.height;
+        var cx = w / 2;
+        var cy = h / 2;
+        var R = Math.min(w, h) / 2 - 4;
+        var alerting = (byId('hud-health-text') || {}).textContent === 'ALERT';
+        var watching = (byId('hud-health-text') || {}).textContent === 'WATCH';
+        var main = alerting ? '255,92,110' : (watching ? '255,215,106' : '95,230,255');
+        var hot = alerting ? '255,150,160' : (watching ? '255,231,150' : '190,247,255');
+        ctx.clearRect(0, 0, w, h);
+        var g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * .72);
+        g.addColorStop(0, 'rgba(' + main + ',.46)');
+        g.addColorStop(.5, 'rgba(27,159,255,.15)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(cx, cy, R, 0, Math.PI * 2);
+        ctx.fill();
+        ring(cx, cy, R * .99, { c: 'rgba(' + main + ',.9)', w: 2.6 });
+        ring(cx, cy, R * .95, { c: 'rgba(' + main + ',.4)', w: 1 });
+        ticks(cx, cy, R * .99, 84, 11, 'rgba(130,238,255,.6)', ph * .3);
+        ring(cx, cy, R * .82, { c: 'rgba(' + main + ',.62)', w: 1.8, a0: ph, a1: ph + Math.PI * 1.4 });
+        ring(cx, cy, R * .7, { c: 'rgba(255,177,59,.6)', w: 1.6, a0: -ph * 1.6, a1: -ph * 1.6 + Math.PI * .7 });
+        ticks(cx, cy, R * .66, 36, 13, 'rgba(' + main + ',.45)', -ph * .5);
+        ring(cx, cy, R * .52, { c: 'rgba(' + main + ',.6)', w: 1.2, dash: [4, 8] });
+        ring(cx, cy, R * .4, { c: 'rgba(' + main + ',.85)', w: 1.8, a0: ph * 2, a1: ph * 2 + Math.PI * 1.7 });
+        var pr = R * .33 * (1 + Math.sin(ph * 3) * .05);
+        ring(cx, cy, pr, { c: 'rgba(' + hot + ',.95)', w: 2.6 });
+        var ig = ctx.createRadialGradient(cx, cy, 0, cx, cy, pr);
+        ig.addColorStop(0, 'rgba(' + hot + ',.5)');
+        ig.addColorStop(1, 'rgba(' + main + ',0)');
+        ctx.fillStyle = ig;
+        ctx.beginPath();
+        ctx.arc(cx, cy, pr, 0, Math.PI * 2);
+        ctx.fill();
+        var sweep = (ph * 0.85) % (Math.PI * 2);
+        var span = Math.PI / 3.2;
+        var rad = R * .97;
+        ctx.save();
+        ctx.translate(cx, cy);
+        for (var k = 0; k < span; k += 0.035) {
+          var a = sweep - k;
+          var al = (1 - k / span) * 0.26;
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.arc(0, 0, rad, a, a + 0.045);
+          ctx.closePath();
+          ctx.fillStyle = 'rgba(' + main + ',' + al.toFixed(3) + ')';
+          ctx.fill();
+        }
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(sweep) * rad, Math.sin(sweep) * rad);
+        ctx.strokeStyle = 'rgba(' + hot + ',.92)';
+        ctx.lineWidth = 2;
+        ctx.shadowColor = 'rgba(' + main + ',.95)';
+        ctx.shadowBlur = 9;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.restore();
+        ph += 0.012;
+      }
+      requestAnimationFrame(frame);
+    })();
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

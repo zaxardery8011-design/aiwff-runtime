@@ -233,7 +233,7 @@ test('timeout marks task blocked and writes an inbox event', async () => {
     assert.ok(fs.existsSync(inboxFile), `missing inbox event: ${inboxFile}`);
     const event = JSON.parse(fs.readFileSync(inboxFile, 'utf8'));
     assert.equal(event.event, 'blocked');
-    assert.equal(event.summary, 'blocked: timeout');
+    assert.equal(event.summary, '卡住：timeout');
   } finally {
     await stopDaemon(runtime.daemon);
   }
