@@ -25,6 +25,40 @@ function envFlag(name) {
   return process.env[name] === '1' || String(process.env[name]).toLowerCase() === 'true';
 }
 
+function envInt(name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const parsed = Number.parseInt(process.env[name], 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(Math.max(parsed, min), max);
+}
+
+// 失敗任務基本 retry：預設重試 2 次（共 3 次嘗試），可用環境變數覆蓋。
+const MAX_TASK_RETRIES = envInt('MAX_TASK_RETRIES', 2, { min: 0, max: 10 });
+const RETRY_BACKOFF_MS = envInt('RETRY_BACKOFF_MS', 500, { min: 0, max: 60000 });
+
+// Telegram 斷線重連：poll 迴圈用自排程 + 指數退避，單一請求加逾時避免卡死。
+const TG_API_BASE_URL = process.env.TG_API_BASE_URL || 'https://api.telegram.org';
+const TG_REQUEST_TIMEOUT_MS = envInt('TG_REQUEST_TIMEOUT_MS', 20000, { min: 1000, max: 120000 });
+const TG_POLL_BASE_MS = envInt('TG_POLL_BASE_MS', 2000, { min: 200, max: 60000 });
+const TG_POLL_MAX_BACKOFF_MS = envInt('TG_POLL_MAX_BACKOFF_MS', 60000, { min: TG_POLL_BASE_MS, max: 600000 });
+
+// 崩潰韌性護欄：把裸露例外/rejection 與非同步回呼裡的 fs 寫入導向 stderr，
+// 讓單一失敗只留紀錄、不整隻 runtime 崩掉。設計取捨＝韌性優先於嚴格中止。
+function logStderr(context, detail) {
+  const message = detail && detail.stack ? detail.stack : detail;
+  process.stderr.write(`[${nowIso()}] ${context}: ${message}\n`);
+}
+
+function installProcessGuards() {
+  process.on('uncaughtException', (err) => {
+    logStderr('uncaughtException (survived)', err);
+  });
+  process.on('unhandledRejection', (reason) => {
+    logStderr('unhandledRejection (survived)', reason);
+  });
+}
+
 function loadDotEnv() {
   const envPath = path.join(ROOT_DIR, '.env');
   if (!fs.existsSync(envPath)) {
@@ -83,6 +117,18 @@ function readTextFileIfExists(filePath) {
 
 function writeJsonFile(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+// 給非同步回呼（worker close / timeout / 進度管線）用的容錯寫入：
+// 寫失敗只導向 stderr 並回傳 false，不讓例外冒泡成 uncaughtException。
+function safeWriteJsonFile(filePath, value) {
+  try {
+    writeJsonFile(filePath, value);
+    return true;
+  } catch (error) {
+    logStderr(`fs write failed (${filePath})`, error);
+    return false;
+  }
 }
 
 function readTask(taskId) {
@@ -215,7 +261,7 @@ function writeInboxEvent(task, eventName) {
     ts: Date.now(),
     summary: taskEventSummary(task),
   };
-  writeJsonFile(inboxPath(task.id, eventName), event);
+  safeWriteJsonFile(inboxPath(task.id, eventName), event);
 }
 
 function listInboxEvents() {
@@ -542,7 +588,7 @@ function spawnMockWorker(task) {
     task.status = 'failed';
     task.error = error.message;
     task.updated_at = nowIso();
-    writeJsonFile(taskPath(taskId), task);
+    safeWriteJsonFile(taskPath(taskId), task);
   });
 
   child.on('close', () => {
@@ -572,7 +618,12 @@ function artifactResultRef(taskId) {
 }
 
 function appendProgressText(taskId, line) {
-  fs.appendFileSync(progressPath(taskId), `${JSON.stringify({ ts: Date.now(), text: line })}\n`);
+  // 進度是 best-effort：寫失敗（如磁碟滿）只記 stderr，不炸掉 stdout 事件回呼。
+  try {
+    fs.appendFileSync(progressPath(taskId), `${JSON.stringify({ ts: Date.now(), text: line })}\n`);
+  } catch (error) {
+    logStderr(`progress append failed (${taskId})`, error);
+  }
 }
 
 function normalizeWorkerTimeoutSec(task) {
@@ -666,7 +717,7 @@ function updateTaskStatus(task, status, extra = {}) {
     status,
     updated_at: nowIso(),
   };
-  writeJsonFile(taskPath(task.id), nextTask);
+  safeWriteJsonFile(taskPath(task.id), nextTask);
   if ((status === 'done' || status === 'blocked') && previousStatus !== status) {
     writeInboxEvent(nextTask, status);
   }
@@ -697,7 +748,7 @@ function spawnClaudeProcess(claudeCmd, args) {
   });
 }
 
-function spawnClaudeWorker(task) {
+function spawnClaudeWorker(task, attempt = 1) {
   ensureDirectories();
   const claudeCmd = process.env.CLAUDE_CMD || 'claude';
   const fullPrompt = buildClaudePrompt(task);
@@ -741,21 +792,42 @@ function spawnClaudeWorker(task) {
       return;
     }
     const currentTask = readTask(task.id) || runningTask;
-    let nextTask;
+
+    let failureReason = null;
     if (spawnError) {
-      nextTask = updateTaskStatus(currentTask, 'failed', { error: spawnError.message });
+      failureReason = spawnError.message;
     } else if (code !== 0) {
       const exitReason = code === null ? `signal ${signal || 'unknown'}` : `code ${code}`;
       const tail = stderr.trim().slice(-1000);
-      nextTask = updateTaskStatus(currentTask, 'failed', {
-        error: `Claude exited with ${exitReason}${tail ? `: ${tail}` : ''}`,
-      });
-    } else if (fs.existsSync(artifactResultPath(task.id))) {
-      nextTask = updateTaskStatus(currentTask, 'done', { artifact_path: artifactResultRef(task.id) });
-    } else {
-      nextTask = updateTaskStatus(currentTask, 'failed', { error: 'no artifact produced' });
+      failureReason = `Claude exited with ${exitReason}${tail ? `: ${tail}` : ''}`;
+    } else if (!fs.existsSync(artifactResultPath(task.id))) {
+      failureReason = 'no artifact produced';
     }
-    notifyTelegramTaskDone(nextTask);
+
+    if (!failureReason) {
+      const doneTask = updateTaskStatus(currentTask, 'done', { artifact_path: artifactResultRef(task.id) });
+      notifyTelegramTaskDone(doneTask);
+      return;
+    }
+
+    // 失敗任務基本 retry：還沒用完重試額度就退避後重跑，用完才標 failed。
+    if (attempt <= MAX_TASK_RETRIES) {
+      appendProgressText(
+        task.id,
+        `Worker attempt ${attempt} failed (${failureReason}); retrying (${attempt}/${MAX_TASK_RETRIES}) in ${RETRY_BACKOFF_MS}ms`,
+      );
+      updateTaskStatus(currentTask, 'running', { retry_count: attempt, last_error: failureReason });
+      setTimeout(() => {
+        spawnClaudeWorker(readTask(task.id) || currentTask, attempt + 1);
+      }, RETRY_BACKOFF_MS);
+      return;
+    }
+
+    const failedTask = updateTaskStatus(currentTask, 'failed', {
+      error: failureReason,
+      retry_count: attempt - 1,
+    });
+    notifyTelegramTaskDone(failedTask);
   });
 }
 
@@ -819,11 +891,16 @@ async function createTask(req, res) {
 
 async function tgRequest(token, method, body) {
   const payload = JSON.stringify(body || {});
+  const base = new URL(TG_API_BASE_URL);
+  const transport = base.protocol === 'http:' ? http : https;
+  const basePath = base.pathname.replace(/\/$/, '');
   return new Promise((resolve, reject) => {
-    const req = https.request(
+    const req = transport.request(
       {
-        hostname: 'api.telegram.org',
-        path: `/bot${token}/${method}`,
+        protocol: base.protocol,
+        hostname: base.hostname,
+        port: base.port || undefined,
+        path: `${basePath}/bot${token}/${method}`,
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -845,6 +922,10 @@ async function tgRequest(token, method, body) {
         });
       }
     );
+    // 逾時護欄：卡住的連線會被主動中斷，讓 poll 迴圈得以重連而非無限等待。
+    req.setTimeout(TG_REQUEST_TIMEOUT_MS, () => {
+      req.destroy(new Error(`Telegram request timed out after ${TG_REQUEST_TIMEOUT_MS}ms`));
+    });
     req.on('error', reject);
     req.write(payload);
     req.end();
@@ -893,6 +974,51 @@ async function pollTelegram() {
       text: `✅ 收到，任務建立：${title}\nID: ${task.id.slice(0, 8)}...\n執行中，完成後通知你。`,
     });
   }
+}
+
+// Telegram 斷線重連迴圈：以 setTimeout 自排程（不重疊請求），
+// 連續失敗時指數退避並記 stderr；成功一次即重置退避。回傳 stop() 供關閉。
+function startTelegramPolling() {
+  let failures = 0;
+  let stopped = false;
+  let timer = null;
+
+  const scheduleNext = () => {
+    if (stopped) {
+      return;
+    }
+    const delay = failures === 0 ? TG_POLL_BASE_MS : Math.min(TG_POLL_BASE_MS * 2 ** failures, TG_POLL_MAX_BACKOFF_MS);
+    timer = setTimeout(tick, delay);
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+  };
+
+  async function tick() {
+    if (stopped) {
+      return;
+    }
+    try {
+      await pollTelegram();
+      if (failures > 0) {
+        logStderr('telegram-polling', `recovered after ${failures} failed attempt(s)`);
+      }
+      failures = 0;
+    } catch (error) {
+      failures += 1;
+      logStderr('telegram-polling', `error (reconnecting, attempt ${failures}): ${error.message}`);
+    }
+    scheduleNext();
+  }
+
+  tick();
+
+  return function stop() {
+    stopped = true;
+    if (timer) {
+      clearTimeout(timer);
+    }
+  };
 }
 
 async function handleRequest(req, res) {
@@ -997,6 +1123,7 @@ async function handleRequest(req, res) {
 }
 
 function main() {
+  installProcessGuards();
   ensureDirectories();
   const server = http.createServer((req, res) => {
     handleRequest(req, res).catch((error) => {
@@ -1011,10 +1138,25 @@ function main() {
   if (process.env.TG_BOT_TOKEN && !process.env.ADMIN_TG_CHAT_ID) {
     console.error('Refusing Telegram polling: ADMIN_TG_CHAT_ID is required when TG_BOT_TOKEN is set.');
   } else if (process.env.TG_BOT_TOKEN) {
-    setInterval(() => pollTelegram().catch(() => {}), 2000);
+    startTelegramPolling();
   }
 }
 
 if (require.main === module) {
   main();
 }
+
+// 測試用曝面：僅在被 require 時提供純函式，不改變 daemon 執行行為。
+module.exports = {
+  safeWriteJsonFile,
+  appendProgressText,
+  installProcessGuards,
+  startTelegramPolling,
+  tgRequest,
+  envInt,
+  MAX_TASK_RETRIES,
+  RETRY_BACKOFF_MS,
+  TG_API_BASE_URL,
+  TG_POLL_BASE_MS,
+  TG_POLL_MAX_BACKOFF_MS,
+};

@@ -8,9 +8,56 @@ const { spawn } = require('node:child_process');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
+const agentModule = require(path.join(ROOT_DIR, 'agent', 'index.js'));
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function startFakeTelegram(failTimes) {
+  let getUpdatesCount = 0;
+  const server = http.createServer((req, res) => {
+    if (req.url.includes('/getUpdates')) {
+      getUpdatesCount += 1;
+      if (getUpdatesCount <= failTimes) {
+        req.socket.destroy();
+        return;
+      }
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, result: [] }));
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      resolve({ server, port: server.address().port, getCount: () => getUpdatesCount });
+    });
+  });
+}
+
+function retryClaudeScript(counterFile, failTimes) {
+  return `
+const fs = require('fs');
+const path = require('path');
+const counter = ${JSON.stringify(counterFile)};
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  let n = 0;
+  try { n = parseInt(fs.readFileSync(counter, 'utf8'), 10) || 0; } catch (_) {}
+  n += 1;
+  fs.writeFileSync(counter, String(n));
+  if (n <= ${failTimes}) {
+    console.error('attempt ' + n + ' intentional failure');
+    process.exit(1);
+  }
+  const match = input.match(/結果請寫到: (.+)/);
+  const outPath = path.resolve(__dirname, '..', '..', match[1].trim().replace(/\\//g, path.sep));
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, 'DONE ok attempt ' + n);
+  console.log('attempt ' + n + ' wrote artifact');
+});
+`;
 }
 
 function resetDataDir() {
@@ -276,5 +323,139 @@ test('Telegram token without admin chat id refuses polling', async () => {
     assert.match(runtime.logs.stderr, /Refusing Telegram polling/);
   } finally {
     await stopDaemon(runtime.daemon);
+  }
+});
+
+// --- (1) 崩潰護欄 ---
+test('crash guardrail: installProcessGuards adds survivor handlers that do not rethrow', () => {
+  const beforeUncaught = process.listeners('uncaughtException').slice();
+  const beforeUnhandled = process.listeners('unhandledRejection').slice();
+
+  agentModule.installProcessGuards();
+
+  const addedUncaught = process.listeners('uncaughtException').filter((fn) => !beforeUncaught.includes(fn));
+  const addedUnhandled = process.listeners('unhandledRejection').filter((fn) => !beforeUnhandled.includes(fn));
+
+  try {
+    assert.equal(addedUncaught.length, 1);
+    assert.equal(addedUnhandled.length, 1);
+    // 直接叫用 handler：確認它吞掉例外、只記 stderr，不把例外重拋出去。
+    assert.doesNotThrow(() => addedUncaught[0](new Error('boom')));
+    assert.doesNotThrow(() => addedUnhandled[0]('rejected reason'));
+  } finally {
+    for (const fn of addedUncaught) {
+      process.removeListener('uncaughtException', fn);
+    }
+    for (const fn of addedUnhandled) {
+      process.removeListener('unhandledRejection', fn);
+    }
+  }
+});
+
+test('crash guardrail: safeWriteJsonFile survives an unwritable path and reports failure', () => {
+  resetDataDir();
+  const dir = path.join(DATA_DIR, 'safe-write');
+  fs.mkdirSync(dir, { recursive: true });
+
+  const goodPath = path.join(dir, 'ok.json');
+  assert.equal(agentModule.safeWriteJsonFile(goodPath, { value: 1 }), true);
+  assert.ok(fs.existsSync(goodPath));
+
+  // 用「檔案當父層」製造寫入失敗：blocker 是檔案，寫 blocker/child.json 必失敗。
+  const blocker = path.join(dir, 'blocker');
+  fs.writeFileSync(blocker, 'x');
+  const badPath = path.join(blocker, 'child.json');
+  let result;
+  assert.doesNotThrow(() => {
+    result = agentModule.safeWriteJsonFile(badPath, { value: 2 });
+  });
+  assert.equal(result, false);
+});
+
+// --- (2) 任務失敗基本 retry ---
+test('task retry: real worker recovers on a later attempt and records retry_count', async () => {
+  resetDataDir();
+  const counterFile = path.join(DATA_DIR, 'test-bin', 'retry-recover.attempts');
+  const claudeCmd = writeFakeClaude('retry-recover-claude', retryClaudeScript(counterFile, 1));
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    ENABLE_REAL_CLAUDE_WORKER: '1',
+    CLAUDE_CMD: claudeCmd,
+    MAX_TASK_RETRIES: '2',
+    RETRY_BACKOFF_MS: '50',
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'retry recover',
+      instruction: 'fail once then succeed',
+      timeout_sec: 20,
+    });
+    const task = await waitForTaskStatus(runtime.port, created.id, ['done'], 20000);
+    assert.equal(task.status, 'done');
+    assert.equal(task.retry_count, 1);
+    const progress = await requestJson(runtime.port, 'GET', `/api/tasks/${created.id}/progress`);
+    assert.ok(
+      progress.lines.some((line) => /retrying \(1\/2\)/.test(line)),
+      `expected retry progress line, got: ${JSON.stringify(progress.lines)}`,
+    );
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+test('task retry: real worker gives up as failed after retries are exhausted', async () => {
+  resetDataDir();
+  const counterFile = path.join(DATA_DIR, 'test-bin', 'retry-exhaust.attempts');
+  const claudeCmd = writeFakeClaude('retry-exhaust-claude', retryClaudeScript(counterFile, 99));
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    ENABLE_REAL_CLAUDE_WORKER: '1',
+    CLAUDE_CMD: claudeCmd,
+    MAX_TASK_RETRIES: '1',
+    RETRY_BACKOFF_MS: '50',
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'retry exhaust',
+      instruction: 'always fail',
+      timeout_sec: 20,
+    });
+    const task = await waitForTaskStatus(runtime.port, created.id, ['failed'], 20000);
+    assert.equal(task.status, 'failed');
+    assert.equal(task.retry_count, 1);
+    assert.match(task.error, /exited with code 1/);
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+// --- (3) Telegram 斷線重連 ---
+test('telegram reconnect: polling backs off then recovers after transient disconnects', async () => {
+  resetDataDir();
+  const fake = await startFakeTelegram(2);
+  const runtime = await startDaemon({
+    TG_BOT_TOKEN: 'test-token',
+    ADMIN_TG_CHAT_ID: '123456',
+    TG_API_BASE_URL: `http://127.0.0.1:${fake.port}`,
+    TG_POLL_BASE_MS: '100',
+    TG_POLL_MAX_BACKOFF_MS: '300',
+    TG_REQUEST_TIMEOUT_MS: '2000',
+  });
+
+  try {
+    const deadline = Date.now() + 8000;
+    while (!/recovered after/.test(runtime.logs.stderr) && Date.now() < deadline) {
+      await sleep(100);
+    }
+    assert.match(runtime.logs.stderr, /reconnecting, attempt/);
+    assert.match(runtime.logs.stderr, /recovered after/);
+    // 斷線後 daemon 仍存活、健康檢查正常。
+    const health = await requestJson(runtime.port, 'GET', '/api/health');
+    assert.equal(health.ok, true);
+  } finally {
+    await stopDaemon(runtime.daemon);
+    fake.server.close();
   }
 });
