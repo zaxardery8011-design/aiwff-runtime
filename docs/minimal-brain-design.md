@@ -270,7 +270,7 @@ WORK_DIR=./workspace
 ## 7. 一鍵啟動流程
 
 ```bash
-git clone https://github.com/<org>/aiwff-runtime
+git clone https://github.com/zaxardery8011-design/aiwff-runtime
 cd aiwff-runtime
 cp .env.example .env
 # 填入 TG_BOT_TOKEN

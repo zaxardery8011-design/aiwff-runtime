@@ -1,9 +1,14 @@
 # aiwff-runtime
 
-> 繁體中文說明 → [README.zh-TW.md](README.zh-TW.md)
+> 繁體中文說明 -> [README.zh-TW.md](README.zh-TW.md)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)]()
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![Dependencies](https://img.shields.io/badge/dependencies-zero-success)
+![Default mode](https://img.shields.io/badge/default-mock%20%2F%20free-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+![Phase](https://img.shields.io/badge/scope-Phase%202-informational)
+[![Docs zh-TW](https://img.shields.io/badge/docs-zh--TW-ff69b4)](README.zh-TW.md)
 
 ## What is this?
 
@@ -11,12 +16,14 @@ aiwff-runtime is a local minimal brain for personal AI work: send a message to T
 
 It is designed for a single local operator who wants an agent runtime, not just another chat surface.
 
+![aiwff-runtime architecture: Telegram and WebUI inputs, local daemon, mock or Claude worker, and file-bus outputs](docs/images/aiwff-architecture.png)
+
 | Not this | This |
 |---|---|
-| ✗ A chatbot that only replies once and stops | ✓ A local agent loop that can create a task, run Claude CLI, write artifacts, and report completion |
-| ✗ An API wrapper around a hosted chat model | ✓ A file-backed local runtime using your machine, your files, and your Claude CLI |
-| ✗ A fixed workflow builder where every path is drawn in advance | ✓ A task queue where Claude can plan and use tools inside the configured boundary |
-| ✗ A SaaS service where your task state lives elsewhere | ✓ A repo-local daemon, file-bus, WebUI, memory files, and optional Telegram interface |
+| A chatbot that only replies once and stops | A local agent loop that can create a task, run Claude CLI, write artifacts, and report completion |
+| An API wrapper around a hosted chat model | A file-backed local runtime using your machine, your files, and your Claude CLI |
+| A fixed workflow builder where every path is drawn in advance | A task queue where Claude can plan and use tools inside the configured boundary |
+| A SaaS service where your task state lives elsewhere | A repo-local daemon, file-bus, WebUI, memory files, and optional Telegram interface |
 
 The shortest version is:
 
@@ -45,7 +52,7 @@ aiwff-runtime is the L5 base: a single-machine agent runtime with persistent tas
 
 The minimal-brain design has 8 components. Phase 2 implements the practical core: daemon, Telegram polling, Claude CLI worker, file-bus, WebUI, `CLAUDE.md` brain configuration, and lightweight memory injection.
 
-For a compact source-oriented map of the runtime loop, see [`docs/architecture.md`](docs/architecture.md).
+The infographic above shows the full runtime loop at a glance. For a compact source-oriented map, see [docs/architecture.md](docs/architecture.md).
 
 | Component | Plain meaning | Phase 2 status |
 |---|---|---|
@@ -57,6 +64,9 @@ For a compact source-oriented map of the runtime loop, see [`docs/architecture.m
 | F. Memory | Markdown memory files are injected into Claude's prompt | Active for `memory/facts.md` and `memory/preferences.md` |
 | G. Inbox / Watching | A design surface for pending events and cross-session reminders | Minimal-brain design component; not documented here as a current `.env` option |
 | H. Self-verify | A design surface for a second-pass completion check | Phase 2 checks artifact existence; fuller Claude self-review is a later hardening target |
+
+<details>
+<summary>Text-only diagram</summary>
 
 ```text
                  ┌────────────────────┐
@@ -83,6 +93,8 @@ For a compact source-oriented map of the runtime loop, see [`docs/architecture.m
                     └────────────────────┘
 ```
 
+</details>
+
 One full pass looks like this:
 
 ```text
@@ -96,6 +108,12 @@ You send a Telegram task
   -> Telegram receives the result notice
   -> WebUI shows the same task state
 ```
+
+## Screenshots
+
+| HUD dashboard | Task progress | Chat / new task |
+|---|---|---|
+| ![HUD dashboard with runtime status, task queue, event stream, and attention panel](docs/images/webui-01-hud-dashboard.png) | ![Progress and event view showing completed mock tasks and progress logs](docs/images/webui-02-task-progress.png) | ![Chat view creating a new README screenshot task and showing status updates](docs/images/webui-03-chat-new-task.png) |
 
 ## Quick Start
 
@@ -128,7 +146,7 @@ Start the runtime:
 npm start
 ```
 
-> **Custom port / Windows note:** the default port is `3100`. To use another port: `PORT=3200 npm start` (bash / macOS / Linux). On **Windows PowerShell** the inline `VAR=value command` form does not work — run `$env:PORT=3200; npm start` instead.
+> **Custom port / Windows note:** the default port is `3100`. To use another port: `PORT=3200 npm start` (bash / macOS / Linux). On **Windows PowerShell** the inline `VAR=value command` form does not work; run `$env:PORT=3200; npm start` instead.
 
 Then verify it:
 
@@ -242,6 +260,8 @@ Examples of things you can tune in `CLAUDE.md`:
 | Safety boundary | "Never edit credential files or delete user data." |
 | Output contract | "Always write a Markdown report and end with `DONE:`." |
 
+Prebuilt personas live in [templates/claude/](templates/claude/): dev partner, research assistant, and daily helper.
+
 ## Configuration
 
 Copy `.env.example` to `.env`. The current `.env.example` exposes these fields:
@@ -272,12 +292,6 @@ CLAUDE_BYPASS_APPROVALS=
 
 `WORK_DIR` appears in the design draft, but it is not present in the current `.env.example` and is not read by the current Phase 2 runtime.
 
-## Browse 578+ Skills
-
-[skill-and-plugins-zh-tw](https://github.com/zaxardery8011-design/skill-and-plugins-zh-tw)
-
-This repo is the engine. That repo is the skill catalogue - combine them for a customizable personal AI assistant powered by 578+ capabilities.
-
 ## Vs Full AIWFF
 
 The rule of this repo: remove multi-node complexity, keep the single-machine agent loop understandable.
@@ -297,24 +311,29 @@ The rule of this repo: remove multi-node complexity, keep the single-machine age
 
 These limitations are intentionally not softened.
 
-| 限制 | 說明 |
+| Limitation | Meaning |
 |---|---|
-| 需要 Claude Max Plan | 真實 Claude worker 若開啟 approval/sandbox bypass，需確認帳號與 CLI 模式支援 |
-| 單用戶設計 | 一個 TG Bot 只綁一個管理員 ID，不適合多人共用 |
-| 無多節點 | 只跑在單台機器，不支援多節點 fleet 派工 |
-| Windows PATH 設定 | Claude CLI 在 Windows 需要確認 PATH 包含 claude.cmd |
-| 記憶是文字注入非 RAG | 記憶量大時 context 會撐大；建議定期整理 `memory/facts.md` |
-| 不適合長跑任務 | 超過 10 分鐘的任務沒有斷點續傳機制（AIWFF 完整版才有） |
+| Claude subscription required for real worker mode | Mock mode is free; real Claude worker mode depends on a paid Claude account and CLI access |
+| Single-user design | One Telegram bot is bound to one admin chat ID; this is not a multi-user helpdesk |
+| No multi-node fleet | This runtime runs on one machine and does not coordinate a fleet |
+| Windows PATH setup | Claude CLI on Windows needs `claude.cmd` available on PATH |
+| Memory is text injection, not RAG | Large memory files consume context; keep `memory/facts.md` focused |
+| Not for long-running tasks | Tasks longer than about 10 minutes do not have checkpoint resume support; full AIWFF handles heavier workflows |
 
 ## Roadmap
 
 | Phase | Status | Scope |
 |---|---|---|
-| Phase 1 | ✅ Done | Mock-first task lifecycle, local file-bus, WebUI, demo verification |
+| Phase 1 | Done | Mock-first task lifecycle, local file-bus, WebUI, demo verification |
 | Phase 2 | PR branch / not public baseline until merged | Claude CLI worker, TG Bot polling, `CLAUDE.md` brain configuration, lightweight memory injection |
-| Phase 3 | ⬜ Planned | Memory Layer hardening: better extraction, organization, and long-term context management |
+| Phase 3 | Planned | Memory Layer hardening: better extraction, organization, and long-term context management |
 
 Until this PR is merged, the public `master` baseline remains Phase 1. Phase 2 is the current PR branch scope.
+
+## Support
+
+- Technical support: [GitHub Issues](https://github.com/zaxardery8011-design/aiwff-runtime/issues).
+- Full / customized version: <https://zax.com.tw>
 
 ## License
 

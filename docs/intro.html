@@ -236,8 +236,7 @@
 
     .quick-card,
     .concept-card,
-    .roadmap-item,
-    .skill-callout {
+    .roadmap-item {
       border: 1px solid var(--border-soft);
       border-radius: 8px;
       background: color-mix(in oklch, var(--bg-1), transparent 5%);
@@ -486,29 +485,6 @@
       font-size: 14px;
     }
 
-    .skill-callout {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 24px;
-      align-items: center;
-      padding: 26px;
-      min-width: 0;
-      background:
-        linear-gradient(135deg, color-mix(in oklch, var(--accent), transparent 82%), transparent 54%),
-        var(--bg-1);
-    }
-
-    .skill-callout h2 {
-      margin-bottom: 10px;
-      font-size: clamp(28px, 4vw, 42px);
-    }
-
-    .skill-callout p {
-      max-width: 720px;
-      margin-bottom: 0;
-      color: var(--fg-1);
-    }
-
     .metric {
       min-width: 178px;
       padding: 18px;
@@ -569,10 +545,6 @@
 
       .concept-grid,
       .roadmap {
-        grid-template-columns: 1fr;
-      }
-
-      .skill-callout {
         grid-template-columns: 1fr;
       }
 
@@ -642,7 +614,6 @@
         <a href="#concepts">Concepts</a>
         <a href="#architecture">Architecture</a>
         <a href="#roadmap">Roadmap</a>
-        <a href="#skills">Skills</a>
       </nav>
     </div>
   </header>
@@ -777,20 +748,6 @@ npm run web
           <p>Add optional conversation surfaces after the local runtime is stable, observable, and safe to operate.</p>
         </article>
       </div>
-    </section>
-
-    <section id="skills" aria-labelledby="skills-title">
-      <a class="skill-callout" href="https://github.com/zaxardery8011-design/skill-and-plugins-zh-tw">
-        <div>
-          <p class="section-kicker">Skill catalog</p>
-          <h2 id="skills-title">Pair the engine with 578+ ready-to-use skills.</h2>
-          <p><strong>skill-and-plugins-zh-tw</strong> is the companion catalog for reusable AI workflow skills. Together, the runtime and catalog give builders an execution engine plus a growing directory of task templates.</p>
-        </div>
-        <div class="metric" aria-label="578 plus skills ready to use">
-          <strong>578+</strong>
-          <span>skills ready to use</span>
-        </div>
-      </a>
     </section>
   </main>
 

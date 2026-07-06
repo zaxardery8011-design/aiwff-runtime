@@ -30,9 +30,9 @@
 |---|---|---|
 | §0 開始之前 | 你在讀的這節 | 是 |
 | §1 前置需求與費用說明 | 要準備什麼、哪些免費哪些要付費 | 是（裝之前一定要看） |
-| §2 mock 安裝與驗證 | 一步步把免費模式跑通 | 是（待定稿，見下方 TODO） |
-| §3 啟用真 Claude worker | 接付費 AI、費用與核可提示 | 之後想升級再看（待定稿） |
-| §4 啟用 Telegram | 用手機傳訊息操作 | 之後想接手機再看（待定稿） |
+| §2 mock 安裝與驗證 | 一步步把免費模式跑通 | 是 |
+| §3 啟用真 Claude worker | 接付費 AI、費用與核可提示 | 之後想升級再看 |
+| §4 啟用 Telegram | 用手機傳訊息操作 | 之後想接手機再看 |
 | §5 疑難排解與支援管道 | 卡住了怎麼辦、去哪求助 | 是 |
 
 ---
@@ -69,10 +69,7 @@
 
 - 小主腦本身是 **MIT 授權、免費開源**，程式零外部相依，下載和跑 mock **不花一毛錢**。
 - 但「真 worker」是叫用你本機的 **Claude CLI**，而 Claude CLI 要能真的執行，背後需要一個**付費的 Claude 訂閱帳號**登入。
-- 費用層級（**以 Anthropic 官網公告為準，下列僅為概略層級，TODO：待查證最新方案與價格**）：
-  - **入門付費方案（Pro 級）**：個人用、約每月數十美元等級，適合輕度使用。
-  - **高用量方案（Max 級）**：跑量大、或要開較進階的 CLI 執行模式時較合適，價格明顯高於入門方案。
-  - 本專案英文 README 的「Honest Limitations」段落即註明真 worker 情境參考 **Claude Max Plan**；實際你需要哪一階，取決於你打算讓它跑多少量。
+- 費用層級與方案名稱會由 Anthropic 調整，本文不寫死價格。實務上你需要一個能使用 Claude CLI 的付費 Claude 帳號；輕量個人使用通常從入門付費方案評估，較高用量或較長任務再評估高用量方案。實際可用額度、價格與 CLI 權限，以你帳號當下顯示的官方資訊為準。
 - **沒有訂閱怎麼辦？** 完全沒問題——**mock 模式永遠免費**，你可以用它把整套流程、WebUI、檔案格式全部摸熟，只是任務結果是模擬產物、不是真的 AI output。
 
 > 小提醒：這裡不列死板價格數字，是因為訂閱方案與定價由 Anthropic 官方調整，寫死容易過時誤導。**要接真 worker 前，請先到 Anthropic 官網確認當前方案與價格**。
@@ -207,7 +204,7 @@ npm run web        # 等同 npm start，兩個指令都會起同一個 WebUI
 
 看到 `AIWFF Runtime listening on http://127.0.0.1:3100` 後，用瀏覽器打開這個網址，就會看到控制台首頁（HUD 分頁）：
 
-![WebUI HUD 首頁](images/webui-01-hud.png)
+![WebUI HUD 首頁](../images/webui-01-hud-dashboard.png)
 
 > **換 port**：3100 被占用時，`npm run web` 不會自動換 port（會直接報 `EADDRINUSE`）。這時 Windows PowerShell 用 `$env:PORT=3200; npm run web`，bash / macOS / Linux 用 `PORT=3200 npm run web`，再開 `http://127.0.0.1:3200`。
 
@@ -219,19 +216,80 @@ npm run web        # 等同 npm start，兩個指令都會起同一個 WebUI
 
 ## §3 啟用真 Claude worker
 
-> **[TODO — 待真帳號實測後定稿]**
->
-> 這一章要帶使用者把 mock 換成真 Claude worker：確認 `claude --version`、在 `.env` 設 `ENABLE_REAL_CLAUDE_WORKER=1`、理解真 worker 執行時會跳核可提示（正常安全設計，不要為了跳過而設 bypass 旗標）。步驟骨架見 [`INSTALL_AI.md`](../../INSTALL_AI.md) 第 3 節。
->
-> 對外定稿前需補：真訂閱帳號下的實際登入/核可流程、費用實測層級。費用政策已在 §1.3 講明，此章專注操作步驟。
+先跑通 §2 的 mock 流程，再切真 Claude worker。真 worker 會呼叫你本機的 Claude CLI，所以這一步會使用你的 Claude 帳號與訂閱額度。
+
+### 3.1 確認 Claude CLI 可用
+
+在 repo 根目錄執行：
+
+```bash
+claude --version
+```
+
+如果系統找不到 `claude`，或 CLI 要求你先登入，請先依 Claude CLI 當下顯示的官方流程處理。這份手冊不替你建立帳號、購買方案，也不替你跳過 Claude CLI 的安全提示。
+
+### 3.2 修改 `.env`
+
+把 mock 關掉，並明確開啟 real worker：
+
+```env
+MOCK_WORKER=0
+ENABLE_REAL_CLAUDE_WORKER=1
+CLAUDE_CMD=claude
+CLAUDE_BYPASS_APPROVALS=
+```
+
+`MOCK_WORKER=1` 會強制走 mock；要跑真 worker，請把它設成 `0` 或留空。`CLAUDE_BYPASS_APPROVALS` 預設留空，代表不加 `--dangerously-skip-permissions`。
+
+### 3.3 啟動與驗證
+
+重新啟動 runtime：
+
+```bash
+npm run web
+```
+
+用 WebUI 建一個小任務，確認任務完成後在 `data/artifacts/<task_id>.result.md` 看到 Markdown 產出。真 worker 產出的最後一行應符合 `CLAUDE.md` 契約，寫成 `DONE: ...`。
+
+如果 Claude CLI 跳出核可提示，這是正常安全設計；逐次確認，或先回到 `MOCK_WORKER=1` 用免費 mock 模式驗流程。
 
 ---
 
 ## §4 啟用 Telegram
 
-> **[TODO — 待實測後定稿]**
->
-> 這一章要帶使用者接上 Telegram：用 `@BotFather` 建 bot 拿 token、用 `@userinfobot` 拿自己的數字 chat id，兩者填進 `.env` 的 `TG_BOT_TOKEN` 與 `ADMIN_TG_CHAT_ID`。最常見的坑＝chat id 留空時 runtime 會拒絕啟動 Telegram polling。步驟骨架見 [`INSTALL_AI.md`](../../INSTALL_AI.md) 第 4 節。此路採 polling，不需要 webhook 或公開 IP。
+Telegram 是可選入口；不接 Telegram 時，WebUI 和 mock demo 仍可正常使用。這條路使用 polling，不需要 webhook、公開 hostname、反向代理或公開 IP。
+
+### 4.1 建 bot 與取得 chat id
+
+1. 在 Telegram 搜尋 `@BotFather`。
+2. 傳 `/newbot`，照提示建立 bot，複製它給你的 token。
+3. 搜尋 `@userinfobot`。
+4. 傳任意訊息，複製你的數字 chat id。
+
+### 4.2 填入 `.env`
+
+```env
+TG_BOT_TOKEN=<BotFather 給你的 token>
+ADMIN_TG_CHAT_ID=<你的數字 chat id>
+```
+
+`ADMIN_TG_CHAT_ID` 是必要安全邊界：只有這個 chat id 的訊息會被接受。若 `TG_BOT_TOKEN` 有值但 `ADMIN_TG_CHAT_ID` 留空，runtime 會拒絕啟動 Telegram polling，WebUI 則照常可用。
+
+### 4.3 啟動與測試
+
+重新啟動 runtime：
+
+```bash
+npm run web
+```
+
+接著在 Telegram 對你的 bot 傳：
+
+- `/start`：確認 bot 有回應。
+- `/tasks`：查看最近任務。
+- 任意文字：建立一筆任務；完成後 bot 會推送完成或失敗通知。
+
+如果 bot 沒反應，先看終端機是否出現 `Refusing Telegram polling: ADMIN_TG_CHAT_ID is required when TG_BOT_TOKEN is set.`，再確認 `.env` 裡 token 與 chat id 都已填入。
 
 ---
 
@@ -257,4 +315,4 @@ npm run web        # 等同 npm start，兩個指令都會起同一個 WebUI
 
 ---
 
-*小主腦（`aiwff-runtime`）· MIT 授權 · 本手冊部分章節標示 [TODO] 者，待實測後定稿。*
+*小主腦（`aiwff-runtime`）· MIT 授權*
