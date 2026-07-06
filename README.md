@@ -2,6 +2,7 @@
 
 > 繁體中文說明 -> [README.zh-TW.md](README.zh-TW.md)
 
+[![CI](https://github.com/zaxardery8011-design/aiwff-runtime/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/zaxardery8011-design/aiwff-runtime/actions/workflows/ci.yml)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-success)
