@@ -204,7 +204,7 @@ AIWFF Runtime listening on http://127.0.0.1:3100
 
 ### 7.3 支援管道
 
-- **技術支援（唯一管道）**：GitHub Issues → <https://github.com/zaxardery8011-design/aiwff-runtime/issues>
+- **技術回報**：GitHub Issues → <https://github.com/zaxardery8011-design/aiwff-runtime/issues>。如果目前無法建立 issue，請改從 <https://zax.com.tw> 聯絡。
 - **想要完整版 / 客製化**：<https://zax.com.tw>
 
 ---

@@ -310,7 +310,7 @@ npm run web
 
 ### 5.2 支援管道
 
-- **技術支援（唯一管道）**：到 GitHub 開 Issue → <https://github.com/zaxardery8011-design/aiwff-runtime/issues>。回報時附上作業系統、Node 版本、你跑的命令與完整錯誤訊息，能幫我們更快定位。
+- **技術回報**：到 GitHub 開 Issue → <https://github.com/zaxardery8011-design/aiwff-runtime/issues>。如果目前無法建立 issue，請改從 <https://zax.com.tw> 聯絡。回報時附上作業系統、Node 版本、你跑的命令與完整錯誤訊息，能幫我們更快定位。
 - **想要完整版 / 客製化**：<https://zax.com.tw>
 
 ---
