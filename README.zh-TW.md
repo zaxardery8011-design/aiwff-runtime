@@ -342,6 +342,16 @@ CLAUDE_BYPASS_APPROVALS=
 - 技術回報：GitHub Issues -> <https://github.com/zaxardery8011-design/aiwff-runtime/issues>。如果目前無法建立 issue，請改從 <https://zax.com.tw> 聯絡。
 - 完整版 / 客製化：<https://zax.com.tw>
 
+## Related — 守紀律工具鏈
+
+aiwff-runtime 是**引擎**——真的能跑得動你的 agent 的 local runtime。想讓它跑起來以後還守紀律？搭配這兩個護欄：
+
+- **[soplint](https://github.com/zaxardery8011-design/soplint)** — 靜態掃描 AI 工作節點的 SOP 紀律合規
+- **[execution-proofs](https://github.com/zaxardery8011-design/execution-proofs)** — MCP telemetry gateway：逼 agent 用真實檔案與時間戳證明「做完了」
+- **[aiwff-runtime](https://github.com/zaxardery8011-design/aiwff-runtime)** — the local agent runtime（本專案）
+
+> 引擎（跑得動的 agent）＋護欄（審紀律、逼證明），同一套「讓 AI 守紀律」哲學的兩面。
+
 ## License
 
 MIT

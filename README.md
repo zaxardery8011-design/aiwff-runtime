@@ -336,6 +336,16 @@ Until this PR is merged, the public `master` baseline remains Phase 1. Phase 2 i
 - Technical support: [GitHub Issues](https://github.com/zaxardery8011-design/aiwff-runtime/issues).
 - Full / customized version: <https://zax.com.tw>
 
+## Related — the discipline toolchain
+
+aiwff-runtime is the **engine** — the local agent runtime that actually runs your agents. Want it to stay disciplined once it's running? Pair it with the guardrails:
+
+- **[soplint](https://github.com/zaxardery8011-design/soplint)** — static SOP-compliance audit for AI work nodes
+- **[execution-proofs](https://github.com/zaxardery8011-design/execution-proofs)** — MCP telemetry gateway: force agents to prove "done" with real files & timestamps
+- **[aiwff-runtime](https://github.com/zaxardery8011-design/aiwff-runtime)** — the local agent runtime (this repo)
+
+> 引擎（跑得動的 agent）＋護欄（審紀律、逼證明），同一套「讓 AI 守紀律」哲學的兩面。
+
 ## License
 
 MIT
