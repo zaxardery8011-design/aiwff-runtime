@@ -743,6 +743,7 @@
       <span class="stat">模式 <span class="num" id="mode-text">-</span></span>
       <span class="stat">任務 <span class="num" id="task-count">0</span></span>
       <span class="stat alert" id="blocked-chip">卡住 <span class="num" id="blocked-count">0</span></span>
+      <span class="stat" id="sync-chip" title="上次成功取得公開資料的時間">更新 <span class="num" id="last-sync">—</span></span>
       <span class="grow"></span>
       <select class="top-btn" id="theme-select" title="佈景主題">
         <option value="default">預設</option>
@@ -790,7 +791,7 @@
             <canvas id="jhud-reactor"></canvas>
             <div class="jhud-core-readout">
               <div class="jhud-core-light" id="hud-health-light"></div>
-              <div class="jhud-core-state" id="hud-health-text">檢查中</div>
+              <div class="jhud-core-state" id="hud-health-text" role="status" aria-live="polite">檢查中</div>
               <div class="jhud-core-meta" id="hud-health-meta">等待健康狀態</div>
               <div class="jhud-core-sched" id="hud-schedule-readout">
                 <div class="hud-readout-row"><span>公開邊界</span><b>已啟用</b></div>
@@ -904,6 +905,9 @@
       settings: null,
       selectedMemory: null,
       progress: {},
+      coreState: 'BOOT',
+      lastSyncMs: 0,
+      online: false,
       chatBusy: false,
       chatTasks: {},
       chatMessages: [
@@ -1004,6 +1008,20 @@
       var date = new Date(value);
       if (Number.isNaN(date.getTime())) return String(value);
       return date.toLocaleString();
+    }
+
+    // 相對時間（借鏡 Claude-Code-Agent-Monitor：監控面板顯示「N 秒前」比絕對時戳更好掃）
+    function fmtAgo(value) {
+      var t = typeof value === 'number' ? value : Date.parse(value || '');
+      if (!Number.isFinite(t)) return '—';
+      var sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+      if (sec < 5) return '剛剛';
+      if (sec < 60) return sec + ' 秒前';
+      var min = Math.floor(sec / 60);
+      if (min < 60) return min + ' 分前';
+      var hr = Math.floor(min / 60);
+      if (hr < 24) return hr + ' 時前';
+      return Math.floor(hr / 24) + ' 天前';
     }
 
     function fmtDuration(seconds) {
@@ -1176,7 +1194,7 @@
       state.events.slice(-8).reverse().forEach(function(event) {
         lines.push({
           level: event.status === 'failed' ? 'error' : (event.status === 'blocked' ? 'warn' : ''),
-          text: '[' + fmtDate(event.ts) + '] ' + statusText(event.status || event.type || 'event') + ' ' + (event.title || event.id || '')
+          text: '[' + fmtAgo(event.ts) + '] ' + statusText(event.status || event.type || 'event') + ' ' + (event.title || event.id || '')
         });
       });
       var progress = state.logs && state.logs.task_progress ? state.logs.task_progress.slice(-6) : [];
@@ -1205,6 +1223,9 @@
       var ok = !!(state.health && state.health.ok);
       var coreState = !ok ? '檢查中' : (failed ? '警示' : (blocked ? '注意' : '正常'));
       var coreClass = failed ? 'bad' : (blocked ? 'warn' : '');
+      // 反應爐色彩綁定用的穩定狀態碼：先前 reactor 比對英文 ALERT/WATCH，
+      // 但 hud-health-text 顯示的是中文，永遠對不上 → 反應爐從不轉黃/紅。改讀這顆 token。
+      state.coreState = !ok ? 'BOOT' : (failed ? 'ALERT' : (blocked ? 'WATCH' : 'OK'));
 
       setText('hud-summary', '任務 ' + (counts.total || 0) + ' · 收件匣 ' + (hud.inbox_count || 0) + ' · 記憶 ' + (hud.memory_count || 0));
       setText('hud-health-text', coreState);
@@ -1257,7 +1278,7 @@
 
     function renderEvents() {
       var html = state.events.length ? state.events.slice().reverse().map(function(event) {
-        return '<div class="event-row"><div class="muted">' + escapeHtml(fmtDate(event.ts)) + '</div><div>' + statusLabel(event.status || event.type) + '</div><div><b>' + escapeHtml(event.title || event.id || event.type) + '</b><div class="soft">' + escapeHtml(event.summary || '') + '</div></div></div>';
+        return '<div class="event-row"><div class="muted" title="' + escapeHtml(fmtDate(event.ts)) + '">' + escapeHtml(fmtAgo(event.ts)) + '</div><div>' + statusLabel(event.status || event.type) + '</div><div><b>' + escapeHtml(event.title || event.id || event.type) + '</b><div class="soft">' + escapeHtml(event.summary || '') + '</div></div></div>';
       }).join('') : empty('尚無近期事件');
       setHtml('events-list', html);
 
@@ -1379,11 +1400,27 @@
         state.settings = results[8];
         await refreshProgress();
         syncChatTasks();
+        state.lastSyncMs = Date.now();
+        state.online = true;
       } catch (error) {
         state.health = null;
+        state.online = false;
         setText('health-text', error.message);
       }
       renderAll();
+      updateSyncChip();
+    }
+
+    // 資料新鮮度／連線狀態（借鏡 multi-agent orchestration dashboard：面板必須讓人一眼看出資料是不是 stale）
+    function updateSyncChip() {
+      var chip = byId('sync-chip');
+      if (!state.online) {
+        setText('last-sync', '連線中斷');
+        if (chip) chip.className = 'stat alert';
+        return;
+      }
+      setText('last-sync', fmtAgo(state.lastSyncMs));
+      if (chip) chip.className = 'stat' + (Date.now() - state.lastSyncMs > 15000 ? ' alert' : '');
     }
 
     document.querySelectorAll('[role="tab"]').forEach(function(tab) {
@@ -1482,6 +1519,7 @@
     function tickClock() {
       var now = new Date();
       setText('hud-clock', now.toLocaleTimeString([], { hour12: false }));
+      updateSyncChip();
     }
     tickClock();
     setInterval(tickClock, 1000);
@@ -1493,6 +1531,14 @@
       var ctx = cv.getContext('2d');
       var pane = document.getElementById('view-hud');
       var ph = 0;
+      // 借鏡 Agent UX 設計研究：尊重 prefers-reduced-motion，凍結反應爐動態、只保留靜態狀態色。
+      var reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      if (window.matchMedia) {
+        var mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+        (mq.addEventListener ? mq.addEventListener.bind(mq, 'change') : mq.addListener.bind(mq))(function(e) {
+          reduceMotion = e.matches;
+        });
+      }
       function ring(cx, cy, r, o) {
         ctx.beginPath();
         ctx.arc(cx, cy, r, o.a0 || 0, o.a1 || Math.PI * 2);
@@ -1533,8 +1579,8 @@
         var cx = w / 2;
         var cy = h / 2;
         var R = Math.min(w, h) / 2 - 4;
-        var alerting = (byId('hud-health-text') || {}).textContent === 'ALERT';
-        var watching = (byId('hud-health-text') || {}).textContent === 'WATCH';
+        var alerting = state.coreState === 'ALERT';
+        var watching = state.coreState === 'WATCH';
         var main = alerting ? '255,92,110' : (watching ? '255,215,106' : '95,230,255');
         var hot = alerting ? '255,150,160' : (watching ? '255,231,150' : '190,247,255');
         ctx.clearRect(0, 0, w, h);
@@ -1588,7 +1634,7 @@
         ctx.stroke();
         ctx.shadowBlur = 0;
         ctx.restore();
-        ph += 0.012;
+        ph += reduceMotion ? 0 : 0.012;
       }
       requestAnimationFrame(frame);
     })();
