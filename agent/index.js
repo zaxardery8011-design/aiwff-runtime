@@ -115,8 +115,25 @@ function readTextFileIfExists(filePath) {
   return fs.readFileSync(filePath, 'utf8').trim();
 }
 
+// 直寫目標檔的話，程序在寫到一半被砍（worker timeout kill、當機、Windows 關機）
+// 會留下截斷的 JSON，下一次 readJsonFile 直接 parse 失敗，該 task 狀態就此救不回。
+// 改成 同目錄 temp → rename 原子換檔：rename 之前目標檔一直是上一份完整內容。
+// rename 在目標被別的程序開著時（Windows 常見）可能 EPERM/EBUSY，這時退回直寫，
+// 最差也只是回到原本的行為，不會比修之前差。
 function writeJsonFile(filePath, value) {
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+  const text = `${JSON.stringify(value, null, 2)}\n`;
+  const tmpPath = `${filePath}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmpPath, text);
+    fs.renameSync(tmpPath, filePath);
+  } catch (error) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch (_) {
+      // temp 沒建成或已被搬走，忽略
+    }
+    fs.writeFileSync(filePath, text);
+  }
 }
 
 // 給非同步回呼（worker close / timeout / 進度管線）用的容錯寫入：
