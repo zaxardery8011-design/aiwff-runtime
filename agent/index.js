@@ -379,10 +379,31 @@ function isSafeLogFileName(name) {
   return /^[A-Za-z0-9._-]+\.(log|txt|jsonl|md)$/i.test(name);
 }
 
+// UTF-8 續接位元組固定是 0b10xxxxxx。切在位元組數上會把繁中／emoji 從中間剖開，
+// 讀出來是 U+FFFD 亂碼。以下兩個 helper 把切點退／進到最近的 code point 邊界。
+function utf8SafeEnd(buffer, maxBytes) {
+  if (buffer.length <= maxBytes) {
+    return buffer.length;
+  }
+  let end = maxBytes;
+  while (end > 0 && (buffer[end] & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  return end;
+}
+
+function utf8SafeStart(buffer) {
+  let start = 0;
+  while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) {
+    start += 1;
+  }
+  return start;
+}
+
 function readUtf8WithinLimit(filePath, maxBytes) {
   const stat = fs.statSync(filePath);
   const raw = fs.readFileSync(filePath);
-  const sliced = raw.length > maxBytes ? raw.subarray(0, maxBytes) : raw;
+  const sliced = raw.subarray(0, utf8SafeEnd(raw, maxBytes));
   return {
     text: sliced.toString('utf8'),
     size_bytes: stat.size,
@@ -401,8 +422,10 @@ function readUtf8Tail(filePath, maxBytes) {
   } finally {
     fs.closeSync(fd);
   }
+  // 檔尾這一段的開頭可能落在某個字的中間，往後推到下一個字的起頭再解碼。
+  const aligned = start > 0 ? buffer.subarray(utf8SafeStart(buffer)) : buffer;
   return {
-    text: buffer.toString('utf8'),
+    text: aligned.toString('utf8'),
     size_bytes: stat.size,
     truncated: start > 0,
   };
@@ -1165,6 +1188,8 @@ if (require.main === module) {
 
 // 測試用曝面：僅在被 require 時提供純函式，不改變 daemon 執行行為。
 module.exports = {
+  readUtf8WithinLimit,
+  readUtf8Tail,
   safeWriteJsonFile,
   appendProgressText,
   installProcessGuards,

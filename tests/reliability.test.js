@@ -326,6 +326,69 @@ test('Telegram token without admin chat id refuses polling', async () => {
   }
 });
 
+// --- (0) 硬閘截斷：按 code point 邊界切 ---
+const TRUNCATION_DIR = path.join(DATA_DIR, 'truncation-fixture');
+
+function writeTruncationFixture(name, text) {
+  fs.mkdirSync(TRUNCATION_DIR, { recursive: true });
+  const filePath = path.join(TRUNCATION_DIR, name);
+  fs.writeFileSync(filePath, text, 'utf8');
+  return filePath;
+}
+
+test('truncation: head limit never splits a multi-byte character', () => {
+  const text = '這是一段繁體中文內容'; // 每字 3 bytes，共 30 bytes
+  const filePath = writeTruncationFixture('head-multibyte.md', text);
+
+  // 正向 fixture：上限 10 落在第 4 個字（bytes 9..11）中間。
+  const cut = agentModule.readUtf8WithinLimit(filePath, 10);
+  assert.ok(!cut.text.includes('�'), `切點壞字: ${JSON.stringify(cut.text)}`);
+  assert.equal(cut.text, '這是一');
+  assert.ok(text.startsWith(cut.text));
+  assert.equal(cut.truncated, true);
+  assert.equal(cut.size_bytes, 30);
+
+  // 負向 fixture：上限 9 本來就落在邊界上，行為不得被本次修正改掉。
+  const aligned = agentModule.readUtf8WithinLimit(filePath, 9);
+  assert.equal(aligned.text, '這是一');
+  assert.equal(aligned.truncated, true);
+
+  // 未超過上限時整份回傳、truncated=false。
+  const whole = agentModule.readUtf8WithinLimit(filePath, 1024);
+  assert.equal(whole.text, text);
+  assert.equal(whole.truncated, false);
+});
+
+test('truncation: head limit never splits a 4-byte emoji', () => {
+  const filePath = writeTruncationFixture('head-emoji.md', 'ab🙂cd');
+  const cut = agentModule.readUtf8WithinLimit(filePath, 4); // 落在 emoji 的 4 bytes 中間
+  assert.ok(!cut.text.includes('�'), `切點壞字: ${JSON.stringify(cut.text)}`);
+  assert.equal(cut.text, 'ab');
+  assert.equal(cut.truncated, true);
+});
+
+test('truncation: tail limit never splits a multi-byte character', () => {
+  const text = '這是一段繁體中文內容';
+  const filePath = writeTruncationFixture('tail-multibyte.md', text);
+
+  // 正向 fixture：30-10=20 落在「中」（bytes 18..20）中間。
+  const tail = agentModule.readUtf8Tail(filePath, 10);
+  assert.ok(!tail.text.includes('�'), `切點壞字: ${JSON.stringify(tail.text)}`);
+  assert.equal(tail.text, '文內容');
+  assert.ok(text.endsWith(tail.text));
+  assert.equal(tail.truncated, true);
+
+  // 負向 fixture：30-12=18 剛好是邊界，回傳不得被本次修正改掉。
+  const alignedTail = agentModule.readUtf8Tail(filePath, 12);
+  assert.equal(alignedTail.text, '中文內容');
+  assert.equal(alignedTail.truncated, true);
+
+  // 未超過上限時整份回傳、truncated=false。
+  const whole = agentModule.readUtf8Tail(filePath, 1024);
+  assert.equal(whole.text, text);
+  assert.equal(whole.truncated, false);
+});
+
 // --- (1) 崩潰護欄 ---
 test('crash guardrail: installProcessGuards adds survivor handlers that do not rethrow', () => {
   const beforeUncaught = process.listeners('uncaughtException').slice();
