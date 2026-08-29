@@ -156,24 +156,49 @@ function readTask(taskId) {
   return readJsonFile(filePath);
 }
 
+// 任務清單的每一筆都是獨立的 row：一筆讀不動不該讓整份清單消失。
+// 原本的 try/catch 只擋得住「parse 失敗」，擋不住「parse 成功但不是預期形狀」的
+// row（null／陣列／字串——舊版格式、或別的工具塞進來的檔）。這種 row 會一路流到
+// 下面的 sort，String(b.created_at) 對 null 直接 TypeError，一筆未知型別就讓
+// GET /api/tasks 與 webui 首頁整條凍結。改成跳該筆、留一個同形的佔位 row。
+function isTaskRow(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function unknownRowTypeOf(value) {
+  if (value === null) {
+    return 'null';
+  }
+  return Array.isArray(value) ? 'array' : typeof value;
+}
+
+function unreadableTaskRow(name, reason) {
+  return {
+    id: name.replace(/\.json$/, ''),
+    status: 'failed',
+    title: '任務檔無法讀取',
+    instruction: reason,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+}
+
 function listTasks() {
   ensureDirectories();
   return fs
     .readdirSync(TASKS_DIR)
     .filter((name) => name.endsWith('.json') && !name.endsWith('.progress.json'))
     .map((name) => {
+      let row;
       try {
-        return readJsonFile(path.join(TASKS_DIR, name));
+        row = readJsonFile(path.join(TASKS_DIR, name));
       } catch (error) {
-        return {
-          id: name.replace(/\.json$/, ''),
-          status: 'failed',
-          title: '任務檔無法讀取',
-          instruction: error.message,
-          created_at: nowIso(),
-          updated_at: nowIso(),
-        };
+        return unreadableTaskRow(name, error.message);
       }
+      if (!isTaskRow(row)) {
+        return unreadableTaskRow(name, `unknown row type: ${unknownRowTypeOf(row)}`);
+      }
+      return row;
     })
     .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
 }
@@ -1192,6 +1217,7 @@ module.exports = {
   readUtf8Tail,
   safeWriteJsonFile,
   appendProgressText,
+  listTasks,
   installProcessGuards,
   startTelegramPolling,
   tgRequest,

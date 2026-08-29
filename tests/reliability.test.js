@@ -8,6 +8,7 @@ const { spawn } = require('node:child_process');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
+const TASKS_DIR = path.join(DATA_DIR, 'tasks');
 const agentModule = require(path.join(ROOT_DIR, 'agent', 'index.js'));
 
 function sleep(ms) {
@@ -520,5 +521,41 @@ test('telegram reconnect: polling backs off then recovers after transient discon
   } finally {
     await stopDaemon(runtime.daemon);
     fake.server.close();
+  }
+});
+
+// --- (4) 讀取端遇未知 row type 跳筆、不整條凍結 ---
+test('ledger reader: a task row that parses but is not an object does not freeze the whole list', () => {
+  fs.mkdirSync(TASKS_DIR, { recursive: true });
+  const fixtures = {
+    'ossship-good.json': JSON.stringify({
+      id: 'ossship-good',
+      status: 'done',
+      title: '正常 row',
+      created_at: '2026-08-29T00:00:00.000Z',
+      updated_at: '2026-08-29T00:00:00.000Z',
+    }),
+    'ossship-row-null.json': 'null',
+    'ossship-row-array.json': '[{"id":"nested"}]',
+  };
+  for (const [name, text] of Object.entries(fixtures)) {
+    fs.writeFileSync(path.join(TASKS_DIR, name), text);
+  }
+
+  try {
+    const tasks = agentModule.listTasks();
+    const byId = new Map(tasks.map((task) => [task.id, task]));
+    // 正常 row 仍要吐出來——這是「跳該筆」與「整條凍結」的分界。
+    assert.ok(byId.has('ossship-good'), '正常 row 必須仍在清單裡');
+    for (const unknownId of ['ossship-row-null', 'ossship-row-array']) {
+      const row = byId.get(unknownId);
+      assert.ok(row, `${unknownId} 要留下佔位 row`);
+      assert.equal(row.status, 'failed');
+      assert.match(String(row.instruction), /unknown row type/);
+    }
+  } finally {
+    for (const name of Object.keys(fixtures)) {
+      fs.rmSync(path.join(TASKS_DIR, name), { force: true });
+    }
   }
 });
