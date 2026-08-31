@@ -2,9 +2,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
 const net = require('node:net');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
@@ -556,6 +557,77 @@ test('ledger reader: a task row that parses but is not an object does not freeze
   } finally {
     for (const name of Object.keys(fixtures)) {
       fs.rmSync(path.join(TASKS_DIR, name), { force: true });
+    }
+  }
+});
+
+// --- (5) 閘類改動的耦合 regression：checked>=1 才算過 ---
+const SCAN_SCRIPT = path.join(ROOT_DIR, 'scripts', 'ip-redline-scan.js');
+
+// token 形狀的字串一律用拼接建出來，避免這支測試檔自己變成 redline 命中。
+const FAKE_TOKEN = ['ghp', '_', 'A'.repeat(24)].join('');
+
+function makeScanRoot(files) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ip-redline-'));
+  for (const [name, text] of Object.entries(files)) {
+    fs.writeFileSync(path.join(root, name), text, 'utf8');
+  }
+  return root;
+}
+
+function runScan(rootDir) {
+  const result = spawnSync(process.execPath, [SCAN_SCRIPT], {
+    env: { ...process.env, IP_SCAN_ROOT: rootDir },
+    encoding: 'utf8',
+  });
+  return { code: result.status, out: `${result.stdout}${result.stderr}` };
+}
+
+function readChecked(output) {
+  const match = output.match(/files_checked=(\d+) lines_checked=(\d+)/);
+  assert.ok(match, `輸出未帶 checked 計數: ${JSON.stringify(output)}`);
+  return { files: Number(match[1]), lines: Number(match[2]) };
+}
+
+test('ip redline guard: zero files checked fails closed instead of printing PASS', () => {
+  const roots = {
+    clean: makeScanRoot({ 'readme.md': 'nothing sensitive here\n' }),
+    dirty: makeScanRoot({ 'leak.md': `token: ${FAKE_TOKEN}\n` }),
+    empty: makeScanRoot({}),
+  };
+
+  try {
+    // 正向：有東西可掃且乾淨 → PASS，且 checked 計數必須是活的（>=1）。
+    const clean = runScan(roots.clean);
+    assert.equal(clean.code, 0, clean.out);
+    assert.match(clean.out, /^PASS /m);
+    const cleanChecked = readChecked(clean.out);
+    assert.equal(cleanChecked.files, 1);
+    assert.ok(cleanChecked.lines >= 1, `lines_checked 應 >=1，實得 ${cleanChecked.lines}`);
+
+    // 負向一（偵測力）：同一支腳本仍抓得到 redline，證明 PASS 不是因為它瞎了。
+    const dirty = runScan(roots.dirty);
+    assert.equal(dirty.code, 1, dirty.out);
+    assert.match(dirty.out, /found private markers or token-shaped secrets/);
+    assert.equal(readChecked(dirty.out).files, 1);
+
+    // 負向二（本次修正的判準）：掃到 0 個檔時，零命中不得判過。
+    const empty = runScan(roots.empty);
+    assert.equal(readChecked(empty.out).files, 0);
+    assert.notEqual(empty.code, 0, `checked 0 檔卻回 exit 0: ${empty.out}`);
+    assert.equal(empty.code, 2, empty.out);
+    assert.match(empty.out, /checked 0 files/);
+    assert.doesNotMatch(empty.out, /^PASS /m);
+
+    // 三態必須互不相同，否則三個 fixture 全綠也不證明有鑑別力。
+    assert.deepEqual(
+      [clean.code, dirty.code, empty.code],
+      [0, 1, 2],
+      '乾淨／命中／空掃三態的 exit code 必須可區分',
+    );
+  } finally {
+    for (const root of Object.values(roots)) {
+      fs.rmSync(root, { recursive: true, force: true });
     }
   }
 });

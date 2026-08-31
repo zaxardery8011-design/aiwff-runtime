@@ -3,7 +3,9 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT_DIR = path.resolve(__dirname, '..');
+// 掃描根目錄可用 IP_SCAN_ROOT 覆寫——讓 regression 測項能把同一支正式腳本指向
+// 受控 fixture 目錄，證明 checked 計數與 fail-closed 分支真的有鑑別力。
+const ROOT_DIR = path.resolve(process.env.IP_SCAN_ROOT || path.join(__dirname, '..'));
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'data', 'logs']);
 
 const ENCODED_KEYWORD_TERMS = [
@@ -74,8 +76,8 @@ const ALLOWLIST = [
   },
 ];
 
-function toRepoPath(filePath) {
-  return path.relative(ROOT_DIR, filePath).replaceAll(path.sep, '/');
+function toRepoPath(filePath, rootDir = ROOT_DIR) {
+  return path.relative(rootDir, filePath).replaceAll(path.sep, '/');
 }
 
 function isAllowed(repoPath, line) {
@@ -107,15 +109,22 @@ function listFiles(dir) {
   return result;
 }
 
-function scanFile(filePath) {
-  const repoPath = toRepoPath(filePath);
+function scanFile(filePath, rootDir = ROOT_DIR, counters = null) {
+  const repoPath = toRepoPath(filePath, rootDir);
   const buffer = fs.readFileSync(filePath);
   if (isBinary(buffer)) {
+    if (counters) {
+      counters.binary_skipped += 1;
+    }
     return [];
   }
 
   const findings = [];
   const lines = buffer.toString('utf8').split(/\r?\n/);
+  if (counters) {
+    counters.files_checked += 1;
+    counters.lines_checked += lines.length;
+  }
   lines.forEach((line, index) => {
     if (isAllowed(repoPath, line)) {
       return;
@@ -135,17 +144,36 @@ function scanFile(filePath) {
   return findings;
 }
 
+// 回傳 findings + 實際檢查量。零命中只有在 files_checked >= 1 時才有意義。
+function scanTree(rootDir = ROOT_DIR) {
+  const counters = { files_checked: 0, lines_checked: 0, binary_skipped: 0 };
+  const findings = listFiles(rootDir).flatMap((filePath) => scanFile(filePath, rootDir, counters));
+  return { findings, ...counters };
+}
+
 function main() {
-  const findings = listFiles(ROOT_DIR).flatMap(scanFile);
-  if (findings.length) {
-    console.error('FAIL IP redline scan found private markers or token-shaped secrets:');
-    for (const finding of findings) {
+  const result = scanTree(ROOT_DIR);
+  const checked = `files_checked=${result.files_checked} lines_checked=${result.lines_checked} binary_skipped=${result.binary_skipped}`;
+
+  // checked>=1 才算過：掃了 0 個檔的「零命中」不是通過，是閘沒跑到。
+  if (result.files_checked === 0) {
+    console.error(`FAIL IP redline scan checked 0 files under ${ROOT_DIR} — zero hits proves nothing (${checked})`);
+    process.exit(2);
+  }
+
+  if (result.findings.length) {
+    console.error(`FAIL IP redline scan found private markers or token-shaped secrets (${checked}):`);
+    for (const finding of result.findings) {
       console.error(`${finding.file}:${finding.line} [${finding.id}] ${finding.match}`);
     }
     process.exit(1);
   }
 
-  console.log('PASS IP redline scan: no redline hits');
+  console.log(`PASS IP redline scan: no redline hits (${checked})`);
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = { scanTree };
