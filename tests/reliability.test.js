@@ -631,3 +631,73 @@ test('ip redline guard: zero files checked fails closed instead of printing PASS
     }
   }
 });
+
+// --- (6) 落地類命令的 exit 0 必須綁「實際寫了什麼」的回讀 ---
+// 直接 require 正式腳本匯出的函式（不抄一份判準到測試裡），避免測試與產品碼脫鉤。
+const { readBackArtifact } = require(path.join(ROOT_DIR, 'scripts', 'demo.js'));
+
+function makeArtifactRoot() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'demo-artifact-'));
+}
+
+function catchMessage(fn) {
+  try {
+    fn();
+  } catch (error) {
+    return error.message;
+  }
+  return null;
+}
+
+test('demo readback: task reported done never counts as shipped without an artifact readback', () => {
+  const root = makeArtifactRoot();
+  const taskId = '11111111-2222-3333-4444-555555555555';
+  const artifactPath = path.join(root, `${taskId}.result.json`);
+
+  try {
+    // 負向一：任務回 done 但檔根本沒寫 → 必須有錯，不得靜默放行。
+    const missing = catchMessage(() => readBackArtifact(artifactPath, taskId));
+
+    // 負向二：檔在但 0 bytes（寫入失敗最常見的殘骸形狀）。
+    fs.writeFileSync(artifactPath, '');
+    const empty = catchMessage(() => readBackArtifact(artifactPath, taskId));
+
+    // 負向三：檔非空但不是合法 JSON（寫到一半被砍）。
+    fs.writeFileSync(artifactPath, '{"task_id": ');
+    const broken = catchMessage(() => readBackArtifact(artifactPath, taskId));
+
+    // 負向四：合法 JSON 但內容對不上這次的任務（回讀到別人的 artifact）。
+    fs.writeFileSync(
+      artifactPath,
+      JSON.stringify({ task_id: 'other-task', completed_at: '2026-09-01T00:00:00.000Z' }),
+    );
+    const mismatch = catchMessage(() => readBackArtifact(artifactPath, taskId));
+
+    // 負向五：task_id 對得上但缺 completed_at → 存在＋非空仍不算完成。
+    fs.writeFileSync(artifactPath, JSON.stringify({ task_id: taskId }));
+    const incomplete = catchMessage(() => readBackArtifact(artifactPath, taskId));
+
+    for (const [label, message] of Object.entries({ missing, empty, broken, mismatch, incomplete })) {
+      assert.ok(message, `${label} 應該讓 demo 失敗，實際卻通過了`);
+    }
+    assert.match(missing, /no artifact was written/);
+    assert.match(empty, /is empty \(0 bytes\)/);
+    assert.match(broken, /not valid JSON/);
+    assert.match(mismatch, /task_id mismatch/);
+    assert.match(incomplete, /completed_at is missing/);
+
+    // 五種失敗訊息必須互不相同，否則「有擋」不等於「擋得出是哪一種」。
+    const messages = [missing, empty, broken, mismatch, incomplete];
+    assert.equal(new Set(messages).size, messages.length, `失敗訊息無鑑別力: ${JSON.stringify(messages)}`);
+
+    // 正向：真的寫好了才回讀成功，且回讀量測是活的（bytes = 實際位元組數）。
+    const good = { task_id: taskId, completed_at: '2026-09-01T00:00:00.000Z', output: 'ok' };
+    fs.writeFileSync(artifactPath, JSON.stringify(good));
+    const receipt = readBackArtifact(artifactPath, taskId);
+    assert.equal(receipt.completed_at, good.completed_at);
+    assert.equal(receipt.bytes, Buffer.byteLength(JSON.stringify(good)));
+    assert.ok(receipt.bytes > 0, 'bytes 應為實際位元組數');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

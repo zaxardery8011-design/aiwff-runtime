@@ -1,3 +1,4 @@
+const fs = require('fs');
 const http = require('http');
 const net = require('net');
 const path = require('path');
@@ -105,6 +106,31 @@ async function waitForTaskDone(port, taskId) {
   throw new Error(`Task ${taskId} did not finish within 30 seconds`);
 }
 
+// 「任務回報 done」不等於「檔案真的落地」：把 demo 宣告的 artifact 讀回來實檢，
+// 缺檔／空檔／壞 JSON／內容對不上任務都必須讓 demo 以非 0 收場，不得只憑 API 回 done 判成功。
+function readBackArtifact(artifactPath, taskId) {
+  if (!fs.existsSync(artifactPath)) {
+    throw new Error(`task reported done but no artifact was written at ${artifactPath}`);
+  }
+  const buffer = fs.readFileSync(artifactPath);
+  if (buffer.length === 0) {
+    throw new Error(`artifact was written but is empty (0 bytes) at ${artifactPath}`);
+  }
+  let artifact;
+  try {
+    artifact = JSON.parse(buffer.toString('utf8'));
+  } catch (error) {
+    throw new Error(`artifact is not valid JSON at ${artifactPath}: ${error.message}`);
+  }
+  if (artifact.task_id && artifact.task_id !== taskId) {
+    throw new Error(`artifact task_id mismatch at ${artifactPath}: expected ${taskId}, found ${artifact.task_id}`);
+  }
+  if (!artifact.completed_at) {
+    throw new Error(`artifact completed_at is missing at ${artifactPath}`);
+  }
+  return { bytes: buffer.length, completed_at: artifact.completed_at };
+}
+
 async function main() {
   const port = await choosePort();
   const daemon = spawn('node', ['agent/index.js'], {
@@ -124,9 +150,11 @@ async function main() {
     });
     const task = await waitForTaskDone(port, created.id);
     const artifactPath = path.join(ROOT_DIR, 'data', 'artifacts', `${task.id}.result.json`);
+    const readback = readBackArtifact(artifactPath, task.id);
 
     console.log(`Task ID: ${task.id}`);
     console.log(`Artifact: ${artifactPath}`);
+    console.log(`Artifact readback: bytes=${readback.bytes} completed_at=${readback.completed_at}`);
     console.log(`Status: ${task.status}`);
     console.log('✓ Demo completed — task lifecycle verified');
   } finally {
@@ -134,7 +162,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(`FAIL demo: ${error.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(`FAIL demo: ${error.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { readBackArtifact };
