@@ -632,6 +632,63 @@ test('ip redline guard: zero files checked fails closed instead of printing PASS
   }
 });
 
+// 直接 require 正式腳本匯出的函式，讓測試驗的是產品碼本身的判準。
+const scanModule = require(SCAN_SCRIPT);
+
+test('ip redline guard: a read error is its own state and never swallows the scan summary', () => {
+  const roots = [];
+  const newRoot = (files) => {
+    const root = makeScanRoot(files);
+    roots.push(root);
+    return root;
+  };
+
+  try {
+    const root = newRoot({ 'readme.md': 'nothing sensitive here\n' });
+    fs.mkdirSync(path.join(root, 'sub'));
+
+    // 真實 fs 錯誤、不是注入的假物件：對目錄 readFileSync 在 win32 與 POSIX 都拋 EISDIR。
+    const counters = { files_checked: 0, lines_checked: 0, binary_skipped: 0, read_errors: [] };
+    const findings = scanModule.scanFile(path.join(root, 'sub'), root, counters);
+    assert.deepEqual(findings, [], '讀不到的檔不得偽造成命中');
+    assert.equal(counters.files_checked, 0, '讀失敗的檔不得被算進 checked');
+    assert.equal(counters.read_errors.length, 1);
+    assert.equal(counters.read_errors[0].file, 'sub');
+    assert.match(counters.read_errors[0].code, /^E[A-Z]+$/, `errno 應具名: ${counters.read_errors[0].code}`);
+
+    // 收尾沒被吞掉：判決仍帶得出 checked 計數與具名事由。
+    const base = { files_checked: 1, lines_checked: 1, binary_skipped: 0, read_errors: [] };
+    const broken = scanModule.decideExit({ ...base, findings: [], read_errors: counters.read_errors }, root);
+    assert.equal(broken.code, 3);
+    assert.match(broken.lines[0], /could not read 1 file\(s\)/);
+    assert.match(broken.lines[0], /files_checked=1 lines_checked=1 binary_skipped=0 read_errors=1/);
+    assert.match(broken.lines[1], /^sub \[read-error\] E[A-Z]+: /);
+
+    // 四態的 exit code 必須互不相同，否則「掃壞了」在 rc 層等同「掃到了」。
+    const clean = scanModule.decideExit({ ...base, findings: [] }, root);
+    const dirty = scanModule.decideExit(
+      { ...base, findings: [{ file: 'leak.md', line: 1, id: 'secret-token', match: '<redacted secret pattern>' }] },
+      root,
+    );
+    const empty = scanModule.decideExit({ ...base, files_checked: 0, findings: [] }, root);
+    assert.deepEqual(
+      [clean.code, dirty.code, empty.code, broken.code],
+      [0, 1, 2, 3],
+      '乾淨／命中／空掃／讀不到四態的 exit code 必須可區分',
+    );
+
+    // 遮蔽能力要有可跑測試：偵測器抓到 token 之後，輸出不得把 token 原文再吐一次。
+    const leaked = runScan(newRoot({ 'leak.md': `token: ${FAKE_TOKEN}\n` }));
+    assert.equal(leaked.code, 1, leaked.out);
+    assert.ok(!leaked.out.includes(FAKE_TOKEN), `偵測器輸出洩漏了它抓到的 token: ${leaked.out}`);
+    assert.match(leaked.out, /<redacted secret pattern>/);
+  } finally {
+    for (const root of roots) {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 // --- (6) 落地類命令的 exit 0 必須綁「實際寫了什麼」的回讀 ---
 // 直接 require 正式腳本匯出的函式（不抄一份判準到測試裡），避免測試與產品碼脫鉤。
 const { readBackArtifact } = require(path.join(ROOT_DIR, 'scripts', 'demo.js'));

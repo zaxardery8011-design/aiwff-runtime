@@ -111,7 +111,21 @@ function listFiles(dir) {
 
 function scanFile(filePath, rootDir = ROOT_DIR, counters = null) {
   const repoPath = toRepoPath(filePath, rootDir);
-  const buffer = fs.readFileSync(filePath);
+  let buffer;
+  try {
+    buffer = fs.readFileSync(filePath);
+  } catch (error) {
+    // 偵測器自己讀不到一個檔，不得把整趟收尾一起吞掉：記成具名的 read error，
+    // 讓 main() 仍印得出 checked 計數，並用專屬 exit code 跟「真的掃到 redline」分開。
+    if (counters) {
+      counters.read_errors.push({
+        file: repoPath,
+        code: error.code || 'UNKNOWN',
+        message: error.message,
+      });
+    }
+    return [];
+  }
   if (isBinary(buffer)) {
     if (counters) {
       counters.binary_skipped += 1;
@@ -146,34 +160,66 @@ function scanFile(filePath, rootDir = ROOT_DIR, counters = null) {
 
 // 回傳 findings + 實際檢查量。零命中只有在 files_checked >= 1 時才有意義。
 function scanTree(rootDir = ROOT_DIR) {
-  const counters = { files_checked: 0, lines_checked: 0, binary_skipped: 0 };
+  const counters = { files_checked: 0, lines_checked: 0, binary_skipped: 0, read_errors: [] };
   const findings = listFiles(rootDir).flatMap((filePath) => scanFile(filePath, rootDir, counters));
   return { findings, ...counters };
 }
 
-function main() {
-  const result = scanTree(ROOT_DIR);
-  const checked = `files_checked=${result.files_checked} lines_checked=${result.lines_checked} binary_skipped=${result.binary_skipped}`;
+// 收尾判決是一個純函式：main() 只負責印與 exit，測試才能直接驗判準本身。
+// 四態各自一個 exit code，否則「掃壞了」與「掃到了」在 rc 層無法區分。
+function decideExit(result, rootDir = ROOT_DIR) {
+  const readErrors = result.read_errors || [];
+  const checked =
+    `files_checked=${result.files_checked} lines_checked=${result.lines_checked} ` +
+    `binary_skipped=${result.binary_skipped} read_errors=${readErrors.length}`;
+
+  // 偵測器自己讀失敗 → fail closed，但收尾照印：講得出是哪個檔、什麼 errno。
+  if (readErrors.length) {
+    return {
+      code: 3,
+      stream: 'error',
+      lines: [
+        `FAIL IP redline scan could not read ${readErrors.length} file(s) — scan is incomplete (${checked}):`,
+        ...readErrors.map((entry) => `${entry.file} [read-error] ${entry.code}: ${entry.message}`),
+      ],
+    };
+  }
 
   // checked>=1 才算過：掃了 0 個檔的「零命中」不是通過，是閘沒跑到。
   if (result.files_checked === 0) {
-    console.error(`FAIL IP redline scan checked 0 files under ${ROOT_DIR} — zero hits proves nothing (${checked})`);
-    process.exit(2);
+    return {
+      code: 2,
+      stream: 'error',
+      lines: [`FAIL IP redline scan checked 0 files under ${rootDir} — zero hits proves nothing (${checked})`],
+    };
   }
 
   if (result.findings.length) {
-    console.error(`FAIL IP redline scan found private markers or token-shaped secrets (${checked}):`);
-    for (const finding of result.findings) {
-      console.error(`${finding.file}:${finding.line} [${finding.id}] ${finding.match}`);
-    }
-    process.exit(1);
+    return {
+      code: 1,
+      stream: 'error',
+      lines: [
+        `FAIL IP redline scan found private markers or token-shaped secrets (${checked}):`,
+        ...result.findings.map((finding) => `${finding.file}:${finding.line} [${finding.id}] ${finding.match}`),
+      ],
+    };
   }
 
-  console.log(`PASS IP redline scan: no redline hits (${checked})`);
+  return { code: 0, stream: 'log', lines: [`PASS IP redline scan: no redline hits (${checked})`] };
+}
+
+function main() {
+  const verdict = decideExit(scanTree(ROOT_DIR), ROOT_DIR);
+  for (const line of verdict.lines) {
+    console[verdict.stream](line);
+  }
+  if (verdict.code !== 0) {
+    process.exit(verdict.code);
+  }
 }
 
 if (require.main === module) {
   main();
 }
 
-module.exports = { scanTree };
+module.exports = { scanTree, scanFile, decideExit };
