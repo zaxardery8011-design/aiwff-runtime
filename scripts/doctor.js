@@ -11,6 +11,16 @@ const JSON_MODE = process.argv.includes('--json');
 
 const UNSAFE_FLAGS = new Set(['CLAUDE_BYPASS_APPROVALS']);
 
+// Every load/deny failure must name the rule that produced it, so the reader
+// can tell WHICH rule fired instead of getting one merged sentence.
+const RULE = {
+  ENV_LOAD_FAILED: 'env.load_failed',
+  ENV_INVALID_ASSIGNMENT: 'env.parse.invalid_assignment',
+  ENV_UNMATCHED_QUOTE: 'env.parse.unmatched_quote',
+  ENV_UNSAFE_FLAG: 'env.unsafe_flag',
+  DOCTOR_RUNTIME: 'doctor.runtime_error',
+};
+
 function envFlagValue(value) {
   return value === '1' || String(value).toLowerCase() === 'true';
 }
@@ -59,8 +69,21 @@ function checkPortAvailableText(port) {
   });
 }
 
-function makeCheck(id, ok, detail) {
-  return { id, ok: Boolean(ok), detail: String(detail || '') };
+function makeReason(ruleId, reason) {
+  return { rule_id: String(ruleId), reason: String(reason) };
+}
+
+function formatReasons(reasons) {
+  return reasons.map((item) => `[${item.rule_id}] ${item.reason}`).join('; ');
+}
+
+function makeCheck(id, ok, detail, reasons) {
+  return {
+    id,
+    ok: Boolean(ok),
+    detail: String(detail || ''),
+    reasons: Array.isArray(reasons) ? reasons : [],
+  };
 }
 
 function quoteCommandPart(value) {
@@ -100,7 +123,17 @@ function parseDotEnv() {
     return { exists: false, values, errors };
   }
 
-  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+  let raw;
+  try {
+    raw = fs.readFileSync(envPath, 'utf8');
+  } catch (error) {
+    // The file is there but unreadable: say why it did not load instead of
+    // crashing into the generic runtime error.
+    errors.push(makeReason(RULE.ENV_LOAD_FAILED, `.env exists but could not be read: ${error.message}`));
+    return { exists: true, values, errors };
+  }
+
+  const lines = raw.split(/\r?\n/);
   lines.forEach((rawLine, index) => {
     const line = rawLine.trim();
     if (!line || line.startsWith('#')) {
@@ -108,13 +141,13 @@ function parseDotEnv() {
     }
     const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
     if (!match) {
-      errors.push(`line ${index + 1}: invalid assignment`);
+      errors.push(makeReason(RULE.ENV_INVALID_ASSIGNMENT, `line ${index + 1}: invalid assignment`));
       return;
     }
     let value = match[2].trim();
     const quote = value[0];
     if ((quote === '"' || quote === "'") && value[value.length - 1] !== quote) {
-      errors.push(`line ${index + 1}: unmatched quote`);
+      errors.push(makeReason(RULE.ENV_UNMATCHED_QUOTE, `line ${index + 1}: unmatched quote`));
       return;
     }
     if ((quote === '"' || quote === "'") && value[value.length - 1] === quote) {
@@ -169,11 +202,10 @@ function checkEnvValid(parsedEnv) {
     }
   }
   if (parsedEnv.errors.length || unsafe.length) {
-    const detail = []
+    const reasons = []
       .concat(parsedEnv.errors)
-      .concat(unsafe.map((name) => `${name} is unsafe for default runs`))
-      .join('; ');
-    return makeCheck('env_valid', false, detail);
+      .concat(unsafe.map((name) => makeReason(RULE.ENV_UNSAFE_FLAG, `${name} is unsafe for default runs`)));
+    return makeCheck('env_valid', false, formatReasons(reasons), reasons);
   }
   return makeCheck('env_valid', true, parsedEnv.exists ? '.env parsed without unsafe flags' : '.env absent; environment is safe');
 }
@@ -210,12 +242,16 @@ async function runJsonDoctor() {
 
   for (const check of checks) {
     if (!check.ok) {
-      if (check.id === 'port_available') {
+      if (check.reasons.length) {
+        // Named reason wins over the generic one-liner: the action says which
+        // rule fired, not just which check failed.
+        for (const item of check.reasons) {
+          nextActions.push(`Fix ${check.id} [${item.rule_id}]: ${item.reason}`);
+        }
+      } else if (check.id === 'port_available') {
         nextActions.push(`Free port ${PORT} or set PORT to another value.`);
       } else if (check.id === 'tg_config_valid') {
         nextActions.push('Set ADMIN_TG_CHAT_ID or clear TG_BOT_TOKEN.');
-      } else if (check.id === 'env_valid') {
-        nextActions.push('Fix .env syntax and remove unsafe default flags.');
       } else {
         nextActions.push(`Fix ${check.id}: ${check.detail}`);
       }
@@ -263,7 +299,9 @@ main().catch((error) => {
       JSON.stringify(
         {
           ok: false,
-          checks: [makeCheck('doctor_runtime', false, error.message)],
+          checks: [
+            makeCheck('doctor_runtime', false, error.message, [makeReason(RULE.DOCTOR_RUNTIME, error.message)]),
+          ],
           next_actions: ['Fix the doctor runtime error and re-run npm run doctor -- --json.'],
         },
         null,
