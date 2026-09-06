@@ -1,11 +1,13 @@
 const assert = require('assert');
 const fs = require('fs');
-const http = require('http');
 const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
+// 這支 harness 以前自己抄了一份 requestJson，於是「中途斷線要 signal 成 abort」的修法得改三個地方。
+// 改成共用 demo.js 那一份：修一次就三邊同時生效，也不會有哪一份偷偷漂回舊行為。
+const { requestJson } = require(path.join(ROOT_DIR, 'scripts', 'demo.js'));
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -20,44 +22,6 @@ function getOpenPort() {
       server.close(() => resolve(address.port));
     });
     server.listen(0, '127.0.0.1');
-  });
-}
-
-function requestJson(port, method, route, payload) {
-  return new Promise((resolve, reject) => {
-    const body = payload ? JSON.stringify(payload) : '';
-    const req = http.request(
-      {
-        hostname: '127.0.0.1',
-        port,
-        path: route,
-        method,
-        headers: {
-          'content-type': 'application/json',
-          'content-length': Buffer.byteLength(body),
-        },
-      },
-      (res) => {
-        let raw = '';
-        res.on('data', (chunk) => {
-          raw += chunk;
-        });
-        res.on('end', () => {
-          try {
-            const parsed = raw ? JSON.parse(raw) : {};
-            if (res.statusCode >= 400) {
-              reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
-              return;
-            }
-            resolve(parsed);
-          } catch (error) {
-            reject(error);
-          }
-        });
-      },
-    );
-    req.on('error', reject);
-    req.end(body);
   });
 }
 

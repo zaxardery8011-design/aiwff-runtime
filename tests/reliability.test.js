@@ -78,43 +78,9 @@ function getOpenPort() {
   });
 }
 
-function requestJson(port, method, route, payload) {
-  return new Promise((resolve, reject) => {
-    const body = payload ? JSON.stringify(payload) : '';
-    const req = http.request(
-      {
-        hostname: '127.0.0.1',
-        port,
-        path: route,
-        method,
-        headers: {
-          'content-type': 'application/json',
-          'content-length': Buffer.byteLength(body),
-        },
-      },
-      (res) => {
-        let raw = '';
-        res.on('data', (chunk) => {
-          raw += chunk;
-        });
-        res.on('end', () => {
-          try {
-            const parsed = raw ? JSON.parse(raw) : {};
-            if (res.statusCode >= 400) {
-              reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
-              return;
-            }
-            resolve(parsed);
-          } catch (error) {
-            reject(error);
-          }
-        });
-      },
-    );
-    req.on('error', reject);
-    req.end(body);
-  });
-}
+// 這支 harness 以前也自己抄了一份 requestJson。三份同源副本代表「中途斷線要 signal 成 abort」
+// 得修三次、還會各自漂走；改成共用 demo.js 那一份，修一次三邊同時生效。
+const { readBackArtifact, requestJson } = require(path.join(ROOT_DIR, 'scripts', 'demo.js'));
 
 async function startDaemon(env = {}) {
   const port = await getOpenPort();
@@ -690,8 +656,8 @@ test('ip redline guard: a read error is its own state and never swallows the sca
 });
 
 // --- (6) 落地類命令的 exit 0 必須綁「實際寫了什麼」的回讀 ---
-// 直接 require 正式腳本匯出的函式（不抄一份判準到測試裡），避免測試與產品碼脫鉤。
-const { readBackArtifact } = require(path.join(ROOT_DIR, 'scripts', 'demo.js'));
+// 直接 require 正式腳本匯出的函式（不抄一份判準到測試裡），避免測試與產品碼脫鉤。readBackArtifact
+// 已在檔頭與 requestJson 一起 require 進來。
 
 function makeArtifactRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'demo-artifact-'));
@@ -757,4 +723,111 @@ test('demo readback: task reported done never counts as shipped without an artif
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// --- (7) 串流中途出錯要 signal 成 abort，不得回報 clean EOF ---
+// 用裸 socket 當假伺服器，才能製造「送了 header、body 送一半就砍線」這種 http.createServer 做不出來的收場。
+function withRawServer(handler, run) {
+  return new Promise((resolve, reject) => {
+    const sockets = new Set();
+    const server = net.createServer((sock) => {
+      sockets.add(sock);
+      sock.on('close', () => sockets.delete(sock));
+      sock.on('error', () => {}); // 我們就是故意砍線，socket 這頭的 ECONNRESET 不該把測試打掛
+      handler(sock);
+    });
+    server.listen(0, '127.0.0.1', async () => {
+      let outcome;
+      try {
+        outcome = { ok: await run(server.address().port) };
+      } catch (error) {
+        outcome = { error };
+      }
+      // net.Server 沒有 closeAllConnections()（那是 http.Server 才有）：keep-alive 的連線會讓
+      // server.close() 等不到回呼，測試就掛在收尾而不是判準上。手動把 socket 收乾淨。
+      for (const sock of sockets) {
+        sock.destroy();
+      }
+      server.close(() => (outcome.error ? reject(outcome.error) : resolve(outcome.ok)));
+    });
+  });
+}
+
+// 舊寫法只掛 'end'，而中途被砍的回應根本不發 'end'（node v22 實測只發 aborted/error/close），
+// 所以 Promise 會永遠不 settle。這裡的 2 秒上限就是「不再無聲卡死」的判準本身。
+async function settleWithin(promise, ms, label) {
+  let timer;
+  const verdict = await Promise.race([
+    promise.then((value) => ({ kind: 'resolved', value }), (error) => ({ kind: 'rejected', error })),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ kind: 'hung' }), ms);
+    }),
+  ]);
+  clearTimeout(timer);
+  assert.notEqual(verdict.kind, 'hung', `${label}: requestJson 在 ${ms}ms 內沒有 settle（等同無聲卡死）`);
+  return verdict;
+}
+
+test('stream abort: 回應中途被砍要具名 reject，不得無聲卡死也不得當成 clean EOF', async () => {
+  // A. 宣告 Content-Length 100 卻只送 10 bytes 就砍線
+  const truncated = await withRawServer(
+    (sock) => {
+      sock.write('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n');
+      sock.write('{"ok":true');
+      setTimeout(() => sock.destroy(), 30);
+    },
+    (port) => settleWithin(requestJson(port, 'GET', '/api/health'), 2000, 'truncated'),
+  );
+  assert.equal(truncated.kind, 'rejected', '半截 body 不得被當成成功回應');
+  assert.match(truncated.error.message, /aborted after 10 bytes/);
+  assert.match(truncated.error.message, /GET \/api\/health/, '錯誤訊息要指得出是哪一個請求');
+
+  // B. header 之後一個 body byte 都沒送就砍線 —— 舊寫法連 raw 都是空的，最像「乾淨結束」
+  const zeroByte = await withRawServer(
+    (sock) => {
+      sock.write('HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n');
+      setTimeout(() => sock.destroy(), 30);
+    },
+    (port) => settleWithin(requestJson(port, 'GET', '/api/tasks'), 2000, 'zero-byte abort'),
+  );
+  assert.equal(zeroByte.kind, 'rejected', '零位元組的中斷不得回報成功');
+  assert.match(zeroByte.error.message, /aborted after 0 bytes/);
+
+  // C. 合法收尾但 body 是空的：這條走 'end'，舊寫法會 resolve({}) —— 正是「回報 clean EOF」
+  const emptyBody = await withRawServer(
+    (sock) => {
+      sock.write('HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n');
+    },
+    (port) => settleWithin(requestJson(port, 'GET', '/api/health'), 2000, 'empty body'),
+  );
+  assert.equal(emptyBody.kind, 'rejected', '空 body 不得折成 {} 當成功 JSON 回應');
+  assert.match(emptyBody.error.message, /closed with an empty body/);
+
+  // 三種收場的訊息必須互不相同，否則「有擋」不等於「擋得出是哪一種」。
+  const messages = [truncated.error.message, zeroByte.error.message, emptyBody.error.message];
+  assert.equal(new Set(messages).size, 3, `中斷訊息無鑑別力: ${JSON.stringify(messages)}`);
+
+  // 正向對照：完整回應照樣 resolve，上面三條不是靠「全部都 reject」過關的。
+  const good = await withRawServer(
+    (sock) => {
+      const payload = JSON.stringify({ ok: true, note: 'complete' });
+      sock.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(payload)}\r\n\r\n`);
+      sock.end(payload);
+    },
+    (port) => settleWithin(requestJson(port, 'GET', '/api/health'), 2000, 'complete body'),
+  );
+  assert.equal(good.kind, 'resolved', '完整回應不得被誤判成中斷');
+  assert.deepEqual(good.value, { ok: true, note: 'complete' });
+
+  // 錯誤碼路徑仍要吃 body 裡的具名 error，中斷處理沒有把它蓋掉。
+  const failed = await withRawServer(
+    (sock) => {
+      const payload = JSON.stringify({ error: 'task not found' });
+      sock.write(`HTTP/1.1 404 Not Found\r\nContent-Length: ${Buffer.byteLength(payload)}\r\n\r\n`);
+      sock.end(payload);
+    },
+    (port) => settleWithin(requestJson(port, 'GET', '/api/tasks/x'), 2000, 'http 404'),
+  );
+  assert.equal(failed.kind, 'rejected');
+  assert.equal(failed.error.message, 'task not found');
 });

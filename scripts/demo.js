@@ -51,12 +51,38 @@ function requestJson(port, method, route, payload) {
       },
       (res) => {
         let raw = '';
+        let settled = false;
+        // 回應在 body 中途被砍時（node v22 實測）res 依序發 'aborted' → 'error' ECONNRESET → 'close'，
+        // 從頭到尾不發 'end'，req 的 'error' 也不觸發：只掛 'end' 的寫法會讓這個 Promise 永遠不 settle，
+        // 呼叫端無聲卡死到 deadline 都跑不完。中途中斷一律 signal 成具名 abort，且空 body 不得
+        // 折成 `{}` 當成功回應——那是把「連線收在半路」報成 clean EOF。
+        const fail = (reason) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          reject(new Error(`${method} ${route}: ${reason}`));
+        };
+        res.on('aborted', () => {
+          fail(`response stream aborted after ${raw.length} bytes — the body was never completed`);
+        });
+        res.on('error', (error) => {
+          fail(`response stream failed after ${raw.length} bytes — ${error.code || error.message}`);
+        });
         res.on('data', (chunk) => {
           raw += chunk;
         });
         res.on('end', () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (!raw) {
+            reject(new Error(`${method} ${route}: HTTP ${res.statusCode} closed with an empty body — no JSON to read`));
+            return;
+          }
           try {
-            const parsed = raw ? JSON.parse(raw) : {};
+            const parsed = JSON.parse(raw);
             if (res.statusCode >= 400) {
               reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
               return;
@@ -169,4 +195,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { readBackArtifact };
+module.exports = { readBackArtifact, requestJson };
