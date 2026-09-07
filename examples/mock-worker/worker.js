@@ -30,8 +30,34 @@ function readJsonFile(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
+// Authoritative write: if the filesystem rejects it, the caller must see a
+// named reason. Never let a rejected write return as if it had succeeded.
 function writeJsonFile(filePath, value) {
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+  try {
+    fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+  } catch (error) {
+    const rejection = new Error(
+      `write_rejected: ${filePath} (${error.code || error.name}): ${error.message}`,
+    );
+    rejection.code = 'WRITE_REJECTED';
+    rejection.rejected_path = filePath;
+    rejection.reason = error.code || error.name;
+    throw rejection;
+  }
+}
+
+// Observability-only write: best-effort. A failure here must not abort a task
+// that otherwise succeeded, but it must still be reported with a named reason
+// instead of being swallowed.
+function appendObservationLine(filePath, line) {
+  try {
+    fs.appendFileSync(filePath, line);
+    return { written: true };
+  } catch (error) {
+    const reason = error.code || error.name;
+    console.error(`WARN observation_write_skipped: ${filePath} (${reason}): ${error.message}`);
+    return { written: false, reason };
+  }
 }
 
 function updateTaskStatus(task, status, extra = {}) {
@@ -64,7 +90,7 @@ async function main() {
       message: `Mock worker progress ${index}/3`,
       at: nowIso(),
     };
-    fs.appendFileSync(progressPath(task.id), `${JSON.stringify(progress)}\n`);
+    appendObservationLine(progressPath(task.id), `${JSON.stringify(progress)}\n`);
     await sleep(1000);
   }
 
@@ -88,8 +114,10 @@ main()
       try {
         const task = readJsonFile(taskPath(taskId));
         updateTaskStatus(task, 'failed', { error: error.message });
-      } catch (_) {
-        // Nothing else can be written safely if the task file is missing or invalid.
+      } catch (statusError) {
+        // Nothing else can be written safely if the task file is missing or
+        // invalid — say why instead of dropping the reason on the floor.
+        console.error(`WARN failed_status_not_persisted: ${statusError.message}`);
       }
     }
     console.error(error.message);
