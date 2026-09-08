@@ -32,9 +32,13 @@ function readJsonFile(filePath) {
 
 // Authoritative write: if the filesystem rejects it, the caller must see a
 // named reason. Never let a rejected write return as if it had succeeded.
+// A write call that returns without throwing only proves the syscall was
+// accepted, so every authoritative write reads its own bytes back before the
+// caller is allowed to treat the state as settled.
 function writeJsonFile(filePath, value) {
+  const payload = `${JSON.stringify(value, null, 2)}\n`;
   try {
-    fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+    fs.writeFileSync(filePath, payload);
   } catch (error) {
     const rejection = new Error(
       `write_rejected: ${filePath} (${error.code || error.name}): ${error.message}`,
@@ -43,6 +47,28 @@ function writeJsonFile(filePath, value) {
     rejection.rejected_path = filePath;
     rejection.reason = error.code || error.name;
     throw rejection;
+  }
+
+  let readback;
+  try {
+    readback = fs.readFileSync(filePath, 'utf8');
+  } catch (error) {
+    const failure = new Error(
+      `write_readback_failed: ${filePath} (${error.code || error.name}): ${error.message}`,
+    );
+    failure.code = 'WRITE_READBACK_FAILED';
+    failure.rejected_path = filePath;
+    failure.reason = error.code || error.name;
+    throw failure;
+  }
+  if (readback !== payload) {
+    const failure = new Error(
+      `write_readback_mismatch: ${filePath} (expected ${payload.length} chars, read ${readback.length})`,
+    );
+    failure.code = 'WRITE_READBACK_FAILED';
+    failure.rejected_path = filePath;
+    failure.reason = 'readback_mismatch';
+    throw failure;
   }
 }
 
@@ -60,7 +86,19 @@ function appendObservationLine(filePath, line) {
   }
 }
 
+const TERMINAL_STATUSES = new Set(['done', 'failed']);
+// The terminal status has exactly one owner: whoever claims it first. A later
+// writer must not quietly overwrite it — it says who already owns it instead.
+let terminalStatusOwner = null;
+
 function updateTaskStatus(task, status, extra = {}) {
+  if (TERMINAL_STATUSES.has(status) && terminalStatusOwner) {
+    console.error(
+      `WARN terminal_status_already_owned: ${task.id} is already ${terminalStatusOwner}, refusing to overwrite with ${status}`,
+    );
+    return null;
+  }
+
   const nextTask = {
     ...task,
     ...extra,
@@ -68,6 +106,11 @@ function updateTaskStatus(task, status, extra = {}) {
     updated_at: nowIso(),
   };
   writeJsonFile(taskPath(task.id), nextTask);
+  // Claimed only after the write read itself back: a status that never landed
+  // must stay unowned so the failure path can still record why.
+  if (TERMINAL_STATUSES.has(status)) {
+    terminalStatusOwner = status;
+  }
   return nextTask;
 }
 
