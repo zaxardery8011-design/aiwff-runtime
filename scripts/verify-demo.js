@@ -5,8 +5,14 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 const TASKS_DIR = path.join(ROOT_DIR, 'data', 'tasks');
 const ARTIFACTS_DIR = path.join(ROOT_DIR, 'data', 'artifacts');
 
+// A verification result is only meaningful together with the toolchain that
+// produced it: "verify-demo passed" on the maintainer's Node says nothing about
+// the Node the consumer actually runs. Print the version into the output so a
+// pasted PASS/FAIL is attributable instead of anonymous.
+const TOOLCHAIN = `node ${process.version} ${process.platform}/${process.arch}`;
+
 function fail(message) {
-  console.error(`FAIL ${message}`);
+  console.error(`FAIL ${message} (toolchain: ${TOOLCHAIN})`);
   process.exit(1);
 }
 
@@ -19,6 +25,8 @@ function readJsonFile(filePath) {
 }
 
 function main() {
+  console.log(`TOOLCHAIN ${TOOLCHAIN}`);
+
   if (!fs.existsSync(ARTIFACTS_DIR)) {
     fail('data/artifacts does not exist');
   }
