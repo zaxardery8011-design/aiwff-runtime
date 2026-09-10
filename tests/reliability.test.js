@@ -655,6 +655,50 @@ test('ip redline guard: a read error is its own state and never swallows the sca
   }
 });
 
+test('ip redline guard: an empty allowlist scope or pattern never becomes match-all', () => {
+  const LEAK_LINE = `token: ${FAKE_TOKEN}`;
+  const REAL = { file: null, regex: /token: gh/, reason: '對照組：填好的條目確實會豁免' };
+
+  // 正向對照：條目填好時豁免真的生效——證明後面的 false 不是因為 isAllowed 整支瞎了。
+  assert.equal(scanModule.isAllowed('leak.md', LEAK_LINE, [REAL]), true);
+  assert.equal(scanModule.isUsableAllowEntry(REAL), true);
+
+  // 每一種空值／空 wildcard 都必須走拒絕分支（不匹配），而不是放行全部。
+  const rejected = {
+    'empty pattern': { file: null, regex: new RegExp('') },
+    'literal empty regex': { file: null, regex: /(?:)/ },
+    'dot-star wildcard': { file: null, regex: /.*/ },
+    'empty file scope': { file: '', regex: /token: gh/ },
+    'blank file scope': { file: '   ', regex: /token: gh/ },
+    'missing regex': { file: null },
+    'string instead of regex': { file: null, regex: 'token: gh' },
+  };
+  for (const [label, entry] of Object.entries(rejected)) {
+    assert.equal(scanModule.isUsableAllowEntry(entry), false, `${label} 不該被當成可用條目`);
+    assert.equal(scanModule.isAllowed('leak.md', LEAK_LINE, [entry]), false, `${label} 被當成 match-all 放行`);
+    // 壞條目不得連帶把同一份清單裡填好的條目一起廢掉。
+    assert.equal(scanModule.isAllowed('leak.md', LEAK_LINE, [entry, REAL]), true, `${label} 汙染了同清單的好條目`);
+  }
+
+  // scope 的三態要可區分：null＝全檔、對得上的檔名＝該檔、對不上的檔名＝不匹配。
+  assert.equal(scanModule.isAllowed('other.md', LEAK_LINE, [{ file: 'leak.md', regex: /token: gh/ }]), false);
+  assert.equal(scanModule.isAllowed('leak.md', LEAK_LINE, [{ file: 'leak.md', regex: /token: gh/ }]), true);
+
+  // 正式清單自己必須全數合規，否則線上那份就是壞的。
+  for (const entry of scanModule.ALLOWLIST) {
+    assert.equal(scanModule.isUsableAllowEntry(entry), true, `正式白名單有不合規條目: ${entry.reason}`);
+  }
+
+  // 端到端：壞條目不得讓真的 redline 靜默消失。
+  const root = makeScanRoot({ 'leak.md': `${LEAK_LINE}\n` });
+  try {
+    const leaked = runScan(root);
+    assert.equal(leaked.code, 1, leaked.out);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // --- (6) 落地類命令的 exit 0 必須綁「實際寫了什麼」的回讀 ---
 // 直接 require 正式腳本匯出的函式（不抄一份判準到測試裡），避免測試與產品碼脫鉤。readBackArtifact
 // 已在檔頭與 requestJson 一起 require 進來。

@@ -80,8 +80,29 @@ function toRepoPath(filePath, rootDir = ROOT_DIR) {
   return path.relative(rootDir, filePath).replaceAll(path.sep, '/');
 }
 
-function isAllowed(repoPath, line) {
-  return ALLOWLIST.some((entry) => {
+// 白名單條目是「豁免 redline」的權力，所以判準要 fail closed：寫壞的條目一律不匹配，
+// 不得因為欄位是空值而退化成 match-all，把整支偵測器靜默變成放行全部。
+function isUsableAllowEntry(entry) {
+  if (!entry || !(entry.regex instanceof RegExp)) {
+    return false;
+  }
+  // 空 pattern（//、new RegExp('')）與 /.*/ 這類能匹配空字串的式子，對每一行都成立＝match-all。
+  if (entry.regex.test('')) {
+    return false;
+  }
+  // file 只有兩種合法值：null/undefined＝明示涵蓋全部檔案；非空字串＝限定該檔。
+  // 空字串或空白字串是「scope 欄位沒填好」，不是 wildcard。
+  if (entry.file === null || entry.file === undefined) {
+    return true;
+  }
+  return typeof entry.file === 'string' && entry.file.trim() !== '';
+}
+
+function isAllowed(repoPath, line, allowlist = ALLOWLIST) {
+  return allowlist.some((entry) => {
+    if (!isUsableAllowEntry(entry)) {
+      return false;
+    }
     if (entry.file && entry.file !== repoPath) {
       return false;
     }
@@ -222,4 +243,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { scanTree, scanFile, decideExit };
+module.exports = { scanTree, scanFile, decideExit, isAllowed, isUsableAllowEntry, ALLOWLIST };
