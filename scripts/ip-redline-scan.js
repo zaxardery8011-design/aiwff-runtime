@@ -98,6 +98,42 @@ function isUsableAllowEntry(entry) {
   return typeof entry.file === 'string' && entry.file.trim() !== '';
 }
 
+// 偵測清單的條目只要「認得出是誰」＋「是個真的 RegExp」就算可用。這裡刻意不把 match-all
+// 當成不可用：match-all 的偵測式子是吵，不是漏，方向跟白名單相反。
+function isUsablePattern(entry) {
+  return (
+    Boolean(entry) &&
+    typeof entry.id === 'string' &&
+    entry.id.trim() !== '' &&
+    entry.regex instanceof RegExp
+  );
+}
+
+// 清單型判準的「空」在啟動時就已經確定，不該等到掃第一個檔才發作。兩份清單的空各有各的後果：
+// - REDLINE_PATTERNS 一條可用的都沒有 ＝ 偵測器什麼都測不到，之後的零命中是假的 → 走拒絕分支。
+// - ALLOWLIST 有效條目為 0 ＝ 不會有任何豁免，掃描本身仍安全，但那通常是條目被 fail closed
+//   掉的靜默後果 → 啟動時就具名警告一次，不等某條 redline 被誤報才有人發現。
+function checkListPredicates(patterns = REDLINE_PATTERNS, allowlist = ALLOWLIST) {
+  const patternList = Array.isArray(patterns) ? patterns : [];
+  const allowEntries = Array.isArray(allowlist) ? allowlist : [];
+  const usablePatterns = patternList.filter(isUsablePattern).length;
+  const usableAllow = allowEntries.filter(isUsableAllowEntry).length;
+  const warnings = [];
+  if (usableAllow === 0) {
+    warnings.push(
+      `WARN IP redline scan allowlist has no usable entry (declared=${allowEntries.length} usable=0) — nothing will be exempted`,
+    );
+  }
+  return {
+    ok: usablePatterns > 0,
+    declared_patterns: patternList.length,
+    usable_patterns: usablePatterns,
+    declared_allow: allowEntries.length,
+    usable_allow: usableAllow,
+    warnings,
+  };
+}
+
 function isAllowed(repoPath, line, allowlist = ALLOWLIST) {
   return allowlist.some((entry) => {
     if (!isUsableAllowEntry(entry)) {
@@ -180,19 +216,36 @@ function scanFile(filePath, rootDir = ROOT_DIR, counters = null) {
 }
 
 // 回傳 findings + 實際檢查量。零命中只有在 files_checked >= 1 時才有意義。
-function scanTree(rootDir = ROOT_DIR) {
+function scanTree(rootDir = ROOT_DIR, listCheck = checkListPredicates()) {
   const counters = { files_checked: 0, lines_checked: 0, binary_skipped: 0, read_errors: [] };
+  // 判準清單空掉時連掃都不掃：掃完再說「零命中」只是多產一份沒有意義的通過證據。
+  if (!listCheck.ok) {
+    return { findings: [], ...counters, list_check: listCheck };
+  }
   const findings = listFiles(rootDir).flatMap((filePath) => scanFile(filePath, rootDir, counters));
-  return { findings, ...counters };
+  return { findings, ...counters, list_check: listCheck };
 }
 
 // 收尾判決是一個純函式：main() 只負責印與 exit，測試才能直接驗判準本身。
-// 四態各自一個 exit code，否則「掃壞了」與「掃到了」在 rc 層無法區分。
+// 五態各自一個 exit code，否則「判準空了」「掃壞了」「掃到了」在 rc 層無法區分。
 function decideExit(result, rootDir = ROOT_DIR) {
   const readErrors = result.read_errors || [];
+  const listCheck = result.list_check || checkListPredicates();
   const checked =
     `files_checked=${result.files_checked} lines_checked=${result.lines_checked} ` +
-    `binary_skipped=${result.binary_skipped} read_errors=${readErrors.length}`;
+    `binary_skipped=${result.binary_skipped} read_errors=${readErrors.length} ` +
+    `usable_patterns=${listCheck.usable_patterns}/${listCheck.declared_patterns}`;
+
+  // 判準清單一條可用的都沒有 → 走拒絕分支。這在讀任何檔之前就能斷定，不必等掃完才說零命中。
+  if (!listCheck.ok) {
+    return {
+      code: 4,
+      stream: 'error',
+      lines: [
+        `FAIL IP redline scan has no usable detection pattern — refused before reading any file (${checked})`,
+      ],
+    };
+  }
 
   // 偵測器自己讀失敗 → fail closed，但收尾照印：講得出是哪個檔、什麼 errno。
   if (readErrors.length) {
@@ -230,7 +283,12 @@ function decideExit(result, rootDir = ROOT_DIR) {
 }
 
 function main() {
-  const verdict = decideExit(scanTree(ROOT_DIR), ROOT_DIR);
+  // 啟動時就把清單型判準檢一次並把警告吼出來，不等第一個檔被讀進來。
+  const listCheck = checkListPredicates();
+  for (const warning of listCheck.warnings) {
+    console.error(warning);
+  }
+  const verdict = decideExit(scanTree(ROOT_DIR, listCheck), ROOT_DIR);
   for (const line of verdict.lines) {
     console[verdict.stream](line);
   }
@@ -243,4 +301,14 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { scanTree, scanFile, decideExit, isAllowed, isUsableAllowEntry, ALLOWLIST };
+module.exports = {
+  scanTree,
+  scanFile,
+  decideExit,
+  isAllowed,
+  isUsableAllowEntry,
+  isUsablePattern,
+  checkListPredicates,
+  ALLOWLIST,
+  REDLINE_PATTERNS,
+};

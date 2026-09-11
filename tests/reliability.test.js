@@ -699,6 +699,94 @@ test('ip redline guard: an empty allowlist scope or pattern never becomes match-
   }
 });
 
+test('ip redline guard: an empty predicate list is refused at startup, not scanned into a fake PASS', () => {
+  const GOOD = { id: 'good', regex: /token: gh/ };
+
+  // 正向對照：線上那兩份清單自己必須合規且不觸發警告，否則後面的 false 只是整支判準瞎了。
+  const live = scanModule.checkListPredicates();
+  assert.equal(live.ok, true, '正式偵測清單判成不可用');
+  assert.equal(live.usable_patterns, scanModule.REDLINE_PATTERNS.length);
+  assert.equal(live.usable_allow, scanModule.ALLOWLIST.length);
+  assert.deepEqual(live.warnings, [], `正式清單不該有啟動警告: ${live.warnings}`);
+
+  // 偵測清單這一側：空清單與「宣告了但一條可用的都沒有」都要走拒絕分支。
+  const refused = {
+    'empty list': [],
+    'not an array': null,
+    'missing id': [{ regex: /token: gh/ }],
+    'blank id': [{ id: '   ', regex: /token: gh/ }],
+    'string instead of regex': [{ id: 'bad', regex: 'token: gh' }],
+    'null entry': [null],
+  };
+  for (const [label, patterns] of Object.entries(refused)) {
+    const check = scanModule.checkListPredicates(patterns, [GOOD]);
+    assert.equal(check.ok, false, `${label} 不該被當成可用的偵測清單`);
+    assert.equal(check.usable_patterns, 0, `${label} 的 usable 計數對不上`);
+    // 壞條目不得連帶把同清單裡填好的條目一起廢掉。
+    const mixed = scanModule.checkListPredicates([...(patterns || []), GOOD], [GOOD]);
+    assert.equal(mixed.ok, true, `${label} 汙染了同清單的好條目`);
+    assert.equal(mixed.usable_patterns, 1);
+  }
+
+  // 判準不可用時，一個檔都不准讀就得收手——「不等第一筆請求」講的就是這個順序。
+  const root = makeScanRoot({ 'leak.md': `token: ${FAKE_TOKEN}\n` });
+  try {
+    const dead = scanModule.checkListPredicates([], scanModule.ALLOWLIST);
+    const result = scanModule.scanTree(root, dead);
+    assert.equal(result.files_checked, 0, '判準已空還去讀檔');
+    assert.deepEqual(result.findings, []);
+    const verdict = scanModule.decideExit(result, root);
+    assert.equal(verdict.code, 4, JSON.stringify(verdict));
+    assert.equal(verdict.stream, 'error');
+    assert.match(verdict.lines[0], /^FAIL /);
+    assert.match(verdict.lines[0], /refused before reading any file/);
+    assert.match(verdict.lines[0], /usable_patterns=0\/0/, '拒絕訊息要講得出分母');
+
+    // 正向對照：同一個 root 在判準健全時確實掃得到東西，證明 files_checked=0 是被拒絕擋下的。
+    const alive = scanModule.scanTree(root);
+    assert.ok(alive.files_checked >= 1, '健全判準下仍掃 0 個檔，對照組不成立');
+    assert.equal(alive.findings.length, 1);
+
+    // 五態的 exit code 必須互不相同，否則「判準空了」在 rc 層等同「掃到了」。
+    const base = { files_checked: 1, lines_checked: 1, binary_skipped: 0, read_errors: [] };
+    const codes = [
+      scanModule.decideExit({ ...base, findings: [] }, root).code,
+      scanModule.decideExit(
+        { ...base, findings: [{ file: 'leak.md', line: 1, id: 'secret-token', match: '<redacted secret pattern>' }] },
+        root,
+      ).code,
+      scanModule.decideExit({ ...base, files_checked: 0, findings: [] }, root).code,
+      scanModule.decideExit(
+        { ...base, findings: [], read_errors: [{ file: 'sub', code: 'EISDIR', message: 'is a directory' }] },
+        root,
+      ).code,
+      verdict.code,
+    ];
+    assert.deepEqual(codes, [0, 1, 2, 3, 4], '乾淨／命中／空掃／讀不到／判準空五態的 exit code 必須可區分');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  // 白名單這一側：空清單不擋掃描，但要在啟動時就具名警告，而且講得出分母。
+  const emptyAllow = scanModule.checkListPredicates(scanModule.REDLINE_PATTERNS, []);
+  assert.equal(emptyAllow.ok, true, '白名單空不該擋下掃描');
+  assert.equal(emptyAllow.warnings.length, 1, JSON.stringify(emptyAllow.warnings));
+  assert.match(emptyAllow.warnings[0], /^WARN /);
+  assert.match(emptyAllow.warnings[0], /declared=0 usable=0/);
+
+  // 宣告了兩條卻全被 fail closed 掉，是最該被吼出來的那一種空：declared 與 usable 對不上。
+  const allBad = scanModule.checkListPredicates(scanModule.REDLINE_PATTERNS, [
+    { file: '', regex: /token: gh/ },
+    { file: null, regex: /.*/ },
+  ]);
+  assert.equal(allBad.usable_allow, 0);
+  assert.equal(allBad.warnings.length, 1);
+  assert.match(allBad.warnings[0], /declared=2 usable=0/);
+
+  // 有一條可用就不該再警告，否則警告本身沒有鑑別力。
+  assert.deepEqual(scanModule.checkListPredicates(scanModule.REDLINE_PATTERNS, [GOOD, { file: '' }]).warnings, []);
+});
+
 // --- (6) 落地類命令的 exit 0 必須綁「實際寫了什麼」的回讀 ---
 // 直接 require 正式腳本匯出的函式（不抄一份判準到測試裡），避免測試與產品碼脫鉤。readBackArtifact
 // 已在檔頭與 requestJson 一起 require 進來。
