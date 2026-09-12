@@ -11,6 +11,27 @@ const JSON_MODE = process.argv.includes('--json');
 
 const UNSAFE_FLAGS = new Set(['CLAUDE_BYPASS_APPROVALS']);
 
+// 「Doctor passed」的分母必須是**實際跑過的檢查**，不是名目上的「doctor」。
+// 預設的 text 模式只跑得動下面三項，其餘五項（含攔 CLAUDE_BYPASS_APPROVALS 的 env_valid）
+// 只有 --json 會跑；沒有分母時，一個 ✓ 會被讀成「環境全驗過了」。
+// DOCTOR_CHECK_IDS 是這支腳本宣告的完整檢查集，兩種模式共用同一份分母來源；
+// 未涵蓋清單用差集算出來，新增檢查時 text 模式的揭露會自己長出來。
+// （這份宣告與 runJsonDoctor 實際建出來的 checks 可能漂移，所以 regression 直接把
+//  text 模式印出的分母釘死等於 --json 的 checks 筆數，漂了就紅。）
+const DOCTOR_CHECK_IDS = [
+  'node_version',
+  'npm_available',
+  'git_available',
+  'port_available',
+  'data_dir_writable',
+  'env_valid',
+  'claude_cli_optional',
+  'tg_config_valid',
+];
+
+// text 模式實跑的三項（建 data/tasks 同時證明 data 目錄可寫，故記為 data_dir_writable）。
+const TEXT_MODE_CHECK_IDS = ['node_version', 'data_dir_writable', 'port_available'];
+
 // Every load/deny failure must name the rule that produced it, so the reader
 // can tell WHICH rule fired instead of getting one merged sentence.
 const RULE = {
@@ -20,6 +41,19 @@ const RULE = {
   ENV_UNSAFE_FLAG: 'env.unsafe_flag',
   DOCTOR_RUNTIME: 'doctor.runtime_error',
 };
+
+function coverage(ranIds, declaredIds = DOCTOR_CHECK_IDS) {
+  const ran = declaredIds.filter((id) => ranIds.includes(id));
+  return {
+    ran: ran.length,
+    declared: declaredIds.length,
+    not_run: declaredIds.filter((id) => !ranIds.includes(id)),
+  };
+}
+
+function formatCoverage(value) {
+  return `checks_run=${value.ran}/${value.declared} not_run=${value.not_run.join(',') || 'none'}`;
+}
 
 function envFlagValue(value) {
   return value === '1' || String(value).toLowerCase() === 'true';
@@ -269,17 +303,24 @@ async function runTextDoctor() {
   const nodeOk = checkNodeVersionText();
   const dirOk = checkTasksDirectoryText();
   const portStatus = await checkPortAvailableText(PORT);
+  // 三種收尾都要帶著分母走：PASS 沒帶分母最危險，但 WARN／FAIL 同樣會被當成「doctor 全跑過」。
+  const covered = formatCoverage(coverage(TEXT_MODE_CHECK_IDS));
 
   if (nodeOk && dirOk && portStatus === 'pass') {
-    console.log('✓ Doctor passed — ready to run demo');
+    console.log(
+      `✓ Doctor passed — ready to run demo (${covered}; run \`npm run doctor -- --json\` for the checks text mode skips)`,
+    );
     return;
   }
 
   if (nodeOk && dirOk && portStatus === 'warn') {
-    console.log('Doctor completed with warnings — stop the process using the port before running the default demo');
+    console.log(
+      `Doctor completed with warnings — stop the process using the port before running the default demo (${covered})`,
+    );
     return;
   }
 
+  console.log(`FAIL Doctor did not pass (${covered})`);
   process.exitCode = 1;
 }
 

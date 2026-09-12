@@ -963,3 +963,96 @@ test('stream abort: 回應中途被砍要具名 reject，不得無聲卡死也�
   assert.equal(failed.kind, 'rejected');
   assert.equal(failed.error.message, 'task not found');
 });
+
+// --- (8) 通過宣告的分母必須是實跑過的檢查，不是名目上的「doctor」 ---
+const DOCTOR_SCRIPT = path.join(ROOT_DIR, 'scripts', 'doctor.js');
+
+function runDoctor(args, env) {
+  const result = spawnSync(process.execPath, [DOCTOR_SCRIPT, ...args], {
+    cwd: ROOT_DIR,
+    env: { ...process.env, ...env },
+    encoding: 'utf8',
+  });
+  return { code: result.status, out: `${result.stdout}${result.stderr}`, stdout: result.stdout };
+}
+
+function readDoctorCoverage(output) {
+  const match = output.match(/checks_run=(\d+)\/(\d+) not_run=([^;)]*)/);
+  assert.ok(match, `doctor 收尾未帶檢查分母: ${JSON.stringify(output)}`);
+  return {
+    ran: Number(match[1]),
+    declared: Number(match[2]),
+    not_run: match[3] === 'none' ? [] : match[3].split(','),
+  };
+}
+
+function freePort() {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+function withOccupiedPort(run) {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.listen(0, '127.0.0.1', async () => {
+      const { port } = server.address();
+      let outcome;
+      try {
+        outcome = { ok: await run(port) };
+      } catch (error) {
+        outcome = { error };
+      }
+      server.close(() => (outcome.error ? reject(outcome.error) : resolve(outcome.ok)));
+    });
+  });
+}
+
+test('doctor coverage: the pass line names how many checks actually ran, not the nominal "doctor"', async () => {
+  // --json 建出來的 checks 是「這支腳本到底有幾項檢查」的唯一事實來源。
+  const json = runDoctor(['--json'], {});
+  const report = JSON.parse(json.stdout);
+  const jsonIds = report.checks.map((check) => check.id);
+  assert.ok(jsonIds.length >= 2, `--json 只回了 ${jsonIds.length} 項檢查，對照組不成立`);
+  assert.equal(new Set(jsonIds).size, jsonIds.length, `--json 的 check id 有重複: ${jsonIds}`);
+
+  // 正向：預設 text 模式在 PASS 時就要把分母印出來（挑一個沒人佔的 port，避免走到 WARN）。
+  const passOut = runDoctor([], { PORT: String(await freePort()) });
+  assert.match(passOut.out, /✓ Doctor passed/, passOut.out);
+  const passed = readDoctorCoverage(passOut.out);
+
+  // 分母漂移釘死：宣告的總數必須等於 --json 實際跑的檢查數。
+  // 之後有人往 runJsonDoctor 加第 9 項卻忘了更新宣告清單，這一條會紅，而不是讓揭露靜默過時。
+  assert.equal(
+    passed.declared,
+    jsonIds.length,
+    `text 模式宣告的分母 ${passed.declared} 對不上 --json 的 ${jsonIds.length} 項檢查`,
+  );
+
+  // 分子與未涵蓋清單要湊得回分母，否則這個比值只是兩個無關的數字擺在一起。
+  assert.equal(passed.ran + passed.not_run.length, passed.declared, JSON.stringify(passed));
+  assert.ok(passed.ran >= 1 && passed.ran < passed.declared, `text 模式應覆蓋部分而非全部: ${JSON.stringify(passed)}`);
+
+  // 未涵蓋的每一項都要是真的存在的檢查 id，不能是寫錯字的幽靈名字。
+  for (const id of passed.not_run) {
+    assert.ok(jsonIds.includes(id), `not_run 列了不存在的檢查 id: ${id}`);
+  }
+
+  // 具名點出這次修正最在意的那個缺口：攔 CLAUDE_BYPASS_APPROVALS 的 env_valid 預設不會跑，
+  // 沒有這行揭露時，一個 ✓ 會被讀成「不安全旗標也驗過了」。
+  assert.ok(passed.not_run.includes('env_valid'), `未涵蓋清單漏了 env_valid: ${JSON.stringify(passed)}`);
+
+  // 分母要跟著每一種收尾走，不是只有 PASS 那行才帶：占住 port 讓它走 WARN。
+  const warnOut = await withOccupiedPort(async (busyPort) => runDoctor([], { PORT: String(busyPort) }));
+  assert.match(warnOut.out, /Doctor completed with warnings/, warnOut.out);
+  const warned = readDoctorCoverage(warnOut.out);
+  assert.deepEqual(warned, passed, 'WARN 收尾的分母與 PASS 不一致');
+
+  // 鑑別力：PASS 與 WARN 是兩種真的不同的收場，不是同一句話被比對兩次。
+  assert.notEqual(passOut.out, warnOut.out);
+  assert.doesNotMatch(warnOut.out, /✓ Doctor passed/);
+});
