@@ -3,10 +3,76 @@
 const fs = require('fs');
 const path = require('path');
 
-// 掃描根目錄可用 IP_SCAN_ROOT 覆寫——讓 regression 測項能把同一支正式腳本指向
-// 受控 fixture 目錄，證明 checked 計數與 fail-closed 分支真的有鑑別力。
-const ROOT_DIR = path.resolve(process.env.IP_SCAN_ROOT || path.join(__dirname, '..'));
+// 吃根路徑的入口一律要求明示參數：掃描根的 override 只認呼叫端當場給的 `--root=<dir>`。
+// 繼承來的 IP_SCAN_ROOT 不算明示——殘留在 shell／CI job 裡的舊值會讓正式閘
+// （npm run scan:ip）靜默掃到別的樹，而且因為 files_checked>=1 還會印出 PASS，
+// 等於拿一份掃錯對象的綠燈蓋掉真正的 repo。缺明示參數就 fail closed，不猜呼叫端的意圖。
+const DEFAULT_ROOT = path.join(__dirname, '..');
+// 模組層常數只從 __dirname 推導，載入時不讀任何 ambient 狀態。
+const ROOT_DIR = path.resolve(DEFAULT_ROOT);
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'data', 'logs']);
+
+const ROOT_FLAG = '--root';
+
+function parseRootFlag(argv) {
+  for (const arg of argv) {
+    if (arg === ROOT_FLAG) {
+      return { present: true, value: '' };
+    }
+    if (arg.startsWith(`${ROOT_FLAG}=`)) {
+      return { present: true, value: arg.slice(ROOT_FLAG.length + 1) };
+    }
+  }
+  return { present: false, value: '' };
+}
+
+// 純函式回傳 { ok, reason, root, declared }，讓測試能直接驗這條判準本身而不是驗 spawn 的副作用。
+function resolveRootDir(argv = process.argv.slice(2), env = process.env) {
+  const flag = parseRootFlag(argv);
+  if (flag.present) {
+    // 給了旗標卻沒給值 ＝ 參數沒填好，不是「用預設」。
+    if (flag.value.trim() === '') {
+      return { ok: false, reason: 'empty_explicit_root', root: null, declared: ROOT_FLAG };
+    }
+    return {
+      ok: true,
+      reason: 'explicit_flag',
+      root: path.resolve(flag.value),
+      declared: `${ROOT_FLAG}=${flag.value}`,
+    };
+  }
+  const inherited = typeof env.IP_SCAN_ROOT === 'string' ? env.IP_SCAN_ROOT.trim() : '';
+  if (inherited !== '') {
+    return {
+      ok: false,
+      reason: 'inherited_root_without_flag',
+      root: null,
+      declared: `IP_SCAN_ROOT=${inherited}`,
+    };
+  }
+  return { ok: true, reason: 'default_repo_root', root: path.resolve(DEFAULT_ROOT), declared: '__dirname/..' };
+}
+
+// 根路徑被拒有專屬 exit code 5，跟「掃壞了」(3)、「掃到了」(1)、「空掃」(2) 在 rc 層分得開。
+function refuseRootVerdict(resolution) {
+  const lines = {
+    inherited_root_without_flag:
+      `FAIL IP redline scan refused: inherited ${resolution.declared} is not an explicit root — ` +
+      `pass ${ROOT_FLAG}=<dir> at the call site or unset it ` +
+      '(a stale ambient root scans the wrong tree and still prints PASS)',
+    empty_explicit_root:
+      `FAIL IP redline scan refused: ${ROOT_FLAG} was given without a directory — ` +
+      'an empty root is a missing parameter, not the repo root',
+  };
+  return {
+    code: 5,
+    stream: 'error',
+    lines: [
+      lines[resolution.reason] ||
+        `FAIL IP redline scan refused: unusable scan root (reason=${resolution.reason})`,
+    ],
+  };
+}
 
 const ENCODED_KEYWORD_TERMS = [
   'U09VTA==',
@@ -228,6 +294,7 @@ function scanTree(rootDir = ROOT_DIR, listCheck = checkListPredicates()) {
 
 // 收尾判決是一個純函式：main() 只負責印與 exit，測試才能直接驗判準本身。
 // 五態各自一個 exit code，否則「判準空了」「掃壞了」「掃到了」在 rc 層無法區分。
+// 第六態（根路徑拿不到明示參數）在讀 argv 時就判掉、不進這裡，見 refuseRootVerdict。
 function decideExit(result, rootDir = ROOT_DIR) {
   const readErrors = result.read_errors || [];
   const listCheck = result.list_check || checkListPredicates();
@@ -282,13 +349,21 @@ function decideExit(result, rootDir = ROOT_DIR) {
   return { code: 0, stream: 'log', lines: [`PASS IP redline scan: no redline hits (${checked})`] };
 }
 
-function main() {
+function main(argv = process.argv.slice(2), env = process.env) {
+  // 掃描根先判：拿不到明示的根就連掃都不掃。掃完再說「零命中」只是產一份掃錯對象的通過證據。
+  const resolution = resolveRootDir(argv, env);
+  if (!resolution.ok) {
+    const refusal = refuseRootVerdict(resolution);
+    console[refusal.stream](refusal.lines[0]);
+    process.exit(refusal.code);
+  }
+  const rootDir = resolution.root;
   // 啟動時就把清單型判準檢一次並把警告吼出來，不等第一個檔被讀進來。
   const listCheck = checkListPredicates();
   for (const warning of listCheck.warnings) {
     console.error(warning);
   }
-  const verdict = decideExit(scanTree(ROOT_DIR, listCheck), ROOT_DIR);
+  const verdict = decideExit(scanTree(rootDir, listCheck), rootDir);
   for (const line of verdict.lines) {
     console[verdict.stream](line);
   }
@@ -305,6 +380,8 @@ module.exports = {
   scanTree,
   scanFile,
   decideExit,
+  resolveRootDir,
+  refuseRootVerdict,
   isAllowed,
   isUsableAllowEntry,
   isUsablePattern,

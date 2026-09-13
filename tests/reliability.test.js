@@ -541,11 +541,15 @@ function makeScanRoot(files) {
   return root;
 }
 
-function runScan(rootDir) {
-  const result = spawnSync(process.execPath, [SCAN_SCRIPT], {
-    env: { ...process.env, IP_SCAN_ROOT: rootDir },
-    encoding: 'utf8',
-  });
+// 掃描根一律用明示參數交給腳本；ambient IP_SCAN_ROOT 先清掉，要測繼承行為的測項自己塞回去。
+function runScan(rootDir, { explicit = true, ambientRoot = null } = {}) {
+  const env = { ...process.env };
+  delete env.IP_SCAN_ROOT;
+  if (ambientRoot !== null) {
+    env.IP_SCAN_ROOT = ambientRoot;
+  }
+  const args = explicit ? [SCAN_SCRIPT, `--root=${rootDir}`] : [SCAN_SCRIPT];
+  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8' });
   return { code: result.status, out: `${result.stdout}${result.stderr}` };
 }
 
@@ -600,6 +604,71 @@ test('ip redline guard: zero files checked fails closed instead of printing PASS
 
 // 直接 require 正式腳本匯出的函式，讓測試驗的是產品碼本身的判準。
 const scanModule = require(SCAN_SCRIPT);
+
+test('ip redline guard: an inherited scan root without --root fails closed instead of scanning it', () => {
+  const wrongTree = makeScanRoot({ 'readme.md': 'nothing sensitive here\n' });
+  const staleRoot = path.join(os.tmpdir(), 'ip-redline-stale-root-does-not-exist');
+
+  try {
+    // 主判準：只有繼承來的 IP_SCAN_ROOT、呼叫端沒宣告 --root → 拒掃。
+    // 舊行為會直接吃下這個值、掃 fixture 樹、還因為 files_checked>=1 印出 PASS。
+    const inherited = runScan(wrongTree, { explicit: false, ambientRoot: wrongTree });
+    assert.equal(inherited.code, 5, inherited.out);
+    assert.doesNotMatch(inherited.out, /^PASS /m, `繼承來的根不得產出通過證據: ${inherited.out}`);
+    assert.match(inherited.out, /inherited IP_SCAN_ROOT=/);
+
+    // 負向控制（證明拒的是「沒宣告」不是「有 ambient 值」）：同一個殘留值在明示參數在場時
+    // 完全不參與判斷，掃的是 --root 指的那棵樹。
+    const explicit = runScan(wrongTree, { ambientRoot: staleRoot });
+    assert.equal(explicit.code, 0, explicit.out);
+    assert.match(explicit.out, /^PASS /m);
+    assert.equal(readChecked(explicit.out).files, 1);
+
+    // 旗標在場但沒帶目錄 ＝ 參數沒填好，不得退化成 repo root。
+    const emptyFlag = runScan('', { ambientRoot: null });
+    assert.equal(emptyFlag.code, 5, emptyFlag.out);
+    assert.match(emptyFlag.out, /--root was given without a directory/);
+
+    // 三個 rc 要跟既有四態分得開，否則「根拿不到」在 rc 層等同「掃到了」。
+    assert.ok(![0, 1, 2, 3, 4].includes(inherited.code), `root 拒絕態的 rc 撞到既有態: ${inherited.code}`);
+  } finally {
+    fs.rmSync(wrongTree, { recursive: true, force: true });
+  }
+});
+
+test('ip redline guard: resolveRootDir names every branch and never reads ambient state as a declaration', () => {
+  // 明示旗標 → 用它，且殘留的 ambient 值不參與判斷。
+  const explicit = scanModule.resolveRootDir(['--root=/tmp/x'], { IP_SCAN_ROOT: '/tmp/stale' });
+  assert.equal(explicit.ok, true);
+  assert.equal(explicit.reason, 'explicit_flag');
+  assert.equal(explicit.root, path.resolve('/tmp/x'));
+
+  // 只有繼承值、沒有旗標 → fail closed，且事由與繼承來的值都要具名。
+  const inherited = scanModule.resolveRootDir([], { IP_SCAN_ROOT: '/tmp/stale' });
+  assert.equal(inherited.ok, false);
+  assert.equal(inherited.reason, 'inherited_root_without_flag');
+  assert.equal(inherited.root, null);
+  const refusal = scanModule.refuseRootVerdict(inherited);
+  assert.equal(refusal.code, 5);
+  assert.match(refusal.lines[0], /IP_SCAN_ROOT=/);
+
+  // 旗標在場但沒帶目錄的三種寫法都算「參數沒填好」。
+  for (const argv of [['--root'], ['--root='], ['--root=   ']]) {
+    const empty = scanModule.resolveRootDir(argv, {});
+    assert.equal(empty.ok, false, `${JSON.stringify(argv)} 應判參數沒填好`);
+    assert.equal(empty.reason, 'empty_explicit_root');
+  }
+
+  // 兩者都沒有 → 預設 repo root，而它只從 __dirname 推導、不含 ambient 成分。
+  const fallback = scanModule.resolveRootDir([], {});
+  assert.equal(fallback.ok, true);
+  assert.equal(fallback.reason, 'default_repo_root');
+  assert.equal(fallback.root, ROOT_DIR);
+  // 空字串／全空白的 ambient 值不是宣告，不得把預設路徑擠掉。
+  for (const blank of ['', '   ']) {
+    assert.equal(scanModule.resolveRootDir([], { IP_SCAN_ROOT: blank }).reason, 'default_repo_root');
+  }
+});
 
 test('ip redline guard: a read error is its own state and never swallows the scan summary', () => {
   const roots = [];
