@@ -216,15 +216,44 @@ async function probePort(port) {
   });
 }
 
+// 寫入探針的綠燈必須是「位元組真的落地了」，不是「write 沒有丟例外」。
+// writeFileSync 正常返回只證明 syscall 被接受：配額滿、delayed allocation 的滿碟、
+// 只把寫入吞掉的同步/掛載層，都能讓呼叫端拿到一個乾淨的返回卻沒有任何位元組落地，
+// 於是 doctor 發出綠燈、真正的失敗延到第一個任務寫 data/ 時才炸。
+// 所以探針寫完要讀回自己的位元組才算數，且 readback 失敗與 write 失敗分開具名，
+// 讀的人看得出斷在哪一半。（同一條紀律已在 examples/mock-worker/worker.js 的
+// authoritative write 落地，這裡是把它補到發綠燈的健檢閘上。）
+const WRITE_PROBE_PAYLOAD = 'ok';
+
 function checkDataDirWritable() {
+  const relDir = path.relative(ROOT_DIR, DATA_DIR);
+  let probePath = null;
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    const probePath = path.join(DATA_DIR, `.doctor-write-test-${process.pid}`);
-    fs.writeFileSync(probePath, 'ok');
-    fs.unlinkSync(probePath);
-    return makeCheck('data_dir_writable', true, `data directory is writable at ${path.relative(ROOT_DIR, DATA_DIR)}`);
+    probePath = path.join(DATA_DIR, `.doctor-write-test-${process.pid}`);
+    fs.writeFileSync(probePath, WRITE_PROBE_PAYLOAD);
+    const readback = fs.readFileSync(probePath, 'utf8');
+    if (readback !== WRITE_PROBE_PAYLOAD) {
+      return makeCheck(
+        'data_dir_writable',
+        false,
+        `write_readback_mismatch: probe wrote ${WRITE_PROBE_PAYLOAD.length} byte(s) to ${relDir} ` +
+          `but read back ${readback.length} — the write was accepted without landing`,
+      );
+    }
+    return makeCheck('data_dir_writable', true, `data directory is writable at ${relDir} (probe bytes read back)`);
   } catch (error) {
     return makeCheck('data_dir_writable', false, error.message);
+  } finally {
+    // 清理是 best-effort：刪不掉探針檔是留了一個髒檔，不是「目錄不可寫」，
+    // 不得讓它翻掉上面已經讀回位元組驗證過的判決。
+    if (probePath) {
+      try {
+        fs.unlinkSync(probePath);
+      } catch (cleanupError) {
+        console.error(`WARN doctor_write_probe_not_removed: ${probePath} (${cleanupError.code || cleanupError.name})`);
+      }
+    }
   }
 }
 
