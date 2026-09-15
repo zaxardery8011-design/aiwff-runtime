@@ -1125,3 +1125,75 @@ test('doctor coverage: the pass line names how many checks actually ran, not the
   assert.notEqual(passOut.out, warnOut.out);
   assert.doesNotMatch(warnOut.out, /✓ Doctor passed/);
 });
+
+// --- (9) 狀態有歧義時不寫權威標記：磁碟上已有別人的終局判決就拒寫並具名診斷 ---
+const MOCK_WORKER_SCRIPT = path.join(ROOT_DIR, 'examples', 'mock-worker', 'worker.js');
+const ARTIFACTS_DIR = path.join(DATA_DIR, 'artifacts');
+
+function runMockWorker(taskId) {
+  const result = spawnSync(process.execPath, [MOCK_WORKER_SCRIPT, taskId], {
+    cwd: ROOT_DIR,
+    encoding: 'utf8',
+  });
+  return { code: result.status, out: `${result.stdout || ''}${result.stderr || ''}` };
+}
+
+function fixtureTaskPath(taskId) {
+  return path.join(TASKS_DIR, `${taskId}.json`);
+}
+
+function writeTaskFixture(taskId, status, extra = {}) {
+  fs.mkdirSync(TASKS_DIR, { recursive: true });
+  const stamp = new Date().toISOString();
+  const task = { id: taskId, title: `fixture ${taskId}`, instruction: 'noop', status, created_at: stamp, updated_at: stamp, ...extra };
+  fs.writeFileSync(fixtureTaskPath(taskId), `${JSON.stringify(task, null, 2)}\n`);
+  return task;
+}
+
+function readTaskFixture(taskId) {
+  return JSON.parse(fs.readFileSync(fixtureTaskPath(taskId), 'utf8'));
+}
+
+test('mock worker: an authoritative status already on disk is never overwritten, the refusal is named', () => {
+  const blockedId = 'fixture-terminal-owned-on-disk';
+  const ambiguousId = 'fixture-status-unreadable';
+  const okId = 'fixture-status-writable';
+  const created = [blockedId, ambiguousId, okId];
+  try {
+    // daemon 的 timeout 路徑就是這樣落的：先把任務標成 blocked(timeout)、再砍 worker。
+    // 這一棒若還活著跑完，舊行為會把別人的終局判決蓋成 done——而且行程內的
+    // terminalStatusOwner 在新行程裡是 null，看不到磁碟上已經有人擁有。
+    const before = writeTaskFixture(blockedId, 'blocked', { blocked_reason: 'timeout' });
+    const refused = runMockWorker(blockedId);
+    assert.notEqual(refused.code, 0, `拒寫權威標記時必須非零收場: ${JSON.stringify(refused)}`);
+    assert.match(refused.out, /terminal_status_owned_on_disk/, refused.out);
+    assert.match(refused.out, new RegExp(`${blockedId} is already blocked on disk`), refused.out);
+    // 拒絕要帶著具名理由回到呼叫端，不是一個 null deref 的 TypeError。
+    assert.match(refused.out, /status_write_refused/, refused.out);
+    assert.doesNotMatch(refused.out, /Cannot read propert/, refused.out);
+    // 最硬的證據：磁碟上那份判決一個欄位都沒被動到（連 updated_at 都沒刷新）。
+    assert.deepEqual(readTaskFixture(blockedId), before, '磁碟上的 blocked 判決被覆寫了');
+    assert.equal(fs.existsSync(path.join(ARTIFACTS_DIR, `${blockedId}.result.json`)), false);
+
+    // 判不出來也算歧義：status 欄空著時不得當成「沒人擁有」而放行覆寫。
+    const ambiguousBefore = writeTaskFixture(ambiguousId, '');
+    const ambiguous = runMockWorker(ambiguousId);
+    assert.notEqual(ambiguous.code, 0, JSON.stringify(ambiguous));
+    assert.match(ambiguous.out, /unreadable\(missing_status\)/, ambiguous.out);
+    assert.deepEqual(readTaskFixture(ambiguousId), ambiguousBefore);
+
+    // 鑑別力：沒有歧義的 pending 任務照跑到 done，這條閘不是把 worker 一律鎖死。
+    writeTaskFixture(okId, 'pending');
+    const shipped = runMockWorker(okId);
+    assert.equal(shipped.code, 0, shipped.out);
+    assert.doesNotMatch(shipped.out, /terminal_status_owned_on_disk/, shipped.out);
+    assert.equal(readTaskFixture(okId).status, 'done');
+    assert.equal(fs.existsSync(path.join(ARTIFACTS_DIR, `${okId}.result.json`)), true);
+  } finally {
+    for (const id of created) {
+      fs.rmSync(fixtureTaskPath(id), { force: true });
+      fs.rmSync(path.join(TASKS_DIR, `${id}.progress.jsonl`), { force: true });
+      fs.rmSync(path.join(ARTIFACTS_DIR, `${id}.result.json`), { force: true });
+    }
+  }
+});
