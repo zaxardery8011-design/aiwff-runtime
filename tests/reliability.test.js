@@ -1197,3 +1197,60 @@ test('mock worker: an authoritative status already on disk is never overwritten,
     }
   }
 });
+
+// --- (10) 健康紅燈要落存失敗原因與時戳，不是只翻一個 exit code ---
+const HEALTH_RECORD_PATH = path.join(DATA_DIR, 'health', 'last-run.json');
+
+function runDoctorAndReadHealth(args, env) {
+  // 先砍掉舊記錄，這樣「檔案在」本身就證明是這一輪寫的，不是上一輪留下來的。
+  fs.rmSync(HEALTH_RECORD_PATH, { force: true });
+  const run = runDoctor(args, env);
+  assert.ok(fs.existsSync(HEALTH_RECORD_PATH), `doctor 收尾沒落存健康記錄: ${run.out}`);
+  return { run, record: JSON.parse(fs.readFileSync(HEALTH_RECORD_PATH, 'utf8')) };
+}
+
+test('doctor health record: a red verdict persists the named reason and a UTC timestamp, not just the exit code', async () => {
+  const before = Date.now();
+
+  // 紅燈：CLAUDE_BYPASS_APPROVALS=1 會讓 env_valid 翻紅，而且帶著具名 rule。
+  const red = runDoctorAndReadHealth(['--json'], { CLAUDE_BYPASS_APPROVALS: '1' });
+  assert.notEqual(red.run.code, 0, `不安全旗標下應收非零: ${red.run.out}`);
+  assert.equal(red.record.ok, false, JSON.stringify(red.record));
+  assert.equal(red.record.mode, 'json');
+
+  // 時戳要是 UTC 帶 Z、而且真的是這一輪寫的，不是抄來的字串。
+  assert.match(red.record.checked_at, /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/, red.record.checked_at);
+  const stamp = Date.parse(red.record.checked_at);
+  assert.ok(stamp >= before && stamp <= Date.now() + 1000, `checked_at 不在本輪窗口內: ${red.record.checked_at}`);
+
+  // 核心：讀記錄的人要看得出「哪一項紅、哪條規則觸發的」，而不是只拿到一個布林值。
+  const envFailure = red.record.failures.find((item) => item.id === 'env_valid');
+  assert.ok(envFailure, `紅燈記錄沒點名 env_valid: ${JSON.stringify(red.record.failures)}`);
+  assert.ok(envFailure.rule_ids.includes('env.unsafe_flag'), JSON.stringify(envFailure));
+  assert.match(envFailure.detail, /CLAUDE_BYPASS_APPROVALS/, envFailure.detail);
+
+  // 恢復後要覆寫，否則磁碟上那份過期的紅會被下一個讀的人當現況——
+  // 那等於把「只翻旗標」的毛病原封不動搬進檔案裡。
+  const after = runDoctorAndReadHealth(['--json'], { CLAUDE_BYPASS_APPROVALS: '0' });
+  assert.equal(
+    after.record.failures.some((item) => item.id === 'env_valid'),
+    false,
+    `旗標移除後記錄還留著舊的 env_valid 紅燈: ${JSON.stringify(after.record.failures)}`,
+  );
+  assert.ok(Date.parse(after.record.checked_at) >= stamp, '記錄的時戳沒有跟著這一輪往前走');
+
+  // text 模式也要落存，而且要把分母一起帶進記錄：沒有它，一筆 ok:true 會被讀成「八項全過」，
+  // 而 text 模式其實只跑得動三項。
+  const text = runDoctorAndReadHealth([], { PORT: String(await freePort()) });
+  assert.match(text.run.out, /✓ Doctor passed/, text.run.out);
+  assert.equal(text.record.mode, 'text');
+  assert.equal(text.record.ok, true, JSON.stringify(text.record));
+  assert.deepEqual(text.record.failures, []);
+  assert.ok(text.record.coverage, `text 模式的健康記錄沒帶分母: ${JSON.stringify(text.record)}`);
+  assert.equal(text.record.coverage.ran, 3, JSON.stringify(text.record.coverage));
+  assert.ok(
+    text.record.coverage.ran < text.record.coverage.declared,
+    `text 模式的分母應小於宣告總數: ${JSON.stringify(text.record.coverage)}`,
+  );
+  assert.ok(text.record.coverage.not_run.includes('env_valid'), JSON.stringify(text.record.coverage));
+});

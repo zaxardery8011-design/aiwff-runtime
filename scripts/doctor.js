@@ -6,6 +6,8 @@ const { spawnSync } = require('child_process');
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
 const TASKS_DIR = path.join(ROOT_DIR, 'data', 'tasks');
+const HEALTH_DIR = path.join(DATA_DIR, 'health');
+const HEALTH_RECORD_PATH = path.join(HEALTH_DIR, 'last-run.json');
 const PORT = Number(process.env.PORT || 3100);
 const JSON_MODE = process.argv.includes('--json');
 
@@ -59,25 +61,32 @@ function envFlagValue(value) {
   return value === '1' || String(value).toLowerCase() === 'true';
 }
 
+// text 模式的三項檢查原本只回 boolean／狀態字串，失敗原因印完就只活在那一行 stdout 上。
+// 紅燈要落存「為什麼紅」就得先留得住原因，所以這三支改回 { ok/status, detail }，
+// 印出來的字面一個字都沒變，多出來的只是給 recordHealthRun 用的 detail。
 function checkNodeVersionText() {
   const major = Number(process.versions.node.split('.')[0]);
   if (major >= 18) {
-    console.log(`PASS Node.js version ${process.version} >= 18`);
-    return true;
+    const detail = `Node.js version ${process.version} >= 18`;
+    console.log(`PASS ${detail}`);
+    return { ok: true, detail };
   }
-  console.log(`FAIL Node.js version ${process.version} is below 18`);
-  return false;
+  const detail = `Node.js version ${process.version} is below 18`;
+  console.log(`FAIL ${detail}`);
+  return { ok: false, detail };
 }
 
 function checkTasksDirectoryText() {
   try {
     fs.mkdirSync(TASKS_DIR, { recursive: true });
     fs.accessSync(TASKS_DIR, fs.constants.R_OK | fs.constants.W_OK);
-    console.log(`PASS data/tasks can be created at ${path.relative(ROOT_DIR, TASKS_DIR)}`);
-    return true;
+    const detail = `data/tasks can be created at ${path.relative(ROOT_DIR, TASKS_DIR)}`;
+    console.log(`PASS ${detail}`);
+    return { ok: true, detail };
   } catch (error) {
-    console.log(`FAIL data/tasks cannot be created: ${error.message}`);
-    return false;
+    const detail = `data/tasks cannot be created: ${error.message}`;
+    console.log(`FAIL ${detail}`);
+    return { ok: false, detail };
   }
 }
 
@@ -86,17 +95,20 @@ function checkPortAvailableText(port) {
     const server = net.createServer();
     server.once('error', (error) => {
       if (error.code === 'EADDRINUSE') {
-        console.log(`WARN port ${port} is already in use`);
-        resolve('warn');
+        const detail = `port ${port} is already in use`;
+        console.log(`WARN ${detail}`);
+        resolve({ status: 'warn', detail });
         return;
       }
-      console.log(`FAIL port ${port} check failed: ${error.message}`);
-      resolve('fail');
+      const detail = `port ${port} check failed: ${error.message}`;
+      console.log(`FAIL ${detail}`);
+      resolve({ status: 'fail', detail });
     });
     server.once('listening', () => {
       server.close(() => {
-        console.log(`PASS port ${port} is available`);
-        resolve('pass');
+        const detail = `port ${port} is available`;
+        console.log(`PASS ${detail}`);
+        resolve({ status: 'pass', detail });
       });
     });
     server.listen(port, '127.0.0.1');
@@ -282,6 +294,55 @@ function checkTelegramConfig(parsedEnv) {
   return makeCheck('tg_config_valid', true, token ? 'Telegram token and admin chat id are both set' : 'Telegram token is not set');
 }
 
+// 健康紅燈不能只翻一個旗標（exit code）就算交代完：exit 1 說得出「紅了」，說不出
+// 哪一項紅、為什麼紅、什麼時候紅的。原因目前只活在 stdout，排程／CI 事後回來看時
+// 那段輸出通常已經被沖掉，讀的人只剩一個布林值可以翻。
+// 所以每次 doctor 收尾都把判決與具名失敗原因連同 UTC 時戳落成一份記錄。
+//
+// 為什麼綠燈也寫：只在紅燈寫，恢復成綠燈之後磁碟上那份紅會原地留著，下一個讀的人
+// 會把過期的紅當現況——那等於把「翻旗標」的毛病搬到檔案裡。每次覆寫，記錄就永遠
+// 是最後一次實跑的結果，checked_at 自己說得出它有多新。
+function healthFailuresFromChecks(checks) {
+  return checks
+    .filter((check) => !check.ok)
+    .map((check) => ({
+      id: check.id,
+      detail: check.detail,
+      rule_ids: check.reasons.map((item) => item.rule_id),
+    }));
+}
+
+function recordHealthRun({ mode, ok, coverage: coverageValue, failures }) {
+  const record = {
+    checked_at: new Date().toISOString(),
+    mode,
+    ok: Boolean(ok),
+    // 收尾走的是 text 模式時，分母要一起落存：沒有它，一筆 ok:true 會被讀成
+    // 「八項全過」，而 text 模式其實只跑得動三項。
+    coverage: coverageValue || null,
+    failures: Array.isArray(failures) ? failures : [],
+  };
+  // 落存是 best-effort：寫不出記錄是少了一份證據，不是「健康檢查失敗」，
+  // 不得翻掉上面已經算出來的判決（同 doctor_write_probe_not_removed 的分寸）。
+  const tempPath = `${HEALTH_RECORD_PATH}.tmp-${process.pid}`;
+  try {
+    fs.mkdirSync(HEALTH_DIR, { recursive: true });
+    fs.writeFileSync(tempPath, `${JSON.stringify(record, null, 2)}\n`);
+    fs.renameSync(tempPath, HEALTH_RECORD_PATH);
+  } catch (error) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch (cleanupError) {
+      void cleanupError;
+    }
+    console.error(
+      `WARN doctor_health_record_not_written: ${HEALTH_RECORD_PATH} (${error.code || error.name}: ${error.message})`,
+    );
+    return null;
+  }
+  return record;
+}
+
 async function runJsonDoctor() {
   const parsedEnv = parseDotEnv();
   const npm = commandVersion('npm');
@@ -329,26 +390,38 @@ async function runJsonDoctor() {
 }
 
 async function runTextDoctor() {
-  const nodeOk = checkNodeVersionText();
-  const dirOk = checkTasksDirectoryText();
-  const portStatus = await checkPortAvailableText(PORT);
+  const node = checkNodeVersionText();
+  const dir = checkTasksDirectoryText();
+  const port = await checkPortAvailableText(PORT);
   // 三種收尾都要帶著分母走：PASS 沒帶分母最危險，但 WARN／FAIL 同樣會被當成「doctor 全跑過」。
-  const covered = formatCoverage(coverage(TEXT_MODE_CHECK_IDS));
+  const coverageValue = coverage(TEXT_MODE_CHECK_IDS);
+  const covered = formatCoverage(coverageValue);
+  // WARN 不是紅燈（收場仍是 exit 0），所以不記進 failures；只有真的翻成 FAIL 的才算。
+  const failures = [
+    { id: 'node_version', ...node },
+    { id: 'data_dir_writable', ...dir },
+    { id: 'port_available', ok: port.status !== 'fail', detail: port.detail },
+  ]
+    .filter((item) => !item.ok)
+    .map((item) => ({ id: item.id, detail: item.detail, rule_ids: [] }));
 
-  if (nodeOk && dirOk && portStatus === 'pass') {
+  if (node.ok && dir.ok && port.status === 'pass') {
+    recordHealthRun({ mode: 'text', ok: true, coverage: coverageValue, failures });
     console.log(
       `✓ Doctor passed — ready to run demo (${covered}; run \`npm run doctor -- --json\` for the checks text mode skips)`,
     );
     return;
   }
 
-  if (nodeOk && dirOk && portStatus === 'warn') {
+  if (node.ok && dir.ok && port.status === 'warn') {
+    recordHealthRun({ mode: 'text', ok: true, coverage: coverageValue, failures });
     console.log(
       `Doctor completed with warnings — stop the process using the port before running the default demo (${covered})`,
     );
     return;
   }
 
+  recordHealthRun({ mode: 'text', ok: false, coverage: coverageValue, failures });
   console.log(`FAIL Doctor did not pass (${covered})`);
   process.exitCode = 1;
 }
@@ -356,6 +429,12 @@ async function runTextDoctor() {
 async function main() {
   if (JSON_MODE) {
     const report = await runJsonDoctor();
+    recordHealthRun({
+      mode: 'json',
+      ok: report.ok,
+      coverage: coverage(report.checks.map((check) => check.id)),
+      failures: healthFailuresFromChecks(report.checks),
+    });
     console.log(JSON.stringify(report, null, 2));
     process.exitCode = report.ok ? 0 : 1;
     return;
@@ -364,6 +443,14 @@ async function main() {
 }
 
 main().catch((error) => {
+  // 崩掉是最紅的紅燈，卻也是最容易只留下一個 exit code 的一種：把它一起落存。
+  // 這條路徑跑了哪幾項檢查無從得知，coverage 就誠實留 null，不要編一個分母出來。
+  recordHealthRun({
+    mode: JSON_MODE ? 'json' : 'text',
+    ok: false,
+    coverage: null,
+    failures: [{ id: 'doctor_runtime', detail: error.message, rule_ids: [RULE.DOCTOR_RUNTIME] }],
+  });
   if (JSON_MODE) {
     console.log(
       JSON.stringify(
