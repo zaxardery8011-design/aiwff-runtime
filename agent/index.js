@@ -12,12 +12,15 @@ const TASKS_DIR = path.join(DATA_DIR, 'tasks');
 const ARTIFACTS_DIR = path.join(DATA_DIR, 'artifacts');
 const INBOX_DIR = path.join(DATA_DIR, 'inbox');
 const LOGS_DIR = path.join(DATA_DIR, 'logs');
+const WORKSPACES_DIR = path.join(DATA_DIR, 'workspaces');
 const MEMORY_DIR = path.join(ROOT_DIR, 'memory');
 const PORT = Number(process.env.PORT || 3100);
+const RUNTIME_TOKEN_HEADER = 'x-aiwff-runtime-token';
 const DEFAULT_WORKER_TIMEOUT_SEC = 600;
 const MAX_WORKER_TIMEOUT_SEC = 3600;
 const MAX_MEMORY_BYTES = 256 * 1024;
 const MAX_LOG_BYTES = 128 * 1024;
+const DEFAULT_CLAUDE_DISALLOWED_TOOLS = 'Bash,PowerShell';
 let tgOffset = 0;
 const tgPendingNotify = {};
 
@@ -82,6 +85,7 @@ function ensureDirectories() {
   fs.mkdirSync(TASKS_DIR, { recursive: true });
   fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
   fs.mkdirSync(INBOX_DIR, { recursive: true });
+  fs.mkdirSync(WORKSPACES_DIR, { recursive: true });
 }
 
 function nowIso() {
@@ -191,6 +195,63 @@ function sendHtml(res, statusCode, html) {
     'content-length': Buffer.byteLength(html),
   });
   res.end(html);
+}
+
+function timingSafeStringEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left));
+  const rightBuffer = Buffer.from(String(right));
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function getRequestToken(req) {
+  const headerToken = req.headers[RUNTIME_TOKEN_HEADER];
+  if (Array.isArray(headerToken)) {
+    return headerToken[0] || '';
+  }
+  if (typeof headerToken === 'string' && headerToken) {
+    return headerToken;
+  }
+
+  const auth = req.headers.authorization || '';
+  const match = String(auth).match(/^Bearer\s+(.+)$/i);
+  return match ? match[1] : '';
+}
+
+function sameOriginWriteRequest(req) {
+  const allowed = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]);
+  for (const name of ['origin', 'referer']) {
+    const value = req.headers[name];
+    if (!value) {
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = new URL(Array.isArray(value) ? value[0] : value);
+    } catch (_) {
+      return false;
+    }
+    if (!allowed.has(parsed.origin)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function verifyWriteAccess(req) {
+  const configuredToken = process.env.AIWFF_RUNTIME_TOKEN || '';
+  if (!configuredToken) {
+    return { ok: false, status: 401, error: 'AIWFF_RUNTIME_TOKEN is required for write requests' };
+  }
+  if (!timingSafeStringEqual(getRequestToken(req), configuredToken)) {
+    return { ok: false, status: 401, error: 'Missing or invalid runtime token' };
+  }
+  if (!sameOriginWriteRequest(req)) {
+    return { ok: false, status: 403, error: 'Cross-origin write request rejected' };
+  }
+  return { ok: true };
 }
 
 function htmlEscape(value) {
@@ -704,7 +765,7 @@ ${preferences}
 指令: ${task.instruction}
 任務ID: ${task.id}
 
-結果請寫到: ${artifactResultRef(task.id)}
+結果請寫到: ${artifactResultPath(task.id)}
 最後一行必須寫: DONE: <一句話說你完成了什麼>
 `;
 }
@@ -732,16 +793,38 @@ function quoteWindowsCommand(command) {
   return `"${value.replace(/"/g, '\\"')}"`;
 }
 
-function spawnClaudeProcess(claudeCmd, args) {
+function taskWorkspacePath(taskId) {
+  return path.join(WORKSPACES_DIR, taskId);
+}
+
+function shouldUseDangerousClaudeBypass() {
+  return envFlag('CLAUDE_BYPASS_APPROVALS') && envFlag('AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS');
+}
+
+function appendClaudeBoundaryArgs(args) {
+  args.push('--add-dir', ARTIFACTS_DIR);
+
+  const allowedTools = String(process.env.AIWFF_CLAUDE_ALLOWED_TOOLS || '').trim();
+  if (allowedTools) {
+    args.push('--allowedTools', allowedTools);
+  }
+
+  const disallowedTools = String(process.env.AIWFF_CLAUDE_DISALLOWED_TOOLS || DEFAULT_CLAUDE_DISALLOWED_TOOLS).trim();
+  if (disallowedTools) {
+    args.push('--disallowedTools', disallowedTools);
+  }
+}
+
+function spawnClaudeProcess(claudeCmd, args, optionsOverride = {}) {
   const options = {
-    cwd: ROOT_DIR,
+    cwd: optionsOverride.cwd || ROOT_DIR,
     stdio: ['pipe', 'pipe', 'pipe'],
   };
   if (process.platform !== 'win32') {
     return spawn(claudeCmd, args, options);
   }
 
-  const commandLine = [quoteWindowsCommand(claudeCmd), ...args].join(' ');
+  const commandLine = [quoteWindowsCommand(claudeCmd), ...args.map(quoteWindowsCommand)].join(' ');
   return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], {
     ...options,
     windowsVerbatimArguments: true,
@@ -754,11 +837,24 @@ function spawnClaudeWorker(task, attempt = 1) {
   const fullPrompt = buildClaudePrompt(task);
   const runningTask = updateTaskStatus(task, 'running');
   const timeoutMs = normalizeWorkerTimeoutSec(task) * 1000;
+  const workerCwd = taskWorkspacePath(task.id);
+  fs.mkdirSync(workerCwd, { recursive: true });
   const args = ['--print'];
-  if (envFlag('CLAUDE_BYPASS_APPROVALS')) {
+  appendClaudeBoundaryArgs(args);
+  if (shouldUseDangerousClaudeBypass()) {
     args.unshift('--dangerously-skip-permissions');
+    const warning =
+      'SECURITY WARNING: Claude worker is running with --dangerously-skip-permissions because both CLAUDE_BYPASS_APPROVALS and AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS are enabled.';
+    logStderr(warning, `task=${task.id}`);
+    appendProgressText(task.id, warning);
+  } else if (envFlag('CLAUDE_BYPASS_APPROVALS')) {
+    const warning =
+      'SECURITY WARNING: CLAUDE_BYPASS_APPROVALS ignored; set AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS=1 to explicitly opt in.';
+    logStderr(warning, `task=${task.id}`);
+    appendProgressText(task.id, warning);
   }
-  const child = spawnClaudeProcess(claudeCmd, args);
+  appendProgressText(task.id, `Claude spawn args=${JSON.stringify(args)} cwd=${workerCwd}`);
+  const child = spawnClaudeProcess(claudeCmd, args, { cwd: workerCwd });
   let spawnError = null;
   let stderr = '';
   let timedOut = false;
@@ -1092,6 +1188,11 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/tasks') {
+    const writeAccess = verifyWriteAccess(req);
+    if (!writeAccess.ok) {
+      sendJson(res, writeAccess.status, { ok: false, error: writeAccess.error });
+      return;
+    }
     await createTask(req, res);
     return;
   }
@@ -1125,6 +1226,9 @@ async function handleRequest(req, res) {
 function main() {
   installProcessGuards();
   ensureDirectories();
+  if (!process.env.AIWFF_RUNTIME_TOKEN) {
+    console.error('SECURITY WARNING: AIWFF_RUNTIME_TOKEN is not set; POST /api/tasks will reject all write requests.');
+  }
   const server = http.createServer((req, res) => {
     handleRequest(req, res).catch((error) => {
       sendJson(res, 500, { ok: false, error: error.message });

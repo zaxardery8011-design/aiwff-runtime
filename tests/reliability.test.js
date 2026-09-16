@@ -8,6 +8,8 @@ const { spawn } = require('node:child_process');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
+const RUNTIME_TOKEN = 'test-runtime-token';
+const AUTH_HEADERS = { 'x-aiwff-runtime-token': RUNTIME_TOKEN };
 const agentModule = require(path.join(ROOT_DIR, 'agent', 'index.js'));
 
 function sleep(ms) {
@@ -76,7 +78,7 @@ function getOpenPort() {
   });
 }
 
-function requestJson(port, method, route, payload) {
+function requestJson(port, method, route, payload, headers = {}) {
   return new Promise((resolve, reject) => {
     const body = payload ? JSON.stringify(payload) : '';
     const req = http.request(
@@ -88,6 +90,7 @@ function requestJson(port, method, route, payload) {
         headers: {
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(body),
+          ...headers,
         },
       },
       (res) => {
@@ -99,7 +102,10 @@ function requestJson(port, method, route, payload) {
           try {
             const parsed = raw ? JSON.parse(raw) : {};
             if (res.statusCode >= 400) {
-              reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
+              const error = new Error(parsed.error || `HTTP ${res.statusCode}`);
+              error.statusCode = res.statusCode;
+              error.body = parsed;
+              reject(error);
               return;
             }
             resolve(parsed);
@@ -126,6 +132,7 @@ async function startDaemon(env = {}) {
       CLAUDE_BYPASS_APPROVALS: '',
       MOCK_WORKER: '1',
       ENABLE_REAL_CLAUDE_WORKER: '',
+      AIWFF_RUNTIME_TOKEN: RUNTIME_TOKEN,
       ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -234,6 +241,187 @@ process.stdin.on('end', () => {
 });
 `;
 
+function captureSpawnClaudeScript(captureFile) {
+  return `
+const fs = require('fs');
+const path = require('path');
+const captureFile = ${JSON.stringify(captureFile)};
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  const outMatch = input.match(/結果請寫到: (.+)/);
+  if (!outMatch) {
+    console.error('missing artifact path');
+    process.exit(3);
+  }
+  fs.mkdirSync(path.dirname(captureFile), { recursive: true });
+  fs.writeFileSync(captureFile, JSON.stringify({ cwd: process.cwd(), argv: process.argv.slice(2) }, null, 2));
+  const outPath = path.resolve(__dirname, '..', '..', outMatch[1].trim().replace(/\\//g, path.sep));
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, 'DONE: captured spawn boundary\\\\n');
+});
+`;
+}
+
+test('POST /api/tasks requires runtime token and accepts the correct token', async () => {
+  resetDataDir();
+  const runtime = await startDaemon({ AIWFF_RUNTIME_TOKEN: RUNTIME_TOKEN, MOCK_WORKER: '1' });
+
+  try {
+    await assert.rejects(
+      () =>
+        requestJson(runtime.port, 'POST', '/api/tasks', {
+          title: 'missing token',
+          instruction: 'should be rejected',
+        }),
+      (error) => error.statusCode === 401 && /token/i.test(error.message),
+    );
+
+    const created = await requestJson(
+      runtime.port,
+      'POST',
+      '/api/tasks',
+      {
+        title: 'authorized task',
+        instruction: 'should be accepted',
+      },
+      AUTH_HEADERS,
+    );
+    assert.match(created.id, /^[0-9a-f-]{36}$/i);
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+test('POST /api/tasks rejects writes when runtime token is not configured', async () => {
+  resetDataDir();
+  const runtime = await startDaemon({ AIWFF_RUNTIME_TOKEN: '', MOCK_WORKER: '1' });
+
+  try {
+    await assert.rejects(
+      () =>
+        requestJson(
+          runtime.port,
+          'POST',
+          '/api/tasks',
+          {
+            title: 'missing configured token',
+            instruction: 'should be rejected',
+          },
+          AUTH_HEADERS,
+        ),
+      (error) => error.statusCode === 401 && /AIWFF_RUNTIME_TOKEN/.test(error.message),
+    );
+    assert.match(runtime.logs.stderr, /AIWFF_RUNTIME_TOKEN is not set/);
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+test('POST /api/tasks rejects cross-origin browser writes', async () => {
+  resetDataDir();
+  const runtime = await startDaemon({ AIWFF_RUNTIME_TOKEN: RUNTIME_TOKEN, MOCK_WORKER: '1' });
+
+  try {
+    await assert.rejects(
+      () =>
+        requestJson(
+          runtime.port,
+          'POST',
+          '/api/tasks',
+          {
+            title: 'csrf',
+            instruction: 'should be rejected',
+          },
+          { ...AUTH_HEADERS, origin: 'https://example.invalid' },
+        ),
+      (error) => error.statusCode === 403 && /Cross-origin/.test(error.message),
+    );
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+test('real worker spawn is scoped to a per-task workspace and logs args/cwd', async () => {
+  resetDataDir();
+  const captureFile = path.join(DATA_DIR, 'spawn-capture.json');
+  const claudeCmd = writeFakeClaude('spawn-capture-claude', captureSpawnClaudeScript(captureFile));
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    ENABLE_REAL_CLAUDE_WORKER: '1',
+    CLAUDE_CMD: claudeCmd,
+    CLAUDE_BYPASS_APPROVALS: '1',
+    AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS: '',
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'spawn boundary',
+      instruction: 'capture args and cwd',
+      timeout_sec: 10,
+    }, AUTH_HEADERS);
+    const task = await waitForTaskStatus(runtime.port, created.id, ['done']);
+    assert.equal(task.status, 'done');
+
+    const capture = JSON.parse(fs.readFileSync(captureFile, 'utf8'));
+    assert.equal(capture.cwd, path.join(DATA_DIR, 'workspaces', created.id));
+    assert.notEqual(capture.cwd, ROOT_DIR);
+    assert.deepEqual(capture.argv, [
+      '--print',
+      '--add-dir',
+      path.join(DATA_DIR, 'artifacts'),
+      '--disallowedTools',
+      'Bash,PowerShell',
+    ]);
+    assert.match(runtime.logs.stderr, /CLAUDE_BYPASS_APPROVALS ignored/);
+
+    const progress = await requestJson(runtime.port, 'GET', `/api/tasks/${created.id}/progress`);
+    assert.ok(
+      progress.lines.some((line) => line.includes('"--add-dir"') && line.includes(' cwd=')),
+      `expected spawn args/cwd progress line, got: ${JSON.stringify(progress.lines)}`,
+    );
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+test('dangerous Claude bypass requires explicit double opt-in and emits a warning', async () => {
+  resetDataDir();
+  const captureFile = path.join(DATA_DIR, 'spawn-dangerous-capture.json');
+  const claudeCmd = writeFakeClaude('spawn-dangerous-claude', captureSpawnClaudeScript(captureFile));
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    ENABLE_REAL_CLAUDE_WORKER: '1',
+    CLAUDE_CMD: claudeCmd,
+    CLAUDE_BYPASS_APPROVALS: '1',
+    AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS: '1',
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'dangerous spawn boundary',
+      instruction: 'capture dangerous args',
+      timeout_sec: 10,
+    }, AUTH_HEADERS);
+    await waitForTaskStatus(runtime.port, created.id, ['done']);
+
+    const capture = JSON.parse(fs.readFileSync(captureFile, 'utf8'));
+    assert.deepEqual(capture.argv, [
+      '--dangerously-skip-permissions',
+      '--print',
+      '--add-dir',
+      path.join(DATA_DIR, 'artifacts'),
+      '--disallowedTools',
+      'Bash,PowerShell',
+    ]);
+    assert.equal(capture.cwd, path.join(DATA_DIR, 'workspaces', created.id));
+    assert.match(runtime.logs.stderr, /--dangerously-skip-permissions/);
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
 test('real worker receives special-character and long zh-TW task text through stdin', async () => {
   resetDataDir();
   const claudeCmd = writeFakeClaude('capture-claude', CAPTURE_CLAUDE);
@@ -254,7 +442,7 @@ test('real worker receives special-character and long zh-TW task text through st
       title: 'stdin reliability',
       instruction,
       timeout_sec: 10,
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['done']);
     assert.equal(task.status, 'done');
     assert.match(task.artifact_path, /\.result\.md$/);
@@ -273,7 +461,7 @@ test('timeout marks task blocked and writes an inbox event', async () => {
       title: 'timeout reliability',
       instruction: 'mock worker should be stopped by timeout',
       timeout_sec: 2,
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['blocked'], 8000);
     assert.equal(task.blocked_reason, 'timeout');
     const inboxFile = path.join(DATA_DIR, 'inbox', `${created.id}.blocked.json`);
@@ -300,7 +488,7 @@ test('real worker success without artifact fails clearly', async () => {
       title: 'missing artifact',
       instruction: 'exit zero but do not write the result file',
       timeout_sec: 10,
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['failed']);
     assert.equal(task.error, 'no artifact produced');
   } finally {
@@ -390,7 +578,7 @@ test('task retry: real worker recovers on a later attempt and records retry_coun
       title: 'retry recover',
       instruction: 'fail once then succeed',
       timeout_sec: 20,
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['done'], 20000);
     assert.equal(task.status, 'done');
     assert.equal(task.retry_count, 1);
@@ -421,7 +609,7 @@ test('task retry: real worker gives up as failed after retries are exhausted', a
       title: 'retry exhaust',
       instruction: 'always fail',
       timeout_sec: 20,
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['failed'], 20000);
     assert.equal(task.status, 'failed');
     assert.equal(task.retry_count, 1);

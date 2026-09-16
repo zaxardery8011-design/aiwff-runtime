@@ -6,6 +6,8 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
+const RUNTIME_TOKEN = 'smoke-runtime-token';
+const AUTH_HEADERS = { 'x-aiwff-runtime-token': RUNTIME_TOKEN };
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -23,7 +25,7 @@ function getOpenPort() {
   });
 }
 
-function requestJson(port, method, route, payload) {
+function requestJson(port, method, route, payload, headers = {}) {
   return new Promise((resolve, reject) => {
     const body = payload ? JSON.stringify(payload) : '';
     const req = http.request(
@@ -35,6 +37,7 @@ function requestJson(port, method, route, payload) {
         headers: {
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(body),
+          ...headers,
         },
       },
       (res) => {
@@ -98,7 +101,7 @@ async function main() {
   const port = await getOpenPort();
   const daemon = spawn('node', ['agent/index.js'], {
     cwd: ROOT_DIR,
-    env: { ...process.env, PORT: String(port), MOCK_WORKER: '1' },
+    env: { ...process.env, PORT: String(port), MOCK_WORKER: '1', AIWFF_RUNTIME_TOKEN: RUNTIME_TOKEN },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -111,7 +114,7 @@ async function main() {
     const created = await requestJson(port, 'POST', '/api/tasks', {
       title: 'Smoke test task',
       instruction: 'Verify the mock worker lifecycle end to end.',
-    });
+    }, AUTH_HEADERS);
     assert.match(created.id, /^[0-9a-f-]{36}$/i);
 
     const task = await waitForTaskDone(port, created.id);
