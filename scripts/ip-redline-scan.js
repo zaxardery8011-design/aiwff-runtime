@@ -216,13 +216,18 @@ function isBinary(buffer) {
   return buffer.includes(0);
 }
 
-function listFiles(dir) {
+// 射程對帳：SKIP_DIRS 排掉的目錄是「沒驗到」，不是「驗過且乾淨」。掃的時候照實際目錄樹
+// （不是照宣告清單）把真的遇到、真的被排掉的目錄逐個記下來，收尾才講得出這張 PASS 沒涵蓋哪裡。
+// 閘沒射到的地方一定會漂，而一份不揭露射程的 PASS 會被讀成「整棵樹都乾淨」。
+function listFiles(dir, rootDir = ROOT_DIR, skipped = []) {
   const result = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name)) {
-        result.push(...listFiles(path.join(dir, entry.name)));
+      if (SKIP_DIRS.has(entry.name)) {
+        skipped.push(toRepoPath(path.join(dir, entry.name), rootDir));
+        continue;
       }
+      result.push(...listFiles(path.join(dir, entry.name), rootDir, skipped));
       continue;
     }
     if (entry.isFile()) {
@@ -283,12 +288,20 @@ function scanFile(filePath, rootDir = ROOT_DIR, counters = null) {
 
 // 回傳 findings + 實際檢查量。零命中只有在 files_checked >= 1 時才有意義。
 function scanTree(rootDir = ROOT_DIR, listCheck = checkListPredicates()) {
-  const counters = { files_checked: 0, lines_checked: 0, binary_skipped: 0, read_errors: [] };
+  const counters = {
+    files_checked: 0,
+    lines_checked: 0,
+    binary_skipped: 0,
+    read_errors: [],
+    skipped_dirs: [],
+  };
   // 判準清單空掉時連掃都不掃：掃完再說「零命中」只是多產一份沒有意義的通過證據。
   if (!listCheck.ok) {
     return { findings: [], ...counters, list_check: listCheck };
   }
-  const findings = listFiles(rootDir).flatMap((filePath) => scanFile(filePath, rootDir, counters));
+  const findings = listFiles(rootDir, rootDir, counters.skipped_dirs).flatMap((filePath) =>
+    scanFile(filePath, rootDir, counters),
+  );
   return { findings, ...counters, list_check: listCheck };
 }
 
@@ -298,10 +311,12 @@ function scanTree(rootDir = ROOT_DIR, listCheck = checkListPredicates()) {
 function decideExit(result, rootDir = ROOT_DIR) {
   const readErrors = result.read_errors || [];
   const listCheck = result.list_check || checkListPredicates();
+  const skippedDirs = result.skipped_dirs || [];
   const checked =
     `files_checked=${result.files_checked} lines_checked=${result.lines_checked} ` +
     `binary_skipped=${result.binary_skipped} read_errors=${readErrors.length} ` +
-    `usable_patterns=${listCheck.usable_patterns}/${listCheck.declared_patterns}`;
+    `usable_patterns=${listCheck.usable_patterns}/${listCheck.declared_patterns} ` +
+    `skipped_dirs=${skippedDirs.length}`;
 
   // 判準清單一條可用的都沒有 → 走拒絕分支。這在讀任何檔之前就能斷定，不必等掃完才說零命中。
   if (!listCheck.ok) {
@@ -346,7 +361,14 @@ function decideExit(result, rootDir = ROOT_DIR) {
     };
   }
 
-  return { code: 0, stream: 'log', lines: [`PASS IP redline scan: no redline hits (${checked})`] };
+  // 通過也要交代射程：射程外的目錄一律具名列成「未驗」，不讓 PASS 被讀成整棵樹都掃過。
+  const passLines = [`PASS IP redline scan: no redline hits (${checked})`];
+  if (skippedDirs.length) {
+    passLines.push(
+      `NOTE out of scan scope, counted as unverified (not as clean): ${skippedDirs.join(', ')}`,
+    );
+  }
+  return { code: 0, stream: 'log', lines: passLines };
 }
 
 function main(argv = process.argv.slice(2), env = process.env) {

@@ -602,6 +602,47 @@ test('ip redline guard: zero files checked fails closed instead of printing PASS
   }
 });
 
+test('ip redline guard: skipped directories are disclosed as unverified instead of hidden behind PASS', () => {
+  // in-scope 有東西可掃（PASS 才有意義），out-of-scope 的 logs/ 裡放一顆真的會被抓到的 token。
+  const scoped = makeScanRoot({ 'readme.md': 'nothing sensitive here\n' });
+  fs.mkdirSync(path.join(scoped, 'logs'));
+  fs.writeFileSync(path.join(scoped, 'logs', 'leak.md'), `token: ${FAKE_TOKEN}\n`, 'utf8');
+
+  // 控制組：同一顆 token 放在射程內的子目錄 → 必須被抓到，證明上面的 PASS 是射程造成的，不是瞎了。
+  const inScope = makeScanRoot({ 'readme.md': 'nothing sensitive here\n' });
+  fs.mkdirSync(path.join(inScope, 'notlogs'));
+  fs.writeFileSync(path.join(inScope, 'notlogs', 'leak.md'), `token: ${FAKE_TOKEN}\n`, 'utf8');
+
+  // 對照組：整棵樹都在射程內 → 不得有任何「未驗」揭露，否則揭露行變成每次都印的噪音。
+  const noSkip = makeScanRoot({ 'readme.md': 'nothing sensitive here\n' });
+
+  try {
+    const skipped = runScan(scoped);
+    assert.equal(skipped.code, 0, skipped.out);
+    assert.match(skipped.out, /^PASS /m);
+    // 本次修正的判準：射程外的目錄要對帳實際目錄樹、逐個具名，並在 checked 計數裡留下分母。
+    assert.match(skipped.out, /skipped_dirs=1\b/, `PASS 未揭露射程外目錄數: ${skipped.out}`);
+    assert.match(
+      skipped.out,
+      /counted as unverified \(not as clean\): logs$/m,
+      `PASS 未具名射程外目錄: ${skipped.out}`,
+    );
+
+    const caught = runScan(inScope);
+    assert.equal(caught.code, 1, caught.out);
+    assert.match(caught.out, /notlogs\/leak\.md:\d+ \[secret-token\]/);
+
+    const clean = runScan(noSkip);
+    assert.equal(clean.code, 0, clean.out);
+    assert.match(clean.out, /skipped_dirs=0\b/, clean.out);
+    assert.doesNotMatch(clean.out, /counted as unverified/, `射程全覆蓋時不該印揭露行: ${clean.out}`);
+  } finally {
+    for (const root of [scoped, inScope, noSkip]) {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 // 直接 require 正式腳本匯出的函式，讓測試驗的是產品碼本身的判準。
 const scanModule = require(SCAN_SCRIPT);
 
