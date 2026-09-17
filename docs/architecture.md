@@ -83,7 +83,7 @@ If `CLAUDE_BYPASS_APPROVALS` is set alone, the daemon ignores it and logs a `SEC
 
 ## Runtime Guardrails
 
-These are the current enforced boundaries and remaining gaps after commit `536017f`.
+These are the current enforced boundaries and remaining gaps. Each row reflects the behaviour in `agent/index.js` on the default branch; verify against the code rather than against this table's revision.
 
 | Surface | Current enforcement | Remaining gap / honesty note |
 |---|---|---|
