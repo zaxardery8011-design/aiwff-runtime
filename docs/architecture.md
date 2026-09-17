@@ -72,11 +72,29 @@ ENABLE_REAL_CLAUDE_WORKER=1
 
 When real mode is enabled, the daemon spawns `CLAUDE_CMD --print` with a prompt built from `CLAUDE.md`, `memory/facts.md`, `memory/preferences.md`, the task details, and the required artifact path. The prompt is written through stdin instead of argv so long prompts do not depend on argv quoting. On Windows, spawn goes through `cmd.exe` so the default `claude` command can resolve `claude.cmd`.
 
-Approval and sandbox bypass is not implicit; `--dangerously-skip-permissions` is added only when:
+Approval and sandbox bypass is not implicit; `--dangerously-skip-permissions` is added only when both flags are set:
 
 ```env
 CLAUDE_BYPASS_APPROVALS=1
+AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS=1
 ```
+
+If `CLAUDE_BYPASS_APPROVALS` is set alone, the daemon ignores it and logs a `SECURITY WARNING`. Real Claude workers start in `data/workspaces/<task_id>` instead of the repository root, receive `--add-dir data/artifacts`, and default to `--disallowedTools Bash,PowerShell`. `AIWFF_CLAUDE_ALLOWED_TOOLS` can explicitly pass an allowlist through `--allowedTools`.
+
+## Runtime Guardrails
+
+These are the current enforced boundaries and remaining gaps after commit `536017f`.
+
+| Surface | Current enforcement | Remaining gap / honesty note |
+|---|---|---|
+| HTTP bind address | The daemon listens on `127.0.0.1:${PORT}`, so the WebUI and API are local by default. | This limits exposure to the local machine; it is not network authentication. |
+| Write API: `POST /api/tasks` | Requires `x-aiwff-runtime-token` or `Authorization: Bearer <token>` matching `AIWFF_RUNTIME_TOKEN`. If `AIWFF_RUNTIME_TOKEN` is not set, all write requests are rejected with 401 and startup logs a `SECURITY WARNING`. | The token protects write creation only. |
+| Browser write origin | When an `Origin` or `Referer` header is present, it must be `http://127.0.0.1:<PORT>` or `http://localhost:<PORT>`; cross-origin writes are rejected with 403. | Headerless local writes still rely on the runtime token. |
+| Read API: `GET /api/*` | Current read endpoints remain available without token checks, including task, progress, events, inbox, logs, memory, settings, doctor, health, and HUD reads. | This is the widest remaining known gap: local read access is unauthenticated. |
+| Real Claude worker cwd | Real Claude workers run from `data/workspaces/<task_id>`, not the repository root. | This reduces accidental repo-root access through cwd, but does not by itself prevent absolute-path access. |
+| Artifact writes from Claude | Real Claude workers receive `--add-dir data/artifacts`, preserving the intended artifact output path. | This is a Claude CLI boundary, not an operating-system write-denial boundary. |
+| Claude tools | Real Claude workers default to `--disallowedTools Bash,PowerShell`; `AIWFF_CLAUDE_ALLOWED_TOOLS` can explicitly pass `--allowedTools`. | On Windows there is no Landlock, Seatbelt, or equivalent OS sandbox here; tool flags are CLI-level restrictions only. |
+| Dangerous Claude bypass | `--dangerously-skip-permissions` requires both `CLAUDE_BYPASS_APPROVALS=1` and `AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS=1`; enabled or ignored bypass attempts log a `SECURITY WARNING`. | The bypass remains dangerous when explicitly double opted in. |
 
 ## Mock-first Boundaries
 
