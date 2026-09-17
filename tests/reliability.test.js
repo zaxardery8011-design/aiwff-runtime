@@ -1476,3 +1476,150 @@ test('collectTaskEvents: sinceMs 之前的不進來，回未切上限的全量�
     }
   }
 });
+
+// --- (6) git metadata 射程：外洩不是只走檔案內容 ---
+// 禁詞一律從掃描器同一份 base64 還原出來，不落明文——否則這支測試檔自己會變成
+// 日後 grep 稽核的假命中源，而且會讓 scan:ip 掃到自己。
+const REDLINE_WORD = Buffer.from('bG9uZWx5Ym8=', 'base64').toString('utf8');
+const CLEAN_NAME = 'aiwff-runtime maintainer';
+const CLEAN_EMAIL = 'maintainer@example.invalid';
+
+function makeGitScanRoot() {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ip-redline-git-')));
+  const git = (...args) => {
+    const res = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
+    assert.equal(res.status, 0, `git ${args.join(' ')} 失敗: ${res.stderr}`);
+    return res.stdout;
+  };
+  git('init', '-q');
+  git('config', 'user.name', CLEAN_NAME);
+  git('config', 'user.email', CLEAN_EMAIL);
+  fs.writeFileSync(path.join(root, 'readme.md'), 'nothing sensitive here\n', 'utf8');
+  git('add', '.');
+  git('commit', '-q', '--no-verify', '-m', 'seed commit');
+  return { root, git };
+}
+
+test('ip redline guard: commit authors, ref names and the current identity are inside the scan scope', () => {
+  const { root, git } = makeGitScanRoot();
+  try {
+    // 正向對照：乾淨的 repo 要真的綠，而且 metadata 這一塊要有活的分母
+    // （commits>=1），否則後面的紅只證明「有東西壞了」，不證明這道閘有鑑別力。
+    const clean = runScan(root);
+    assert.equal(clean.code, 0, clean.out);
+    assert.match(clean.out, /^PASS /m);
+    assert.match(clean.out, /metadata_domain=git_metadata/);
+    assert.match(clean.out, /metadata_hits=0/);
+    const cleanMeta = scanModule.scanGitMetadata(root);
+    assert.equal(cleanMeta.ok, true, JSON.stringify(cleanMeta));
+    assert.equal(cleanMeta.commits_checked, 1);
+    assert.ok(cleanMeta.refs_checked >= 3, `branch/tag/config 的分母不該是 ${cleanMeta.refs_checked}`);
+    assert.deepEqual(cleanMeta.findings, []);
+
+    // 四類 metadata 各自塞一個假命中證明會紅，還原後證明會綠。
+    // 每一類都是獨立的載體：只補一類等於另外三類仍然無閘。
+    const injections = [
+      {
+        label: 'commit author',
+        scope: 'commit',
+        field: 'author_name',
+        inject: () => git('commit', '--amend', '--no-edit', '--no-verify', '--author', `${REDLINE_WORD} <x@example.invalid>`),
+        restore: () => git('commit', '--amend', '--no-edit', '--no-verify', '--author', `${CLEAN_NAME} <${CLEAN_EMAIL}>`),
+      },
+      {
+        label: 'commit email',
+        scope: 'commit',
+        field: 'author_email',
+        inject: () => git('commit', '--amend', '--no-edit', '--no-verify', '--author', `${CLEAN_NAME} <${REDLINE_WORD}@example.invalid>`),
+        restore: () => git('commit', '--amend', '--no-edit', '--no-verify', '--author', `${CLEAN_NAME} <${CLEAN_EMAIL}>`),
+      },
+      {
+        label: 'branch name',
+        scope: 'branch',
+        field: 'name',
+        inject: () => git('branch', `feat/${REDLINE_WORD}-probe`),
+        restore: () => git('branch', '-D', `feat/${REDLINE_WORD}-probe`),
+      },
+      {
+        label: 'tag name',
+        scope: 'tag',
+        field: 'name',
+        inject: () => git('tag', `v0-${REDLINE_WORD}`),
+        restore: () => git('tag', '-d', `v0-${REDLINE_WORD}`),
+      },
+      {
+        label: 'current identity',
+        scope: 'config',
+        field: 'value',
+        inject: () => git('config', 'user.name', REDLINE_WORD),
+        restore: () => git('config', 'user.name', CLEAN_NAME),
+      },
+    ];
+
+    for (const injection of injections) {
+      injection.inject();
+      const red = runScan(root);
+      assert.equal(red.code, 1, `${injection.label} 塞了假命中卻沒紅: ${red.out}`);
+      assert.match(red.out, /^FAIL /m);
+      assert.doesNotMatch(red.out, /^PASS /m);
+
+      const meta = scanModule.scanGitMetadata(root);
+      const hit = meta.findings.find(
+        (finding) => finding.scope === injection.scope && finding.field === injection.field,
+      );
+      assert.ok(hit, `${injection.label} 沒被具名指認: ${JSON.stringify(meta.findings)}`);
+      assert.equal(hit.id, 'internal-keyword');
+      assert.ok(hit.ref && hit.ref.trim() !== '', `${injection.label} 命中沒講是哪顆 commit／哪個 ref`);
+      // 具名到 commit／ref 這一層才算「講得出是哪顆」，只說「有命中」等於要人自己去翻。
+      assert.match(red.out, new RegExp(`git-metadata ${injection.scope}:`), red.out);
+
+      injection.restore();
+      const back = runScan(root);
+      assert.equal(back.code, 0, `${injection.label} 還原後沒轉綠: ${back.out}`);
+      assert.match(back.out, /metadata_hits=0/);
+    }
+
+    // HEAD 走不到的 ref 是「沒驗到」，不是「驗過且乾淨」：它一旦被 push 就整串上去。
+    git('checkout', '-q', '-b', 'side');
+    fs.writeFileSync(path.join(root, 'side.md'), 'side branch file\n', 'utf8');
+    git('add', '.');
+    git('commit', '-q', '--no-verify', '-m', 'side commit');
+    git('checkout', '-q', 'master');
+    const withSide = scanModule.scanGitMetadata(root);
+    assert.ok(
+      withSide.unverified.some((entry) => entry.includes('side') && entry.includes('unreachable from HEAD')),
+      `HEAD 走不到的 ref 沒被列成未驗: ${JSON.stringify(withSide.unverified)}`,
+    );
+    const disclosed = runScan(root);
+    assert.equal(disclosed.code, 0, disclosed.out);
+    assert.match(disclosed.out, /NOTE out of git-metadata scan scope, counted as unverified \(not as clean\)/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ip redline guard: an unreachable git metadata domain is warned, never silently counted as clean', () => {
+  // 非 git checkout 的根：metadata 這一整塊沒驗到，要當場吼出來並在收尾講得出三態的哪一態。
+  const root = makeScanRoot({ 'readme.md': 'nothing sensitive here\n' });
+  try {
+    const meta = scanModule.scanGitMetadata(root);
+    assert.equal(meta.ok, false, JSON.stringify(meta));
+    assert.equal(meta.commits_checked, 0);
+    assert.deepEqual(meta.findings, []);
+
+    const run = runScan(root);
+    assert.equal(run.code, 0, run.out);
+    assert.match(run.out, /WARN IP redline scan could not bind to the git metadata domain/);
+    assert.match(run.out, /metadata_domain=unavailable:/);
+    // 「沒掃」與「掃了、零命中」不得長得一樣：三態要在收尾那串計數裡分得開。
+    assert.doesNotMatch(run.out, /metadata_domain=git_metadata/);
+    const notScanned = scanModule.decideExit(
+      { files_checked: 1, lines_checked: 1, binary_skipped: 0, read_errors: [], findings: [] },
+      root,
+    );
+    assert.match(notScanned.lines[0], /metadata_domain=not_scanned/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+

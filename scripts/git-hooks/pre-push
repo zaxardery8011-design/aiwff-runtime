@@ -1,0 +1,20 @@
+#!/bin/sh
+# 推出去之前的最後一道閘。
+#
+# 為什麼 push 前還要再跑一次：scan:ip 在工作樹層綠了，只證明「現在磁碟上的追蹤檔」乾淨；
+# push 送出去的是 commit 物件——author 名、email、subject、分支名、tag 名一起上去，而
+# public repo 的 /commits 頁面會把它們一行一行公開印出來。閘在工作樹層綠了不代表推出去的
+# 東西乾淨，所以射程要在真正離開本機的那一刻再對一次帳。
+#
+# 這支 hook 不自己判什麼叫紅——判準只有一份，就是 scripts/ip-redline-scan.js。
+# 非零 exit 一律擋，不分是哪一種非零：空掃、讀不到、判準空掉都代表「這趟沒驗完」，
+# 而沒驗完的閘不得放行。
+set -e
+
+ROOT=$(git rev-parse --show-toplevel)
+
+if ! node "$ROOT/scripts/ip-redline-scan.js" --root="$ROOT"; then
+  echo "pre-push blocked: IP redline scan failed — push aborted" >&2
+  echo "  fix the hits above, or re-run: node scripts/ip-redline-scan.js --root=\"$ROOT\"" >&2
+  exit 1
+fi

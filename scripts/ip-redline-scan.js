@@ -295,6 +295,130 @@ function resolveScanDomain(rootDir = ROOT_DIR) {
   return { ok: true, mode: 'git_tracked', reason: 'git_tracked', files, unverified, unverified_ok: others.ok };
 }
 
+// --- git metadata 射程 ---
+// 檔案內容型的閘只掃 blob，但推上 public repo 的不只 blob：commit 的 author 名／email／
+// subject、分支名、tag 名，GitHub 的 /commits 頁面一行一行公開印出來。閘在工作樹層綠了，
+// 不代表推出去的東西乾淨——這是射程問題，不是 pattern 不夠多的問題。
+// 這一段拿同一份 ENCODED_KEYWORD_TERMS（不另開一份，免得兩份清單各漂各的）去掃四類 metadata。
+const METADATA_FIELD_SEP = '\x1f';
+
+// 與 scanFile 同一套判準：先過白名單，再逐條 pattern；secret-token 一樣遮蔽，
+// 不讓偵測器的輸出自己變成第二個外洩點。
+function matchMetadata(scope, ref, field, value) {
+  const findings = [];
+  if (typeof value !== 'string' || value === '') {
+    return findings;
+  }
+  if (isAllowed(scope, value)) {
+    return findings;
+  }
+  for (const pattern of REDLINE_PATTERNS) {
+    const match = value.match(pattern.regex);
+    if (match) {
+      findings.push({
+        scope,
+        ref,
+        field,
+        id: pattern.id,
+        match: pattern.id === 'secret-token' ? '<redacted secret pattern>' : match[0],
+      });
+    }
+  }
+  return findings;
+}
+
+function scanGitMetadata(rootDir = ROOT_DIR) {
+  const empty = { findings: [], commits_checked: 0, refs_checked: 0, unverified: [] };
+  const inside = runGit(rootDir, ['rev-parse', '--is-inside-work-tree']);
+  if (!inside.ok) {
+    return { ok: false, reason: inside.reason, ...empty };
+  }
+  if (inside.stdout.trim() !== 'true') {
+    return { ok: false, reason: 'not_a_work_tree', ...empty };
+  }
+
+  const findings = [];
+  const unverified = [];
+  let commitsChecked = 0;
+  let refsChecked = 0;
+
+  // (1) commit author／email／subject —— 全歷史，不只 HEAD 那一顆。
+  const log = runGit(rootDir, [
+    'log',
+    `--format=%H${METADATA_FIELD_SEP}%an${METADATA_FIELD_SEP}%ae${METADATA_FIELD_SEP}%s`,
+  ]);
+  if (!log.ok) {
+    unverified.push(`commit history [${log.reason}]`);
+  } else {
+    for (const row of log.stdout.split(/\r?\n/)) {
+      if (row === '') {
+        continue;
+      }
+      const [sha, authorName, authorEmail, subject] = row.split(METADATA_FIELD_SEP);
+      commitsChecked += 1;
+      const short = (sha || '').slice(0, 7) || '<unknown>';
+      findings.push(...matchMetadata('commit', short, 'author_name', authorName));
+      findings.push(...matchMetadata('commit', short, 'author_email', authorEmail));
+      findings.push(...matchMetadata('commit', short, 'subject', subject));
+    }
+  }
+
+  // HEAD 走不到的 ref 不在上面那趟射程裡：它們自己的 commit 一旦被 push 就整串上去。
+  // 具名列成未驗，不讓「HEAD 全歷史零命中」被讀成「這個 repo 的所有 commit 都乾淨」。
+  const unmerged = runGit(rootDir, [
+    'for-each-ref',
+    '--format=%(refname)',
+    '--no-merged',
+    'HEAD',
+    'refs/heads',
+    'refs/remotes',
+  ]);
+  if (!unmerged.ok) {
+    unverified.push(`refs unreachable from HEAD [${unmerged.reason}]`);
+  } else {
+    for (const ref of unmerged.stdout.split(/\r?\n/).filter((value) => value.trim() !== '')) {
+      unverified.push(`${ref.trim()} [commits unreachable from HEAD]`);
+    }
+  }
+
+  // (2) 分支名 (3) tag 名 —— 名字本身就會跟著 push 上去。
+  const refSources = [
+    { scope: 'branch', args: ['branch', '-a', '--format=%(refname)'] },
+    { scope: 'tag', args: ['tag', '-l'] },
+  ];
+  for (const source of refSources) {
+    const res = runGit(rootDir, source.args);
+    if (!res.ok) {
+      unverified.push(`${source.scope} names [${res.reason}]`);
+      continue;
+    }
+    for (const name of res.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
+      refsChecked += 1;
+      findings.push(...matchMetadata(source.scope, name, 'name', name));
+    }
+  }
+
+  // (4) 當前 identity —— 下一顆 commit 會蓋上去的那組值，趁還沒 commit 就攔。
+  for (const key of ['user.name', 'user.email']) {
+    const res = runGit(rootDir, ['config', '--get', key]);
+    if (!res.ok) {
+      unverified.push(`${key} [unset]`);
+      continue;
+    }
+    refsChecked += 1;
+    findings.push(...matchMetadata('config', key, 'value', res.stdout.trim()));
+  }
+
+  return {
+    ok: true,
+    reason: 'git_metadata',
+    findings,
+    commits_checked: commitsChecked,
+    refs_checked: refsChecked,
+    unverified,
+  };
+}
+
 function scanFile(filePath, rootDir = ROOT_DIR, counters = null) {
   const repoPath = toRepoPath(filePath, rootDir);
   let buffer;
@@ -355,10 +479,26 @@ function scanTree(rootDir = ROOT_DIR, listCheck = checkListPredicates()) {
   };
   // 判準清單空掉時連掃都不掃：掃完再說「零命中」只是多產一份沒有意義的通過證據。
   if (!listCheck.ok) {
-    return { findings: [], ...counters, list_check: listCheck, scan_domain: 'unknown', domain_warnings: [] };
+    return {
+      findings: [],
+      ...counters,
+      list_check: listCheck,
+      scan_domain: 'unknown',
+      domain_warnings: [],
+      metadata: null,
+    };
   }
   const domain = resolveScanDomain(rootDir);
   const domainWarnings = [];
+  // metadata 拿不到（不是 git checkout／git 叫不動）不得靜默：那代表 commit author、
+  // 分支名、tag 名這一整塊射程這趟完全沒驗到，要當場吼出來並列進未驗清單。
+  const metadata = scanGitMetadata(rootDir);
+  if (!metadata.ok) {
+    domainWarnings.push(
+      `WARN IP redline scan could not bind to the git metadata domain (reason=${metadata.reason}) — ` +
+        'commit authors/emails/subjects, branch names, tag names and the current identity are UNVERIFIED for this run',
+    );
+  }
   let files;
   if (domain.ok) {
     files = domain.files;
@@ -376,7 +516,14 @@ function scanTree(rootDir = ROOT_DIR, listCheck = checkListPredicates()) {
     files = listFiles(rootDir, rootDir, counters.skipped_dirs);
   }
   const findings = files.flatMap((filePath) => scanFile(filePath, rootDir, counters));
-  return { findings, ...counters, list_check: listCheck, scan_domain: domain.mode, domain_warnings: domainWarnings };
+  return {
+    findings,
+    ...counters,
+    list_check: listCheck,
+    scan_domain: domain.mode,
+    domain_warnings: domainWarnings,
+    metadata,
+  };
 }
 
 // 收尾判決是一個純函式：main() 只負責印與 exit，測試才能直接驗判準本身。
@@ -386,18 +533,39 @@ function decideExit(result, rootDir = ROOT_DIR) {
   const readErrors = result.read_errors || [];
   const listCheck = result.list_check || checkListPredicates();
   const skippedDirs = result.skipped_dirs || [];
+  // metadata 三態要分得開：沒掃（欄位不在）／掃不到（git 叫不動）／掃了。
+  // 合成一個數字會讓「這趟根本沒驗 metadata」長得跟「驗了、零命中」一模一樣。
+  const metadata = result.metadata || null;
+  const metaFindings = (metadata && metadata.findings) || [];
+  const metaUnverified = (metadata && metadata.unverified) || [];
+  const metaDomain = metadata
+    ? (metadata.ok ? 'git_metadata' : `unavailable:${metadata.reason}`)
+    : 'not_scanned';
   const checked =
     `files_checked=${result.files_checked} lines_checked=${result.lines_checked} ` +
     `binary_skipped=${result.binary_skipped} read_errors=${readErrors.length} ` +
     `usable_patterns=${listCheck.usable_patterns}/${listCheck.declared_patterns} ` +
-    `skipped_dirs=${skippedDirs.length} scan_domain=${result.scan_domain || 'unknown'}`;
+    `skipped_dirs=${skippedDirs.length} scan_domain=${result.scan_domain || 'unknown'} ` +
+    `metadata_domain=${metaDomain} metadata_commits=${(metadata && metadata.commits_checked) || 0} ` +
+    `metadata_refs=${(metadata && metadata.refs_checked) || 0} metadata_hits=${metaFindings.length}`;
 
   // 射程揭露是每一種收尾都欠的帳，不是 PASS 的附贈品。以前這行只寫在 code 0 分支，
   // 結果閘一旦恆紅（走 code 1）就永遠印不出來——揭露只在「不需要它的時候」出現。
   // 這裡把它抽成共用行，五個分支一律附上。
-  const scopeLines = skippedDirs.length
-    ? [`NOTE out of scan scope, counted as unverified (not as clean): ${skippedDirs.join(', ')}`]
-    : [];
+  // metadata 命中也走同一條共用尾巴：不論這趟是因為哪一種理由收尾，只要 metadata 有命中，
+  // 就一定講得出是哪顆 commit／哪個分支。塞進某一個分支等於讓另外四種收尾靜默吞掉它。
+  const metaHitLines = metaFindings.map(
+    (finding) => `git-metadata ${finding.scope}:${finding.ref} [${finding.id}] ${finding.field}=${finding.match}`,
+  );
+  const scopeLines = [
+    ...metaHitLines,
+    ...(skippedDirs.length
+      ? [`NOTE out of scan scope, counted as unverified (not as clean): ${skippedDirs.join(', ')}`]
+      : []),
+    ...(metaUnverified.length
+      ? [`NOTE out of git-metadata scan scope, counted as unverified (not as clean): ${metaUnverified.join(', ')}`]
+      : []),
+  ];
 
   // 判準清單一條可用的都沒有 → 走拒絕分支。這在讀任何檔之前就能斷定，不必等掃完才說零命中。
   if (!listCheck.ok) {
@@ -436,7 +604,8 @@ function decideExit(result, rootDir = ROOT_DIR) {
     };
   }
 
-  if (result.findings.length) {
+  // 檔案內容命中與 metadata 命中同屬 code 1：外洩就是外洩，差別只在載體是 blob 還是 commit 頭。
+  if (result.findings.length || metaFindings.length) {
     return {
       code: 1,
       stream: 'error',
@@ -489,6 +658,8 @@ module.exports = {
   scanFile,
   decideExit,
   resolveScanDomain,
+  scanGitMetadata,
+  matchMetadata,
   resolveRootDir,
   refuseRootVerdict,
   isAllowed,
