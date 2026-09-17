@@ -121,6 +121,28 @@ minimal-brain 設計有 8 個元件。Phase 2 先做最實用的核心：daemon�
 
 ## 快速開始
 
+### 貼上就能裝
+
+整段複製貼上即可。它會 clone repo、建好設定檔，並跑完一次完整的 mock 任務生命週期——不需要 API key、不需要 Telegram、不需要 Claude 訂閱。
+
+```bash
+git clone https://github.com/zaxardery8011-design/aiwff-runtime
+cd aiwff-runtime
+cp .env.example .env
+npm run doctor
+npm run demo
+npm run verify-demo
+```
+
+跑完最後應該看到：`PASS task status is done: <task id>`。看到這行就代表 daemon、任務佇列、worker、artifact 寫檔在你的機器上全部通了。
+
+補充：
+
+- 前置條件只有 Node.js >= 18 與 `git`。沒有 `npm install` 這一步——這個 repo 零外部依賴。
+- Windows PowerShell 可以原封不動貼同一段（`cp` 是 `Copy-Item` 的別名，已在 PowerShell 5.1 與 7 驗過）。
+- `npm run doctor` 可能警告 port `3100` 被佔用；`npm run demo` 會自己挑一個空 port，所以整段仍會跑完。
+- 想跑 mock 以外的模式（Telegram、真 Claude CLI worker），照 [`.env.example`](.env.example) 的欄位與下方「設定檔」表編輯 `.env`，再跑 `npm start` 並開 `http://127.0.0.1:3100`。真憑證不要 commit。
+
 ### 先看你要跑到哪一層
 
 | 層級 | 最低能跑什麼 | 需要什麼 | 沒有會怎樣 |

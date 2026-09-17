@@ -118,6 +118,28 @@ You send a Telegram task
 
 ## Quick Start
 
+### Paste to install
+
+Copy the whole block. It clones the repo, sets up config, and runs a full mock task lifecycle — no API key, no Telegram, no Claude subscription needed.
+
+```bash
+git clone https://github.com/zaxardery8011-design/aiwff-runtime
+cd aiwff-runtime
+cp .env.example .env
+npm run doctor
+npm run demo
+npm run verify-demo
+```
+
+Expected ending: `PASS task status is done: <task id>`. That means the daemon, task queue, worker, and artifact write all work on your machine.
+
+Notes:
+
+- Node.js >= 18 and `git` are the only prerequisites. There is no `npm install` step — this repo has zero external dependencies.
+- Windows PowerShell runs the same block as-is (`cp` is an alias for `Copy-Item`, verified on PowerShell 5.1 and 7).
+- `npm run doctor` may warn that port `3100` is in use. `npm run demo` picks a free port by itself, so the block still completes.
+- To go beyond mock — Telegram, real Claude CLI worker — edit `.env` using the field list in [`.env.example`](.env.example) and the [Configuration](#configuration) table, then run `npm start` and open `http://127.0.0.1:3100`. Never commit real tokens.
+
 Prerequisites:
 
 | Requirement | Check |

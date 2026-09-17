@@ -1295,3 +1295,184 @@ test('doctor health record: a red verdict persists the named reason and a UTC ti
   );
   assert.ok(text.record.coverage.not_run.includes('env_valid'), JSON.stringify(text.record.coverage));
 });
+
+// --- (11) 截斷揭露 + 進度時間戳：這一包 API 之前零測試覆蓋，連入口都沒開 ---
+// 分界說清楚：collect* 回「未切過的全量」，list* 回「切過上限的畫面用量」，
+// 兩者分得開，dropped 才有分母。以下每條測的都是「上限砍掉的東西有沒有被誠實講出來」。
+const INBOX_DIR = path.join(DATA_DIR, 'inbox');
+
+function uniqueSuffix() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+test('truncationInfo: dropped 是實際計數；total 拿不到時回 null，不准拿 0 充數', () => {
+  const { truncationInfo } = agentModule;
+
+  const cut = truncationInfo(137, 50, 'events_list_cap', 50, '事件清單上限 50 筆');
+  assert.equal(cut.truncated, true);
+  assert.equal(cut.dropped, 87, JSON.stringify(cut));
+  assert.equal(cut.total, 137);
+  assert.equal(cut.limit, 50);
+  assert.equal(cut.limit_name, 'events_list_cap');
+  assert.equal(cut.reason, '事件清單上限 50 筆');
+
+  const whole = truncationInfo(12, 12, 'events_list_cap', 50, 'r');
+  assert.equal(whole.truncated, false);
+  assert.equal(whole.dropped, 0, JSON.stringify(whole));
+
+  // total 不可得、而且 returned 已經頂到上限 → 是「不知道有沒有被砍」，不是「沒被砍」。
+  // 這裡如果退化成 false 或 dropped=0，畫面就會把一份可能缺資料的清單顯示成完整的。
+  const unknownAtCap = truncationInfo(null, 50, 'events_list_cap', 50, 'r');
+  assert.equal(unknownAtCap.truncated, null, JSON.stringify(unknownAtCap));
+  assert.equal(unknownAtCap.dropped, null);
+  assert.equal(unknownAtCap.total, null);
+
+  // total 不可得但沒頂到上限 → 可以斷定不是上限砍的，這時 false 是真的。
+  const unknownBelowCap = truncationInfo(undefined, 3, 'events_list_cap', 50, 'r');
+  assert.equal(unknownBelowCap.truncated, false, JSON.stringify(unknownBelowCap));
+  assert.equal(unknownBelowCap.dropped, null);
+});
+
+test('normalizeProgressLimit: 壞值一律退回 30，合法值收在 1..500，不讓 querystring 決定讀多大一份檔', () => {
+  const { normalizeProgressLimit } = agentModule;
+  assert.equal(normalizeProgressLimit(undefined), 30);
+  assert.equal(normalizeProgressLimit(null), 30);
+  assert.equal(normalizeProgressLimit(''), 30);
+  assert.equal(normalizeProgressLimit('abc'), 30);
+  assert.equal(normalizeProgressLimit(0), 30);
+  assert.equal(normalizeProgressLimit(-5), 30);
+  assert.equal(normalizeProgressLimit(1.5), 30);
+  assert.equal(normalizeProgressLimit('50'), 50);
+  assert.equal(normalizeProgressLimit(500), 500);
+  assert.equal(normalizeProgressLimit(100000), 500);
+});
+
+test('parseProgressTs: 兩種寫入端格式都認得，認不出就回 null 而不是丟一個假時戳', () => {
+  const { parseProgressTs } = agentModule;
+  // appendProgressText 寫 ts（毫秒數）
+  assert.equal(parseProgressTs(JSON.stringify({ ts: 1700000000000, text: 'x' })), 1700000000000);
+  // mock worker 寫 at（ISO 字串）
+  assert.equal(parseProgressTs(JSON.stringify({ at: '2026-09-17T06:00:00.000Z', message: 'x' })), Date.parse('2026-09-17T06:00:00.000Z'));
+  // 認不出來的一律 null：時間軸寧可少畫一個點，也不要畫在錯的位置
+  assert.equal(parseProgressTs(JSON.stringify({ at: 'not-a-date' })), null);
+  assert.equal(parseProgressTs(JSON.stringify({ text: 'no timestamp' })), null);
+  assert.equal(parseProgressTs('"plain string line"'), null);
+  assert.equal(parseProgressTs('{ not json'), null);
+  assert.equal(parseProgressTs(''), null);
+});
+
+test('readProgressEntries / countProgressLines: entries 切上限、count 數整份檔，兩個數字合起來才算得出 dropped', () => {
+  const { readProgressEntries, countProgressLines, truncationInfo } = agentModule;
+  fs.mkdirSync(TASKS_DIR, { recursive: true });
+
+  const taskId = `trunc-probe-${uniqueSuffix()}`;
+  const progressFile = path.join(TASKS_DIR, `${taskId}.progress.jsonl`);
+  const total = 7;
+  const lines = [];
+  for (let i = 0; i < total; i += 1) {
+    lines.push(JSON.stringify({ ts: 1700000000000 + i * 1000, text: `step ${i}` }));
+  }
+  // 中間夾一行空行：count 數的是「非空行」，空行不該把分母灌水。
+  fs.writeFileSync(progressFile, `${lines.join('\n')}\n\n`);
+
+  try {
+    const entries = readProgressEntries(taskId, 3);
+    assert.equal(entries.length, 3, JSON.stringify(entries));
+    // 切的是尾巴（最近的 3 筆），不是頭
+    assert.deepEqual(entries.map((e) => e.text), ['step 4', 'step 5', 'step 6']);
+    assert.equal(entries[0].ts, 1700000000000 + 4000);
+
+    // count 必須看整份檔，否則 dropped 永遠是 0——這正是截斷揭露最容易失效的地方
+    assert.equal(countProgressLines(taskId), total);
+    const info = truncationInfo(countProgressLines(taskId), entries.length, 'progress_load_cap', 3, 'r');
+    assert.equal(info.truncated, true);
+    assert.equal(info.dropped, 4, JSON.stringify(info));
+
+    // limit 夠大時就沒有截斷，dropped 要真的是 0 而不是沿用上一次的值
+    const all = readProgressEntries(taskId, 30);
+    assert.equal(all.length, total);
+    assert.equal(truncationInfo(countProgressLines(taskId), all.length, 'progress_load_cap', 30, 'r').dropped, 0);
+  } finally {
+    fs.rmSync(progressFile, { force: true });
+  }
+
+  // 不安全的 id 與不存在的檔都回 null（不是 [] / 0）：讓上層顯示「不可得」而不是「空的」
+  assert.equal(readProgressEntries('../etc/passwd', 30), null);
+  assert.equal(countProgressLines('../etc/passwd'), null);
+  assert.equal(readProgressEntries(`missing-${uniqueSuffix()}`, 30), null);
+  assert.equal(countProgressLines(`missing-${uniqueSuffix()}`), null);
+});
+
+test('collectInboxEvents: 回未切上限的全量並依 ts 新到舊排序，壞檔降級成具名 unreadable 而不是整趟炸掉', () => {
+  const { collectInboxEvents, INBOX_LIST_CAP } = agentModule;
+  fs.mkdirSync(INBOX_DIR, { recursive: true });
+
+  const tag = uniqueSuffix();
+  const written = [
+    { name: `probe-${tag}-old.done.json`, body: JSON.stringify({ task_id: `probe-${tag}-old`, event: 'done', ts: 1700000000000 }) },
+    { name: `probe-${tag}-new.done.json`, body: JSON.stringify({ task_id: `probe-${tag}-new`, event: 'done', ts: 1700000009000 }) },
+    { name: `probe-${tag}-broken.done.json`, body: '{ not json' },
+  ];
+  for (const item of written) {
+    fs.writeFileSync(path.join(INBOX_DIR, item.name), item.body);
+  }
+
+  try {
+    const events = collectInboxEvents();
+    const mine = events.filter((event) => String(event.file).includes(tag));
+    assert.equal(mine.length, 3, JSON.stringify(mine));
+
+    // 壞掉的那筆要被具名列出來，不能靜默消失——收件匣少一筆比報錯更難發現
+    const broken = mine.find((event) => event.file === `probe-${tag}-broken.done.json`);
+    assert.ok(broken, JSON.stringify(mine));
+    assert.equal(broken.event, 'unreadable');
+    assert.equal(broken.status, 'blocked');
+
+    // 全量排序：新的在前
+    const ordered = mine.map((event) => Number(event.ts) || Date.parse(event.timestamp || '') || 0);
+    assert.deepEqual(ordered, [...ordered].sort((a, b) => b - a), JSON.stringify(ordered));
+
+    // collect* 不切上限，切上限是 list* 的事；這裡釘住那條分界
+    assert.equal(INBOX_LIST_CAP, 100);
+    assert.ok(events.length >= mine.length);
+  } finally {
+    for (const item of written) {
+      fs.rmSync(path.join(INBOX_DIR, item.name), { force: true });
+    }
+  }
+});
+
+test('collectTaskEvents: sinceMs 之前的不進來，回未切上限的全量並依 ts 舊到新排序', () => {
+  const { collectTaskEvents, EVENT_LIST_CAP } = agentModule;
+  fs.mkdirSync(TASKS_DIR, { recursive: true });
+
+  const tag = uniqueSuffix();
+  const base = 1700000000000;
+  const rows = [
+    { id: `evt-${tag}-a`, title: 'A', status: 'done', updated_at: new Date(base + 2000).toISOString(), summary: 'sa' },
+    { id: `evt-${tag}-b`, title: 'B', status: 'running', updated_at: new Date(base + 1000).toISOString(), summary: 'sb' },
+    { id: `evt-${tag}-stale`, title: 'S', status: 'done', updated_at: new Date(base - 5000).toISOString(), summary: 'ss' },
+  ];
+  const files = rows.map((row) => path.join(TASKS_DIR, `${row.id}.json`));
+  rows.forEach((row, i) => fs.writeFileSync(files[i], JSON.stringify(row)));
+
+  try {
+    const events = collectTaskEvents(base);
+    const mine = events.filter((event) => String(event.id).includes(tag));
+
+    // sinceMs 是嚴格大於：base 之前的那筆不該出現
+    assert.deepEqual(mine.map((event) => event.id), [`evt-${tag}-b`, `evt-${tag}-a`], JSON.stringify(mine));
+    assert.equal(mine[0].ts, base + 1000);
+    assert.equal(mine[1].status, 'done');
+    assert.equal(mine[1].summary, 'sa');
+
+    // 全量排序：舊到新（list* 才會 slice(-cap) 取尾巴，所以排序方向不能反）
+    const ordered = events.map((event) => event.ts);
+    assert.deepEqual(ordered, [...ordered].sort((a, b) => a - b));
+    assert.equal(EVENT_LIST_CAP, 50);
+  } finally {
+    for (const file of files) {
+      fs.rmSync(file, { force: true });
+    }
+  }
+});

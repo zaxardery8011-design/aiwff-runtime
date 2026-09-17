@@ -306,7 +306,27 @@ function writeInboxEvent(task, eventName) {
   safeWriteJsonFile(inboxPath(task.id, eventName), event);
 }
 
-function listInboxEvents() {
+// 凡因上限而被砍掉的資料，都要能講出「被砍幾筆、因為哪個上限」。
+// total 拿不到時 dropped 回 null（由畫面顯示「截斷筆數不可得」），不准填 0 充數。
+function truncationInfo(total, returned, limitName, limit, reason) {
+  if (!Number.isInteger(total)) {
+    return {
+      truncated: returned >= limit ? null : false,
+      dropped: null,
+      total: null,
+      limit,
+      limit_name: limitName,
+      reason,
+    };
+  }
+  const dropped = Math.max(0, total - returned);
+  return { truncated: dropped > 0, dropped, total, limit, limit_name: limitName, reason };
+}
+
+const INBOX_LIST_CAP = 100;
+const EVENT_LIST_CAP = 50;
+
+function collectInboxEvents() {
   ensureDirectories();
   return fs
     .readdirSync(INBOX_DIR)
@@ -331,8 +351,11 @@ function listInboxEvents() {
       const left = Number(a.ts) || Date.parse(a.timestamp || '') || 0;
       const right = Number(b.ts) || Date.parse(b.timestamp || '') || 0;
       return right - left;
-    })
-    .slice(0, 100);
+    });
+}
+
+function listInboxEvents() {
+  return collectInboxEvents().slice(0, INBOX_LIST_CAP);
 }
 
 function parseProgressLine(line) {
@@ -375,7 +398,70 @@ function readProgressLines(taskId, limit = 30) {
     .map(parseProgressLine);
 }
 
-function listTaskEvents(sinceMs) {
+// 進度行的時間戳本來就寫在檔裡（appendProgressText 寫 ts、mock worker 寫 at），
+// 是 parseProgressLine 只取文字把它丟掉的。trace timeline 要畫時間軸就得拿回來。
+// 這是純讀取端解析：寫入端格式一字未動，既有 lines 回傳也一字未動（加性相容）。
+function parseProgressTs(line) {
+  try {
+    const value = JSON.parse(line);
+    if (!value || typeof value !== 'object') {
+      return null;
+    }
+    if (Number.isFinite(value.ts)) {
+      return Number(value.ts);
+    }
+    if (typeof value.at === 'string') {
+      const parsed = Date.parse(value.at);
+      return Number.isNaN(parsed) ? null : parsed;
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function readProgressEntries(taskId, limit = 30) {
+  if (!isSafeTaskId(taskId)) {
+    return null;
+  }
+  const filePath = progressPath(taskId);
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+  return fs
+    .readFileSync(filePath, 'utf8')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .slice(-limit)
+    .map((line) => ({ ts: parseProgressTs(line), text: parseProgressLine(line) }));
+}
+
+// 截斷筆數要是實際計數，不是估計：這裡數的是同一份檔案裡真正的非空行數。
+// 讀不到就回 null，讓上層誠實顯示「截斷筆數不可得」。
+function countProgressLines(taskId) {
+  if (!isSafeTaskId(taskId)) {
+    return null;
+  }
+  const filePath = progressPath(taskId);
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+  try {
+    return fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean).length;
+  } catch (_) {
+    return null;
+  }
+}
+
+function normalizeProgressLimit(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return 30;
+  }
+  return Math.min(parsed, 500);
+}
+
+function collectTaskEvents(sinceMs) {
   return listTasks()
     .map((task) => {
       const ts = taskTimeMs(task);
@@ -392,8 +478,11 @@ function listTaskEvents(sinceMs) {
       };
     })
     .filter(Boolean)
-    .sort((a, b) => a.ts - b.ts)
-    .slice(-50);
+    .sort((a, b) => a.ts - b.ts);
+}
+
+function listTaskEvents(sinceMs) {
+  return collectTaskEvents(sinceMs).slice(-EVENT_LIST_CAP);
 }
 
 function isSafeMarkdownFileName(name) {
@@ -1146,13 +1235,37 @@ async function handleRequest(req, res) {
     const rawSince = url.searchParams.get('since');
     const parsedSince = rawSince == null ? NaN : Number(rawSince);
     const sinceMs = Number.isFinite(parsedSince) ? parsedSince : Date.now() - 30 * 60 * 1000;
-    sendJson(res, 200, { ok: true, events: listTaskEvents(sinceMs) });
+    const allEvents = collectTaskEvents(sinceMs);
+    const events = allEvents.slice(-EVENT_LIST_CAP);
+    sendJson(res, 200, {
+      ok: true,
+      events,
+      truncation: truncationInfo(
+        allEvents.length,
+        events.length,
+        'events_list_cap',
+        EVENT_LIST_CAP,
+        '事件清單上限 ' + EVENT_LIST_CAP + ' 筆'
+      ),
+    });
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/api/inbox') {
-    const events = listInboxEvents();
-    sendJson(res, 200, { ok: true, unread: events.length, events });
+    const allEvents = collectInboxEvents();
+    const events = allEvents.slice(0, INBOX_LIST_CAP);
+    sendJson(res, 200, {
+      ok: true,
+      unread: events.length,
+      events,
+      truncation: truncationInfo(
+        allEvents.length,
+        events.length,
+        'inbox_list_cap',
+        INBOX_LIST_CAP,
+        '收件匣清單上限 ' + INBOX_LIST_CAP + ' 筆'
+      ),
+    });
     return;
   }
 
@@ -1164,12 +1277,25 @@ async function handleRequest(req, res) {
   const progressMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/progress$/);
   if (req.method === 'GET' && progressMatch) {
     const id = decodeURIComponent(progressMatch[1]);
-    const lines = readProgressLines(id, 30);
+    const limit = normalizeProgressLimit(url.searchParams.get('limit'));
+    const lines = readProgressLines(id, limit);
     if (!lines) {
       sendJson(res, 404, { ok: false, error: '找不到進度紀錄' });
       return;
     }
-    sendJson(res, 200, { ok: true, id, lines });
+    sendJson(res, 200, {
+      ok: true,
+      id,
+      lines,
+      entries: readProgressEntries(id, limit) || [],
+      truncation: truncationInfo(
+        countProgressLines(id),
+        lines.length,
+        'progress_load_cap',
+        limit,
+        '進度載入上限 limit=' + limit
+      ),
+    });
     return;
   }
 
@@ -1222,6 +1348,17 @@ module.exports = {
   startTelegramPolling,
   tgRequest,
   envInt,
+  // 截斷揭露 + 進度時間戳這一包：collect* 是「未截斷的全量」，list* 是「切過上限的畫面用量」，
+  // 兩者要分得開才講得出 dropped。這些函式在既有 tests 裡一條都沒有覆蓋，先開出入口。
+  truncationInfo,
+  collectInboxEvents,
+  collectTaskEvents,
+  parseProgressTs,
+  readProgressEntries,
+  countProgressLines,
+  normalizeProgressLimit,
+  INBOX_LIST_CAP,
+  EVENT_LIST_CAP,
   MAX_TASK_RETRIES,
   RETRY_BACKOFF_MS,
   TG_API_BASE_URL,

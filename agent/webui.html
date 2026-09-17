@@ -331,6 +331,26 @@
       font-style: italic;
       font-size: 12px;
     }
+    /* 不靜默截斷：被上限砍掉的資料一定要在畫面上講出被砍幾筆、因為哪個上限。
+       未截斷時整列不 render（避免噪音）。 */
+    .trunc-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 10px;
+      padding: 7px 10px;
+      border: 1px solid color-mix(in oklch, var(--yellow) 45%, transparent);
+      border-left: 3px solid var(--yellow);
+      border-radius: 6px;
+      background: color-mix(in oklch, var(--yellow) 12%, transparent);
+      color: var(--yellow);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .trunc-row::before {
+      content: '⚠';
+      font-size: 12px;
+    }
     #view-new-task {
       padding: 0;
       overflow: hidden;
@@ -732,6 +752,143 @@
       .jhud-top { clip-path: none; min-height: 54px; flex-wrap: wrap; padding: 8px 12px; }
       .jhud-core-state { font-size: 24px; }
     }
+
+    /* ── Trace timeline（L2）─────────────────────────────────────
+       狀態一律走 data-phase / data-status token，樣式不比對顯示字串。
+       中文文案換掉也不影響任何配色或選取邏輯。 */
+    .trace-wrap { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; }
+    .trace-pick {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      background: var(--bg-1); border: 1px solid var(--border-soft);
+      border-radius: 12px; padding: 8px 12px; flex-shrink: 0;
+    }
+    .trace-pick select {
+      background: var(--bg-2); color: var(--fg-0); border: 1px solid var(--border-soft);
+      border-radius: 8px; padding: 5px 9px; max-width: 560px; flex: 1;
+    }
+    .trace-body { display: grid; grid-template-columns: 38fr 62fr; gap: 10px; flex: 1; min-height: 0; }
+    .trace-diff-panel { flex-shrink: 0; max-height: 34%; overflow: auto; }
+
+    .phase-node {
+      display: grid; grid-template-columns: 14px minmax(0, 1fr) auto;
+      gap: 9px; align-items: center; width: 100%; text-align: left;
+      background: transparent; border: 1px solid transparent; border-left: 2px solid var(--border);
+      border-radius: 8px; padding: 7px 9px; color: var(--fg-1); margin-bottom: 2px;
+    }
+    .phase-node:hover { background: color-mix(in oklch, var(--bg-2), transparent 40%); }
+    .phase-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--fg-2); justify-self: center; }
+    .phase-name { font-weight: 600; color: var(--fg-0); }
+    .phase-meta { font-size: 11px; color: var(--fg-2); }
+    .phase-count { font-size: 11px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+
+    /* 到達狀態：只綁 data-reached，不綁文字 */
+    .phase-node[data-reached="0"] { opacity: 0.42; }
+    .phase-node[data-reached="1"] { border-left-color: var(--accent); }
+    .phase-node[data-reached="1"] .phase-dot { background: var(--accent); }
+    .phase-node[data-status="done"] .phase-dot { background: var(--green); }
+    .phase-node[data-status="done"][data-reached="1"] { border-left-color: var(--green); }
+    .phase-node[data-status="blocked"] .phase-dot { background: var(--yellow); }
+    .phase-node[data-status="blocked"][data-reached="1"] { border-left-color: var(--yellow); }
+    .phase-node[data-status="failed"] .phase-dot { background: var(--red); }
+    .phase-node[data-status="failed"][data-reached="1"] { border-left-color: var(--red); }
+    .phase-node[data-selected="1"] {
+      background: color-mix(in oklch, var(--accent), transparent 86%);
+      border-color: color-mix(in oklch, var(--accent), transparent 55%);
+    }
+    .phase-node[data-depth="0"] { border-left-width: 3px; margin-bottom: 6px; }
+    .phase-node[data-depth="1"] { margin-left: 14px; }
+
+    .evt-row {
+      display: grid; grid-template-columns: 78px 62px 58px minmax(0, 1fr);
+      gap: 9px; align-items: baseline; width: 100%; text-align: left;
+      background: transparent; border: 1px solid transparent; border-radius: 8px;
+      padding: 5px 8px; color: var(--fg-1); font-size: 12px;
+    }
+    .evt-row:hover { background: color-mix(in oklch, var(--bg-2), transparent 40%); }
+    .evt-row[data-selected="1"] {
+      background: color-mix(in oklch, var(--accent), transparent 84%);
+      border-color: color-mix(in oklch, var(--accent), transparent 50%);
+    }
+    .evt-time, .evt-rel { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 11px; color: var(--fg-2); }
+    .evt-text { color: var(--fg-0); overflow-wrap: anywhere; }
+    .evt-badge {
+      font-size: 10px; padding: 1px 6px; border-radius: 999px; justify-self: start;
+      border: 1px solid var(--border-soft); color: var(--fg-2); background: var(--bg-2); white-space: nowrap;
+    }
+    .evt-row[data-phase="settled"] .evt-badge { color: var(--green); border-color: color-mix(in oklch, var(--green), transparent 60%); }
+    .evt-row[data-phase="artifact"] .evt-badge { color: var(--accent-2); border-color: color-mix(in oklch, var(--accent-2), transparent 60%); }
+    .evt-row[data-phase="created"] .evt-badge,
+    .evt-row[data-phase="spawned"] .evt-badge { color: var(--accent); border-color: color-mix(in oklch, var(--accent), transparent 60%); }
+
+    .diff-row {
+      display: grid; grid-template-columns: 16px 150px minmax(0, 1fr);
+      gap: 9px; align-items: baseline; padding: 3px 8px; font-size: 12px;
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    }
+    .diff-key { color: var(--fg-1); }
+    .diff-val { color: var(--fg-0); overflow-wrap: anywhere; }
+    .diff-row[data-diff="added"] .diff-sign, .diff-row[data-diff="added"] .diff-key { color: var(--green); }
+    .diff-row[data-diff="removed"] .diff-sign, .diff-row[data-diff="removed"] .diff-key { color: var(--red); }
+    .diff-row[data-diff="changed"] .diff-sign, .diff-row[data-diff="changed"] .diff-key { color: var(--yellow); }
+    .diff-arrow { color: var(--fg-2); }
+    .diff-old { color: var(--fg-2); text-decoration: line-through; }
+
+    /* ── 每日 usage-cost 摘要（L2）───────────────────────────────
+       規格：docs/exec-cost-fields-spec.md
+       未知一律 data-empty="1" ＋顯示「無資料」，絕不填 0 充數；
+       樣式只綁 data-* token，不比對任何顯示字串。 */
+    .usage-wrap { display: flex; flex-direction: column; gap: 10px; }
+    .usage-bar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      background: var(--bg-1); border: 1px solid var(--border-soft);
+      border-radius: 12px; padding: 8px 12px;
+    }
+    .usage-note { font-size: 11px; color: var(--fg-2); padding: 6px 12px; }
+    .usage-group {
+      background: var(--bg-1); border: 1px solid var(--border-soft);
+      border-radius: 12px; overflow: hidden;
+    }
+    .usage-day-head {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 9px 12px; border-bottom: 1px solid var(--border-soft); background: var(--bg-2);
+    }
+    .usage-day-name { font-weight: 600; color: var(--fg-0); font-variant-numeric: tabular-nums; }
+    .usage-group[data-dated="0"] .usage-day-name { color: var(--yellow); }
+    .route-chip {
+      font-size: 10px; padding: 1px 7px; border-radius: 999px;
+      border: 1px solid var(--border-soft); color: var(--fg-2);
+      background: var(--bg-1); white-space: nowrap;
+    }
+    .route-chip[data-route="unknown"] { border-style: dashed; }
+    .route-chip[data-route="claude_cli"] { color: var(--accent); border-color: color-mix(in oklch, var(--accent), transparent 60%); }
+    .route-chip[data-route="mock"] { color: var(--accent-2); border-color: color-mix(in oklch, var(--accent-2), transparent 60%); }
+
+    .usage-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--border-soft); }
+    .usage-metric { background: var(--bg-1); padding: 10px 12px; display: grid; gap: 3px; }
+    .um-label { font-size: 11px; color: var(--fg-2); }
+    .um-value { font-size: 19px; font-weight: 600; color: var(--fg-0); font-variant-numeric: tabular-nums; }
+    .usage-metric[data-empty="1"] .um-value { font-size: 14px; font-weight: 500; color: var(--fg-2); font-style: italic; }
+    .um-cover { font-size: 11px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+
+    .usage-details { padding: 2px 0 4px; }
+    .usage-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) 104px 108px 96px 116px;
+      gap: 9px; align-items: baseline; padding: 5px 12px; font-size: 12px;
+    }
+    .usage-row.head { color: var(--fg-2); font-size: 11px; border-bottom: 1px solid var(--border-soft); padding-bottom: 6px; }
+    .usage-row .num { font-variant-numeric: tabular-nums; color: var(--fg-0); }
+    .usage-row [data-empty="1"] { color: var(--fg-2); font-style: italic; }
+    .usage-task-title { color: var(--fg-0); overflow-wrap: anywhere; }
+    .usage-task-id { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 10px; color: var(--fg-2); }
+
+    @media (max-width: 980px) {
+      .trace-body { grid-template-columns: 1fr; }
+      .trace-diff-panel { max-height: none; }
+      .evt-row { grid-template-columns: 70px 56px 1fr; }
+      .evt-row .evt-text { grid-column: 1 / -1; }
+      .usage-metrics { grid-template-columns: 1fr; }
+      .usage-row { grid-template-columns: minmax(0, 1fr) 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -743,6 +900,7 @@
       <span class="stat">模式 <span class="num" id="mode-text">-</span></span>
       <span class="stat">任務 <span class="num" id="task-count">0</span></span>
       <span class="stat alert" id="blocked-chip">卡住 <span class="num" id="blocked-count">0</span></span>
+      <span class="stat" id="sync-chip" title="上次成功取得公開資料的時間">更新 <span class="num" id="last-sync">—</span></span>
       <span class="grow"></span>
       <select class="top-btn" id="theme-select" title="佈景主題">
         <option value="default">預設</option>
@@ -760,6 +918,8 @@
       <button class="tab" role="tab" aria-selected="false" data-tab="new-task" data-tab-label="對話 / 新任務">對話 / 新任務</button>
       <button class="tab" role="tab" aria-selected="false" data-tab="tasks" data-tab-label="任務">任務</button>
       <button class="tab" role="tab" aria-selected="false" data-tab="events" data-tab-label="進度 / 事件">進度 / 事件</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="trace" data-tab-label="追蹤 / Trace">追蹤 / Trace</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="usage" data-tab-label="用量 / Usage">用量 / Usage</button>
       <button class="tab" role="tab" aria-selected="false" data-tab="inbox" data-tab-label="收件匣 / 卡住">收件匣 / 卡住</button>
       <button class="tab" role="tab" aria-selected="false" data-tab="memory" data-tab-label="記憶">記憶</button>
       <button class="tab" role="tab" aria-selected="false" data-tab="logs" data-tab-label="紀錄">紀錄</button>
@@ -790,7 +950,7 @@
             <canvas id="jhud-reactor"></canvas>
             <div class="jhud-core-readout">
               <div class="jhud-core-light" id="hud-health-light"></div>
-              <div class="jhud-core-state" id="hud-health-text">檢查中</div>
+              <div class="jhud-core-state" id="hud-health-text" role="status" aria-live="polite">檢查中</div>
               <div class="jhud-core-meta" id="hud-health-meta">等待健康狀態</div>
               <div class="jhud-core-sched" id="hud-schedule-readout">
                 <div class="hud-readout-row"><span>公開邊界</span><b>已啟用</b></div>
@@ -840,6 +1000,44 @@
             <h2>任務進度</h2>
             <div id="progress-list" class="panel-body"></div>
           </section>
+        </div>
+      </section>
+
+      <section id="view-trace" class="view">
+        <div class="trace-wrap">
+          <div class="trace-pick">
+            <span class="muted">追蹤任務</span>
+            <select id="trace-task-select" aria-label="選擇要追蹤的任務"></select>
+            <span class="stat">事件 <span class="num" id="trace-event-count">0</span></span>
+            <span class="stat" id="trace-clock-chip">時戳 <span class="num" id="trace-clock-mode">—</span></span>
+          </div>
+          <div class="trace-body">
+            <section class="panel">
+              <h2>執行樹</h2>
+              <div id="trace-tree" class="panel-body"></div>
+            </section>
+            <section class="panel">
+              <h2>事件流</h2>
+              <div id="trace-stream" class="panel-body"></div>
+            </section>
+          </div>
+          <section class="panel trace-diff-panel">
+            <h2 id="trace-diff-title">相鄰步驟 state diff</h2>
+            <div id="trace-diff" class="panel-body"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-usage" class="view">
+        <div class="usage-wrap">
+          <div class="usage-bar">
+            <span class="muted">每日 usage / cost 摘要</span>
+            <span class="stat">執行紀錄 <span class="num" id="usage-record-count">0</span></span>
+            <span class="stat">日期組 <span class="num" id="usage-day-count">0</span></span>
+            <span class="stat" id="usage-coverage-chip">四欄覆蓋 <span class="num" id="usage-coverage">—</span></span>
+          </div>
+          <div id="usage-groups"></div>
+          <div class="usage-note" id="usage-caveat"></div>
         </div>
       </section>
 
@@ -904,6 +1102,14 @@
       settings: null,
       selectedMemory: null,
       progress: {},
+      // 各清單的截斷資訊（後端 truncation 欄位原樣存放），null = 後端未提供
+      truncation: { events: null, inbox: null, progress: {}, trace: {} },
+      traceTaskId: null,
+      traceStep: null,
+      traceEntries: {},
+      coreState: 'BOOT',
+      lastSyncMs: 0,
+      online: false,
       chatBusy: false,
       chatTasks: {},
       chatMessages: [
@@ -1006,6 +1212,20 @@
       return date.toLocaleString();
     }
 
+    // 相對時間（借鏡 Claude-Code-Agent-Monitor：監控面板顯示「N 秒前」比絕對時戳更好掃）
+    function fmtAgo(value) {
+      var t = typeof value === 'number' ? value : Date.parse(value || '');
+      if (!Number.isFinite(t)) return '—';
+      var sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+      if (sec < 5) return '剛剛';
+      if (sec < 60) return sec + ' 秒前';
+      var min = Math.floor(sec / 60);
+      if (min < 60) return min + ' 分前';
+      var hr = Math.floor(min / 60);
+      if (hr < 24) return hr + ' 時前';
+      return Math.floor(hr / 24) + ' 天前';
+    }
+
     function fmtDuration(seconds) {
       var total = Math.max(0, Math.floor(Number(seconds) || 0));
       var h = Math.floor(total / 3600);
@@ -1031,6 +1251,18 @@
 
     function empty(text) {
       return '<div class="empty">' + escapeHtml(text) + '</div>';
+    }
+
+    // 截斷明示列：只在真的被砍時 render，未截斷回空字串（不佔版面、不製造噪音）。
+    // dropped 是後端的實際計數；拿不到就明講「截斷筆數不可得」，絕不填 0 充數。
+    function truncationRow(info) {
+      if (!info || info.truncated === false) return '';
+      var reason = info.reason || info.limit_name || '未標明上限';
+      var body = Number.isInteger(info.dropped) && info.dropped > 0
+        ? '已截斷 ' + info.dropped + ' 筆（原因：' + escapeHtml(reason) + '）'
+        : '已截斷，截斷筆數不可得（原因：' + escapeHtml(reason) + '）';
+      return '<div class="trunc-row" role="status" data-truncated="1" data-dropped="' +
+        (Number.isInteger(info.dropped) ? info.dropped : 'unknown') + '">' + body + '</div>';
     }
 
     function timeMeta(label) {
@@ -1176,7 +1408,7 @@
       state.events.slice(-8).reverse().forEach(function(event) {
         lines.push({
           level: event.status === 'failed' ? 'error' : (event.status === 'blocked' ? 'warn' : ''),
-          text: '[' + fmtDate(event.ts) + '] ' + statusText(event.status || event.type || 'event') + ' ' + (event.title || event.id || '')
+          text: '[' + fmtAgo(event.ts) + '] ' + statusText(event.status || event.type || 'event') + ' ' + (event.title || event.id || '')
         });
       });
       var progress = state.logs && state.logs.task_progress ? state.logs.task_progress.slice(-6) : [];
@@ -1205,6 +1437,9 @@
       var ok = !!(state.health && state.health.ok);
       var coreState = !ok ? '檢查中' : (failed ? '警示' : (blocked ? '注意' : '正常'));
       var coreClass = failed ? 'bad' : (blocked ? 'warn' : '');
+      // 反應爐色彩綁定用的穩定狀態碼：先前 reactor 比對英文 ALERT/WATCH，
+      // 但 hud-health-text 顯示的是中文，永遠對不上 → 反應爐從不轉黃/紅。改讀這顆 token。
+      state.coreState = !ok ? 'BOOT' : (failed ? 'ALERT' : (blocked ? 'WATCH' : 'OK'));
 
       setText('hud-summary', '任務 ' + (counts.total || 0) + ' · 收件匣 ' + (hud.inbox_count || 0) + ' · 記憶 ' + (hud.memory_count || 0));
       setText('hud-health-text', coreState);
@@ -1257,13 +1492,15 @@
 
     function renderEvents() {
       var html = state.events.length ? state.events.slice().reverse().map(function(event) {
-        return '<div class="event-row"><div class="muted">' + escapeHtml(fmtDate(event.ts)) + '</div><div>' + statusLabel(event.status || event.type) + '</div><div><b>' + escapeHtml(event.title || event.id || event.type) + '</b><div class="soft">' + escapeHtml(event.summary || '') + '</div></div></div>';
+        return '<div class="event-row"><div class="muted" title="' + escapeHtml(fmtDate(event.ts)) + '">' + escapeHtml(fmtAgo(event.ts)) + '</div><div>' + statusLabel(event.status || event.type) + '</div><div><b>' + escapeHtml(event.title || event.id || event.type) + '</b><div class="soft">' + escapeHtml(event.summary || '') + '</div></div></div>';
       }).join('') : empty('尚無近期事件');
-      setHtml('events-list', html);
+      setHtml('events-list', truncationRow(state.truncation.events) + html);
 
       var progressRows = Object.keys(state.progress).map(function(taskId) {
         var lines = state.progress[taskId] || [];
-        return '<div class="log-block"><b class="mono">' + escapeHtml(taskId) + '</b><pre>' + escapeHtml(lines.join('\n')) + '</pre></div>';
+        return '<div class="log-block"><b class="mono">' + escapeHtml(taskId) + '</b>' +
+          truncationRow(state.truncation.progress[taskId]) +
+          '<pre>' + escapeHtml(lines.join('\n')) + '</pre></div>';
       });
       setHtml('progress-list', progressRows.join('') || empty('尚無進度紀錄'));
     }
@@ -1272,7 +1509,7 @@
       var inboxHtml = state.inbox.length ? state.inbox.map(function(event) {
         return '<div class="event-row"><div class="muted">' + escapeHtml(fmtDate(event.timestamp || event.ts)) + '</div><div>' + statusLabel(event.status || event.event) + '</div><div><b>' + escapeHtml(event.title || event.task_id || event.file) + '</b><div class="soft">' + escapeHtml(event.summary || '') + '</div></div></div>';
       }).join('') : empty('收件匣目前是空的');
-      setHtml('inbox-list', inboxHtml);
+      setHtml('inbox-list', truncationRow(state.truncation.inbox) + inboxHtml);
 
       var blocked = sortedTasks().filter(function(task) { return task.status === 'blocked'; });
       setHtml('blocked-list', blocked.length ? blocked.map(taskRow).join('') : empty('目前沒有卡住任務'));
@@ -1327,12 +1564,465 @@
       setHtml('settings-list', rows + (endpoints ? '<h3 class="soft">API 端點</h3>' + endpoints : ''));
     }
 
+    // ── Trace timeline（L2）───────────────────────────────────────
+    // 規格：docs/webui-trace-timeline-spec.md
+    // 階段一律用穩定 token，顯示字串只在渲染最後一刻查 PHASE_TEXT，
+    // 任何狀態判定都不比對 textContent（教訓：HUD reactor 綁英文字串死鎖）。
+    var PHASE_ORDER = ['created', 'spawned', 'running', 'artifact', 'settled'];
+    var PHASE_TEXT = {
+      created: '建立',
+      spawned: '派工',
+      running: '執行',
+      artifact: '產出',
+      settled: '收官'
+    };
+    var SETTLED_TEXT = {
+      done: '收官完成',
+      blocked: '收官卡住',
+      failed: '收官失敗'
+    };
+
+    function phaseText(token) {
+      return PHASE_TEXT[token] || token;
+    }
+
+    function currentTraceTaskId() {
+      var tasks = sortedTasks();
+      if (!tasks.length) return null;
+      var picked = tasks.filter(function(task) { return task.id === state.traceTaskId; })[0];
+      return picked ? picked.id : tasks[0].id;
+    }
+
+    // 把 task 記錄 + progress entries 攤平成單一時間軸事件序列。
+    // exact=false 代表寫入端根本沒寫該時戳，由相鄰事件推定 —— UI 要標出來，不假裝精確。
+    function buildTraceEvents(task, entries) {
+      var createdMs = Date.parse(task.created_at || '') || null;
+      var updatedMs = Date.parse(task.updated_at || '') || null;
+      var events = [
+        { phase: 'created', ts: createdMs, exact: true, text: '建立任務：' + (task.title || task.id) },
+        { phase: 'spawned', ts: createdMs, exact: false, text: 'worker 派工（與建立同批，寫入端無獨立時戳）' }
+      ];
+      var lastTs = createdMs;
+      (entries || []).forEach(function(entry) {
+        var ts = Number.isFinite(entry.ts) ? entry.ts : null;
+        if (ts !== null) lastTs = ts;
+        events.push({ phase: 'running', ts: ts, exact: ts !== null, text: entry.text });
+      });
+      if (task.artifact_path) {
+        events.push({ phase: 'artifact', ts: lastTs, exact: false, text: '產出 artifact：' + task.artifact_path });
+      }
+      if (['done', 'blocked', 'failed'].indexOf(task.status) >= 0) {
+        var tail = task.blocked_reason || task.error || taskSummary(task) || '';
+        events.push({
+          phase: 'settled',
+          ts: updatedMs,
+          exact: true,
+          text: (SETTLED_TEXT[task.status] || '收官') + (tail ? '：' + tail : '')
+        });
+      }
+      return events;
+    }
+
+    // 第 i 步的推導狀態快照。缺值不寫該鍵 —— 讓「欄位第一次出現」自然變成 diff 的「新增」。
+    function traceSnapshot(task, events, index) {
+      var createdMs = Date.parse(task.created_at || '') || null;
+      var event = events[index];
+      var snap = {
+        phase: event.phase,
+        status: event.phase === 'settled' ? (task.status || 'unknown') : (event.phase === 'created' ? 'pending' : 'running'),
+        step_no: index + 1,
+        event_count: index + 1,
+        last_text: String(event.text || '').slice(0, 120)
+      };
+      if (Number.isFinite(event.ts) && Number.isFinite(createdMs)) {
+        snap.elapsed_ms = event.ts - createdMs;
+      }
+      var seenArtifact = events.slice(0, index + 1).some(function(item) { return item.phase === 'artifact'; });
+      if (seenArtifact && task.artifact_path) snap.artifact_path = task.artifact_path;
+      if (event.phase === 'settled') {
+        if (task.blocked_reason) snap.blocked_reason = task.blocked_reason;
+        if (task.error) snap.error = task.error;
+      }
+      return snap;
+    }
+
+    function traceDiff(prev, next) {
+      var keys = {};
+      Object.keys(prev).forEach(function(key) { keys[key] = 1; });
+      Object.keys(next).forEach(function(key) { keys[key] = 1; });
+      var added = [];
+      var changed = [];
+      var removed = [];
+      Object.keys(keys).sort().forEach(function(key) {
+        var inPrev = Object.prototype.hasOwnProperty.call(prev, key);
+        var inNext = Object.prototype.hasOwnProperty.call(next, key);
+        if (!inPrev && inNext) {
+          added.push({ kind: 'added', key: key, next: next[key] });
+        } else if (inPrev && !inNext) {
+          removed.push({ kind: 'removed', key: key, prev: prev[key] });
+        } else if (String(prev[key]) !== String(next[key])) {
+          changed.push({ kind: 'changed', key: key, prev: prev[key], next: next[key] });
+        }
+      });
+      return added.concat(changed).concat(removed);
+    }
+
+    function fmtClock(ts) {
+      if (!Number.isFinite(ts)) return '—';
+      return new Date(ts).toLocaleTimeString('zh-TW', { hour12: false });
+    }
+
+    function fmtRelative(ts, baseMs) {
+      if (!Number.isFinite(ts) || !Number.isFinite(baseMs)) return '—';
+      var sec = (ts - baseMs) / 1000;
+      return 'T+' + (sec < 10 ? sec.toFixed(1) : Math.round(sec)) + 's';
+    }
+
+    function renderTraceTree(task, events, selectedPhase) {
+      var baseMs = Date.parse(task.created_at || '') || null;
+      var rootHtml =
+        '<div class="phase-node" data-depth="0" data-reached="1" data-status="' + escapeHtml(task.status || 'unknown') + '">' +
+          '<span class="phase-dot"></span>' +
+          '<span><span class="phase-name">' + escapeHtml(task.title || task.id) + '</span>' +
+          '<div class="phase-meta mono">' + escapeHtml(task.id) + '</div></span>' +
+          '<span class="phase-count">' + statusLabel(task.status) + '</span>' +
+        '</div>';
+
+      var nodes = PHASE_ORDER.map(function(token) {
+        var owned = events.filter(function(event) { return event.phase === token; });
+        var reached = owned.length ? '1' : '0';
+        var first = owned.length ? owned[0] : null;
+        var status = token === 'settled' && owned.length ? (task.status || 'unknown') : '';
+        var meta = first
+          ? fmtClock(first.ts) + ' · ' + fmtRelative(first.ts, baseMs) + (first.exact ? '' : ' · 推定')
+          : '未到達';
+        return '<button class="phase-node" type="button" data-depth="1" data-phase-node="' + token + '"' +
+          ' data-reached="' + reached + '"' +
+          (status ? ' data-status="' + escapeHtml(status) + '"' : '') +
+          ' data-selected="' + (token === selectedPhase ? '1' : '0') + '">' +
+          '<span class="phase-dot"></span>' +
+          '<span><span class="phase-name">' + escapeHtml(phaseText(token)) + '</span>' +
+          '<div class="phase-meta">' + escapeHtml(meta) + '</div></span>' +
+          '<span class="phase-count">' + owned.length + '</span>' +
+        '</button>';
+      }).join('');
+
+      setHtml('trace-tree', rootHtml + nodes);
+    }
+
+    function renderTraceStream(task, events, selectedStep) {
+      var baseMs = Date.parse(task.created_at || '') || null;
+      var html = events.map(function(event, index) {
+        return '<button class="evt-row" type="button" data-step="' + index + '"' +
+          ' data-phase="' + event.phase + '"' +
+          ' data-selected="' + (index === selectedStep ? '1' : '0') + '"' +
+          ' title="' + escapeHtml(event.exact ? fmtDate(event.ts) : '推定時刻（寫入端未記錄）') + '">' +
+          '<span class="evt-time">' + escapeHtml(fmtClock(event.ts) + (event.exact ? '' : '~')) + '</span>' +
+          '<span class="evt-rel">' + escapeHtml(fmtRelative(event.ts, baseMs)) + '</span>' +
+          '<span class="evt-badge">' + escapeHtml(phaseText(event.phase)) + '</span>' +
+          '<span class="evt-text">' + escapeHtml(event.text) + '</span>' +
+        '</button>';
+      }).join('');
+      // 載入上限砍掉的早期事件不能靜默消失，否則「只顯示這些」會被誤讀成「就只有這些」。
+      setHtml('trace-stream', truncationRow(state.truncation.trace[task.id]) + (html || empty('這個任務尚無事件')));
+    }
+
+    function renderTraceDiff(task, events, selectedStep) {
+      if (selectedStep <= 0) {
+        setText('trace-diff-title', '相鄰步驟 state diff — step 1（起始狀態，無前一步）');
+        var initial = traceSnapshot(task, events, 0);
+        setHtml('trace-diff', Object.keys(initial).sort().map(function(key) {
+          return '<div class="diff-row" data-diff="added"><span class="diff-sign">+</span>' +
+            '<span class="diff-key">' + escapeHtml(key) + '</span>' +
+            '<span class="diff-val">' + escapeHtml(String(initial[key])) + '</span></div>';
+        }).join(''));
+        return;
+      }
+      var prev = traceSnapshot(task, events, selectedStep - 1);
+      var next = traceSnapshot(task, events, selectedStep);
+      setText('trace-diff-title', '相鄰步驟 state diff — step ' + selectedStep + ' → step ' + (selectedStep + 1));
+      var rows = traceDiff(prev, next).map(function(item) {
+        var sign = item.kind === 'added' ? '+' : (item.kind === 'removed' ? '-' : '~');
+        var value;
+        if (item.kind === 'added') {
+          value = '<span class="diff-val">' + escapeHtml(String(item.next)) + '</span>';
+        } else if (item.kind === 'removed') {
+          value = '<span class="diff-val diff-old">' + escapeHtml(String(item.prev)) + '</span>';
+        } else {
+          value = '<span class="diff-val"><span class="diff-old">' + escapeHtml(String(item.prev)) +
+            '</span> <span class="diff-arrow">→</span> ' + escapeHtml(String(item.next)) + '</span>';
+        }
+        return '<div class="diff-row" data-diff="' + item.kind + '"><span class="diff-sign">' + sign + '</span>' +
+          '<span class="diff-key">' + escapeHtml(item.key) + '</span>' + value + '</div>';
+      }).join('');
+      setHtml('trace-diff', rows || empty('這兩步之間沒有 key 層級變化'));
+    }
+
+    function renderTrace() {
+      var tasks = sortedTasks();
+      var select = byId('trace-task-select');
+      var taskId = currentTraceTaskId();
+      if (select) {
+        select.innerHTML = tasks.map(function(task) {
+          return '<option value="' + escapeHtml(task.id) + '"' + (task.id === taskId ? ' selected' : '') + '>' +
+            escapeHtml(statusText(task.status) + ' · ' + (task.title || task.id) + ' · ' + fmtAgo(taskTime(task))) +
+          '</option>';
+        }).join('');
+        select.disabled = !tasks.length;
+      }
+      if (!taskId) {
+        setText('trace-event-count', '0');
+        setText('trace-clock-mode', '—');
+        setHtml('trace-tree', empty('目前沒有任務'));
+        setHtml('trace-stream', empty('目前沒有任務'));
+        setHtml('trace-diff', empty('目前沒有任務'));
+        return;
+      }
+      var task = tasks.filter(function(item) { return item.id === taskId; })[0];
+      var events = buildTraceEvents(task, state.traceEntries[taskId] || []);
+      var selectedStep = state.traceStep;
+      if (!Number.isInteger(selectedStep) || selectedStep < 0 || selectedStep >= events.length) {
+        selectedStep = events.length - 1;
+      }
+
+      setText('trace-event-count', String(events.length));
+      // 時戳模式也綁 token：有任一真時戳＝絕對軸，全無＝退化成序號軸（規格 §5 降級路徑）
+      var hasClock = events.some(function(event) { return event.exact && Number.isFinite(event.ts); });
+      var chip = byId('trace-clock-chip');
+      if (chip) chip.dataset.clock = hasClock ? 'absolute' : 'sequence';
+      setText('trace-clock-mode', hasClock ? '絕對時刻' : '序號軸');
+
+      renderTraceTree(task, events, events[selectedStep] ? events[selectedStep].phase : null);
+      renderTraceStream(task, events, selectedStep);
+      renderTraceDiff(task, events, selectedStep);
+    }
+
+    // ── 每日 usage-cost 摘要（L2）─────────────────────────────────
+    // 規格：docs/exec-cost-fields-spec.md
+    // 資料源＝既有 /api/tasks 的四欄（resolved_route / latency_ms / tokens / cost），
+    // 不加端點、不動後端。四欄尚未寫入時讀到的就是 key 缺席 → 一律「無資料」，
+    // 絕不以 0 充數（教訓：env-override-not-source-default-fake-zero）。
+    var NO_DATA_TEXT = '無資料';
+    var USAGE_METRIC_TEXT = { latency: '延遲 合計', tokens: 'Token 合計', cost: '成本 合計' };
+    var ROUTE_TEXT = { claude_cli: 'Claude CLI', mock: 'Mock worker', unknown: '無資料' };
+    var UNKNOWN_DAY_KEY = 'unknown-date';
+
+    function routeText(mode) {
+      return ROUTE_TEXT[mode] || mode;
+    }
+
+    // 只有「有限數字」才算量到；undefined / null / NaN / 字串一律視為未知。
+    function finiteOrNull(value) {
+      return typeof value === 'number' && Number.isFinite(value) ? value : null;
+    }
+
+    function usageLatency(task) {
+      return finiteOrNull(task.latency_ms);
+    }
+
+    // total 缺席但 input/output 齊全時以兩者相加（規格 §4.3）；只有其一則仍算未知。
+    function usageTokens(task) {
+      var bag = task.tokens;
+      if (!bag || typeof bag !== 'object') return null;
+      var total = finiteOrNull(bag.total);
+      if (total !== null) return total;
+      var input = finiteOrNull(bag.input);
+      var output = finiteOrNull(bag.output);
+      return input !== null && output !== null ? input + output : null;
+    }
+
+    function usageCost(task) {
+      var bag = task.cost;
+      if (!bag || typeof bag !== 'object') return null;
+      return finiteOrNull(bag.amount);
+    }
+
+    function usageCurrency(task) {
+      var bag = task.cost;
+      return bag && typeof bag === 'object' && bag.currency ? String(bag.currency) : 'USD';
+    }
+
+    function usageRoute(task) {
+      var route = task.resolved_route;
+      var mode = route && typeof route === 'object' && route.mode ? String(route.mode) : '';
+      return mode || 'unknown';
+    }
+
+    var USAGE_PICKERS = { latency: usageLatency, tokens: usageTokens, cost: usageCost };
+
+    function usageDayKey(task) {
+      var ms = Date.parse(task.created_at || '');
+      if (!Number.isFinite(ms)) return UNKNOWN_DAY_KEY;
+      var date = new Date(ms);
+      var pad = function(n) { return n < 10 ? '0' + n : String(n); };
+      return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate());
+    }
+
+    // sum 只加非 null 的值；covered=0 時 sum 回 null（→ 顯示「無資料」而非 0）。
+    // 不變式：sum === Σ 明細非 null 值、covered === 明細非 null 筆數（規格 §4.4）。
+    function usageAggregate(details, pick) {
+      var sum = 0;
+      var covered = 0;
+      details.forEach(function(task) {
+        var value = pick(task);
+        if (value === null) return;
+        sum += value;
+        covered += 1;
+      });
+      return { sum: covered ? sum : null, covered: covered, total: details.length };
+    }
+
+    function usageRouteCounts(details) {
+      var counts = {};
+      var order = [];
+      details.forEach(function(task) {
+        var mode = usageRoute(task);
+        if (counts[mode] === undefined) { counts[mode] = 0; order.push(mode); }
+        counts[mode] += 1;
+      });
+      order.sort(function(a, b) {
+        if (a === 'unknown') return 1;
+        if (b === 'unknown') return -1;
+        return counts[b] - counts[a];
+      });
+      return order.map(function(mode) { return { mode: mode, count: counts[mode] }; });
+    }
+
+    function buildUsageGroups() {
+      var byDay = {};
+      var order = [];
+      state.tasks.forEach(function(task) {
+        var key = usageDayKey(task);
+        if (!byDay[key]) { byDay[key] = []; order.push(key); }
+        byDay[key].push(task);
+      });
+      order.sort(function(a, b) {
+        if (a === UNKNOWN_DAY_KEY) return 1;
+        if (b === UNKNOWN_DAY_KEY) return -1;
+        return a < b ? 1 : (a > b ? -1 : 0);
+      });
+      return order.map(function(key) {
+        var details = byDay[key].slice().sort(function(a, b) {
+          return (Date.parse(b.created_at || '') || 0) - (Date.parse(a.created_at || '') || 0);
+        });
+        return {
+          key: key,
+          dated: key !== UNKNOWN_DAY_KEY,
+          details: details,
+          routes: usageRouteCounts(details),
+          currency: usageCurrency(details[0] || {}),
+          metrics: {
+            latency: usageAggregate(details, usageLatency),
+            tokens: usageAggregate(details, usageTokens),
+            cost: usageAggregate(details, usageCost)
+          }
+        };
+      });
+    }
+
+    function fmtCount(value) {
+      return Number(value).toLocaleString('en-US');
+    }
+
+    function fmtMetric(kind, value, currency) {
+      if (value === null) return NO_DATA_TEXT;
+      if (kind === 'latency') return fmtCount(Math.round(value)) + ' ms';
+      if (kind === 'tokens') return fmtCount(Math.round(value));
+      return (currency || 'USD') + ' ' + Number(value).toFixed(4);
+    }
+
+    function metricCell(kind, value, currency) {
+      var known = value !== null;
+      return '<span class="num" data-empty="' + (known ? '0' : '1') + '">' +
+        escapeHtml(fmtMetric(kind, value, currency)) + '</span>';
+    }
+
+    function usageMetricCard(kind, agg, currency) {
+      var known = agg.sum !== null;
+      var cover = '計入 ' + agg.covered + '/' + agg.total + ' 筆';
+      if (known && kind === 'latency' && agg.covered > 0) {
+        cover += ' · 平均 ' + fmtCount(Math.round(agg.sum / agg.covered)) + ' ms';
+      }
+      return '<div class="usage-metric" data-usage-metric="' + kind + '" data-empty="' + (known ? '0' : '1') +
+          '" data-covered="' + agg.covered + '" data-of="' + agg.total + '">' +
+        '<div class="um-label">' + escapeHtml(USAGE_METRIC_TEXT[kind]) + '</div>' +
+        '<div class="um-value">' + escapeHtml(fmtMetric(kind, agg.sum, currency)) + '</div>' +
+        '<div class="um-cover">' + escapeHtml(cover) + '</div>' +
+      '</div>';
+    }
+
+    function usageDetailRow(task, currency) {
+      var mode = usageRoute(task);
+      return '<div class="usage-row" data-task-id="' + escapeHtml(task.id || '') + '">' +
+        '<div><div class="usage-task-title">' + escapeHtml(task.title || task.id || '') + '</div>' +
+          '<div class="usage-task-id">' + escapeHtml(task.id || '') + '</div></div>' +
+        '<div><span class="route-chip" data-route="' + escapeHtml(mode) + '" data-empty="' +
+          (mode === 'unknown' ? '1' : '0') + '">' + escapeHtml(routeText(mode)) + '</span></div>' +
+        '<div>' + metricCell('latency', usageLatency(task), currency) + '</div>' +
+        '<div>' + metricCell('tokens', usageTokens(task), currency) + '</div>' +
+        '<div>' + metricCell('cost', usageCost(task), currency) + '</div>' +
+      '</div>';
+    }
+
+    function usageGroupHtml(group) {
+      var routes = group.routes.map(function(item) {
+        return '<span class="route-chip" data-route="' + escapeHtml(item.mode) + '">' +
+          escapeHtml(routeText(item.mode) + ' ×' + item.count) + '</span>';
+      }).join('');
+      var metrics = ['latency', 'tokens', 'cost'].map(function(kind) {
+        return usageMetricCard(kind, group.metrics[kind], group.currency);
+      }).join('');
+      var head = '<div class="usage-row head">' +
+        '<div>任務</div><div>路由</div><div>延遲</div><div>Token</div><div>成本</div>' +
+      '</div>';
+      var rows = group.details.map(function(task) { return usageDetailRow(task, group.currency); }).join('');
+      return '<div class="usage-group" data-usage-day="' + escapeHtml(group.key) + '" data-dated="' +
+          (group.dated ? '1' : '0') + '" data-count="' + group.details.length + '">' +
+        '<div class="usage-day-head">' +
+          '<div class="usage-day-name">' + escapeHtml(group.dated ? group.key : '日期不明') + '</div>' +
+          '<span class="stat">任務 <span class="num">' + group.details.length + '</span></span>' +
+          routes +
+        '</div>' +
+        '<div class="usage-metrics">' + metrics + '</div>' +
+        '<div class="usage-details">' + head + rows + '</div>' +
+      '</div>';
+    }
+
+    function renderUsage() {
+      var groups = buildUsageGroups();
+      setText('usage-record-count', String(state.tasks.length));
+      setText('usage-day-count', String(groups.length));
+
+      // 全域覆蓋率＝三個度量各自「量得到的筆數」加總 ÷（紀錄數 × 3），
+      // 分母是常數不是估算；全 0 時顯示「無資料」而非 0%。
+      var coveredSum = 0;
+      groups.forEach(function(group) {
+        ['latency', 'tokens', 'cost'].forEach(function(kind) {
+          coveredSum += group.metrics[kind].covered;
+        });
+      });
+      var slots = state.tasks.length * 3;
+      var chip = byId('usage-coverage-chip');
+      if (chip) chip.dataset.empty = coveredSum > 0 ? '0' : '1';
+      setText('usage-coverage', slots && coveredSum > 0 ? (coveredSum + '/' + slots) : NO_DATA_TEXT);
+
+      setHtml('usage-groups', groups.length
+        ? groups.map(usageGroupHtml).join('')
+        : empty('目前沒有執行紀錄'));
+
+      setText('usage-caveat', coveredSum > 0
+        ? '合計口徑：每筆只記最後一次 attempt，retry 掉的前幾次不計入（規格 §3）；「無資料」＝該欄未寫入或量不到，非 0。'
+        : '四欄（resolved_route / latency_ms / tokens / cost）尚未由 runtime 寫入，故全部顯示「無資料」。這是真實現況，不是 0（規格 §2）。');
+    }
+
     function renderAll() {
       renderHeader();
       renderHud();
       renderTasks();
       renderChat();
       renderEvents();
+      renderTrace();
+      renderUsage();
       renderInbox();
       renderMemory();
       renderLogs();
@@ -1344,15 +2034,37 @@
         return task.status === 'running' || task.status === 'pending' || task.status === 'done' || task.status === 'blocked';
       }).slice(0, 8);
       var next = {};
+      var nextTrunc = {};
       await Promise.all(visible.map(async function(task) {
         try {
           var data = await fetchJson('/api/tasks/' + encodeURIComponent(task.id) + '/progress');
           next[task.id] = data.lines || [];
+          nextTrunc[task.id] = data.truncation || null;
         } catch (_) {
           next[task.id] = [];
+          nextTrunc[task.id] = null;
         }
       }));
       state.progress = next;
+      state.truncation.progress = nextTrunc;
+    }
+
+    // trace 分頁要看完整時間軸，不能只吃 refreshProgress 的 30 行 tail，
+    // 所以對「目前選中的那一個 task」單獨拉 limit=200。
+    async function refreshTraceEntries() {
+      var taskId = currentTraceTaskId();
+      if (!taskId) return;
+      try {
+        var data = await fetchJson('/api/tasks/' + encodeURIComponent(taskId) + '/progress?limit=200');
+        // entries 缺席＝後端未提供（例如尚未同步的下游 cockpit），退化成無時戳的序號軸。
+        state.traceEntries[taskId] = Array.isArray(data.entries) && data.entries.length
+          ? data.entries
+          : (data.lines || []).map(function(text) { return { ts: null, text: text }; });
+        state.truncation.trace[taskId] = data.truncation || null;
+      } catch (_) {
+        state.traceEntries[taskId] = [];
+        state.truncation.trace[taskId] = null;
+      }
     }
 
     async function refresh() {
@@ -1373,32 +2085,115 @@
         state.tasks = results[2].tasks || [];
         state.events = results[3].events || [];
         state.inbox = results[4].events || [];
+        state.truncation.events = results[3].truncation || null;
+        state.truncation.inbox = results[4].truncation || null;
         state.memory = results[5].documents || [];
         state.logs = results[6];
         state.doctor = results[7];
         state.settings = results[8];
         await refreshProgress();
+        await refreshTraceEntries();
         syncChatTasks();
+        state.lastSyncMs = Date.now();
+        state.online = true;
       } catch (error) {
         state.health = null;
+        state.online = false;
         setText('health-text', error.message);
       }
       renderAll();
+      updateSyncChip();
+    }
+
+    // 資料新鮮度／連線狀態（借鏡 multi-agent orchestration dashboard：面板必須讓人一眼看出資料是不是 stale）
+    function updateSyncChip() {
+      var chip = byId('sync-chip');
+      if (!state.online) {
+        setText('last-sync', '連線中斷');
+        if (chip) chip.className = 'stat alert';
+        return;
+      }
+      setText('last-sync', fmtAgo(state.lastSyncMs));
+      if (chip) chip.className = 'stat' + (Date.now() - state.lastSyncMs > 15000 ? ' alert' : '');
+    }
+
+    function activateTab(name) {
+      var target = document.querySelector('[role="tab"][data-tab="' + name + '"]');
+      if (!target) return false;
+      document.querySelectorAll('[role="tab"]').forEach(function(item) {
+        var selected = item === target;
+        item.setAttribute('aria-selected', selected ? 'true' : 'false');
+        item.classList.toggle('active', selected);
+      });
+      document.querySelectorAll('.view').forEach(function(view) {
+        view.classList.toggle('active', view.id === 'view-' + name);
+      });
+      return true;
     }
 
     document.querySelectorAll('[role="tab"]').forEach(function(tab) {
       tab.id = 'tab-' + tab.dataset.tab;
       tab.addEventListener('click', function() {
-        document.querySelectorAll('[role="tab"]').forEach(function(item) {
-          var selected = item === tab;
-          item.setAttribute('aria-selected', selected ? 'true' : 'false');
-          item.classList.toggle('active', selected);
-        });
-        document.querySelectorAll('.view').forEach(function(view) {
-          view.classList.toggle('active', view.id === 'view-' + tab.dataset.tab);
-        });
+        activateTab(tab.dataset.tab);
+        try { history.replaceState(null, '', '#' + tab.dataset.tab); } catch (_) {}
       });
     });
+
+    // 分頁深連結：讓 headless 截圖／分享網址能直接落在指定分頁（驗收截圖需要）。
+    // trace 另支援 #trace/<taskId>/<step>，把「看哪個 task 的哪一步」也做成可分享網址。
+    function applyHashTab() {
+      var parts = String(location.hash || '').replace(/^#/, '').split('/');
+      var name = parts[0];
+      if (!name) return;
+      if (name === 'trace') {
+        if (parts[1]) state.traceTaskId = decodeURIComponent(parts[1]);
+        state.traceStep = parts[2] && /^\d+$/.test(parts[2]) ? Number(parts[2]) : null;
+      }
+      activateTab(name);
+    }
+    window.addEventListener('hashchange', applyHashTab);
+    applyHashTab();
+
+    var traceSelect = byId('trace-task-select');
+    if (traceSelect) {
+      traceSelect.addEventListener('change', function() {
+        state.traceTaskId = traceSelect.value;
+        state.traceStep = null;
+        renderTrace();
+        refreshTraceEntries().then(renderTrace);
+      });
+    }
+
+    // 點事件 → 選中該步，同時高亮執行樹對應階段節點（acceptance #2）
+    var traceStream = byId('trace-stream');
+    if (traceStream) {
+      traceStream.addEventListener('click', function(event) {
+        var row = event.target.closest('[data-step]');
+        if (!row) return;
+        state.traceStep = Number(row.dataset.step);
+        renderTrace();
+      });
+    }
+
+    // 反向：點樹節點 → 跳到該階段第一個事件
+    var traceTree = byId('trace-tree');
+    if (traceTree) {
+      traceTree.addEventListener('click', function(event) {
+        var node = event.target.closest('[data-phase-node]');
+        if (!node || node.dataset.reached !== '1') return;
+        var taskId = currentTraceTaskId();
+        var task = sortedTasks().filter(function(item) { return item.id === taskId; })[0];
+        if (!task) return;
+        var events = buildTraceEvents(task, state.traceEntries[taskId] || []);
+        for (var i = 0; i < events.length; i += 1) {
+          if (events[i].phase === node.dataset.phaseNode) {
+            state.traceStep = i;
+            break;
+          }
+        }
+        renderTrace();
+      });
+    }
 
     var memoryList = byId('memory-list');
     if (memoryList) {
@@ -1482,6 +2277,7 @@
     function tickClock() {
       var now = new Date();
       setText('hud-clock', now.toLocaleTimeString([], { hour12: false }));
+      updateSyncChip();
     }
     tickClock();
     setInterval(tickClock, 1000);
@@ -1493,6 +2289,14 @@
       var ctx = cv.getContext('2d');
       var pane = document.getElementById('view-hud');
       var ph = 0;
+      // 借鏡 Agent UX 設計研究：尊重 prefers-reduced-motion，凍結反應爐動態、只保留靜態狀態色。
+      var reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      if (window.matchMedia) {
+        var mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+        (mq.addEventListener ? mq.addEventListener.bind(mq, 'change') : mq.addListener.bind(mq))(function(e) {
+          reduceMotion = e.matches;
+        });
+      }
       function ring(cx, cy, r, o) {
         ctx.beginPath();
         ctx.arc(cx, cy, r, o.a0 || 0, o.a1 || Math.PI * 2);
@@ -1533,8 +2337,8 @@
         var cx = w / 2;
         var cy = h / 2;
         var R = Math.min(w, h) / 2 - 4;
-        var alerting = (byId('hud-health-text') || {}).textContent === 'ALERT';
-        var watching = (byId('hud-health-text') || {}).textContent === 'WATCH';
+        var alerting = state.coreState === 'ALERT';
+        var watching = state.coreState === 'WATCH';
         var main = alerting ? '255,92,110' : (watching ? '255,215,106' : '95,230,255');
         var hot = alerting ? '255,150,160' : (watching ? '255,231,150' : '190,247,255');
         ctx.clearRect(0, 0, w, h);
@@ -1588,7 +2392,7 @@
         ctx.stroke();
         ctx.shadowBlur = 0;
         ctx.restore();
-        ph += 0.012;
+        ph += reduceMotion ? 0 : 0.012;
       }
       requestAnimationFrame(frame);
     })();
