@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 // 吃根路徑的入口一律要求明示參數：掃描根的 override 只認呼叫端當場給的 `--root=<dir>`。
 // 繼承來的 IP_SCAN_ROOT 不算明示——殘留在 shell／CI job 裡的舊值會讓正式閘
@@ -237,6 +238,63 @@ function listFiles(dir, rootDir = ROOT_DIR, skipped = []) {
   return result;
 }
 
+// 掃描域綁「git 追蹤域」而不是「目錄樹」：這道閘要防的是「推上 public repo 的內容外洩」，
+// 而會被推上去的就是 git 追蹤的那些檔。用目錄樹當射程會把整棵本地工作樹（暫存檔、輸出、
+// state）一起算進來，閘因此恆紅，而恆紅的閘等於沒有閘。改綁追蹤域還有一個好處：排除清單
+// 與 .gitignore 不必再各維護一份，「被 git add 進來就自動進射程」，反向失明檢查內生成立。
+const GIT_TIMEOUT_MS = 30000;
+
+function runGit(rootDir, args) {
+  const res = spawnSync('git', ['-C', rootDir, ...args], {
+    encoding: 'utf8',
+    timeout: GIT_TIMEOUT_MS,
+    windowsHide: true,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  if (res.error) {
+    return { ok: false, reason: `git_spawn_${res.error.code || 'ERROR'}`, stdout: '' };
+  }
+  if (res.status !== 0) {
+    return { ok: false, reason: `git_exit_${res.status}`, stdout: '' };
+  }
+  return { ok: true, reason: 'ok', stdout: res.stdout || '' };
+}
+
+function splitNul(stdout) {
+  return stdout.split('\0').filter((value) => value !== '');
+}
+
+// 拿不到追蹤域就 fail closed 退回全樹掃 + WARN：寧可多掃一堆本地檔（吵），也不要因為
+// 「這裡不是 git checkout」就靜默縮小射程去掃 0 個檔然後印綠燈（漏）。
+function resolveScanDomain(rootDir = ROOT_DIR) {
+  const inside = runGit(rootDir, ['rev-parse', '--is-inside-work-tree']);
+  if (!inside.ok) {
+    return { ok: false, mode: 'full_tree', reason: inside.reason, files: null, unverified: [] };
+  }
+  if (inside.stdout.trim() !== 'true') {
+    return { ok: false, mode: 'full_tree', reason: 'not_a_work_tree', files: null, unverified: [] };
+  }
+  const tracked = runGit(rootDir, ['ls-files', '-z']);
+  if (!tracked.ok) {
+    return { ok: false, mode: 'full_tree', reason: tracked.reason, files: null, unverified: [] };
+  }
+  // --directory 讓整個未追蹤目錄收斂成一個條目，未驗清單才具名得起來而不是攤成幾百行。
+  const others = runGit(rootDir, ['ls-files', '--others', '--exclude-standard', '--directory', '-z']);
+  const unverified = others.ok ? splitNul(others.stdout) : [];
+  const files = [];
+  // 追蹤但工作樹裡不存在（git rm 尚未 commit）＝沒得掃，具名列成未驗，不丟進 read_errors
+  // 把整趟判成 code 3。
+  for (const rel of splitNul(tracked.stdout)) {
+    const abs = path.join(rootDir, rel);
+    if (fs.existsSync(abs)) {
+      files.push(abs);
+    } else {
+      unverified.push(`${rel} [tracked-but-absent]`);
+    }
+  }
+  return { ok: true, mode: 'git_tracked', reason: 'git_tracked', files, unverified, unverified_ok: others.ok };
+}
+
 function scanFile(filePath, rootDir = ROOT_DIR, counters = null) {
   const repoPath = toRepoPath(filePath, rootDir);
   let buffer;
@@ -297,12 +355,28 @@ function scanTree(rootDir = ROOT_DIR, listCheck = checkListPredicates()) {
   };
   // 判準清單空掉時連掃都不掃：掃完再說「零命中」只是多產一份沒有意義的通過證據。
   if (!listCheck.ok) {
-    return { findings: [], ...counters, list_check: listCheck };
+    return { findings: [], ...counters, list_check: listCheck, scan_domain: 'unknown', domain_warnings: [] };
   }
-  const findings = listFiles(rootDir, rootDir, counters.skipped_dirs).flatMap((filePath) =>
-    scanFile(filePath, rootDir, counters),
-  );
-  return { findings, ...counters, list_check: listCheck };
+  const domain = resolveScanDomain(rootDir);
+  const domainWarnings = [];
+  let files;
+  if (domain.ok) {
+    files = domain.files;
+    counters.skipped_dirs = domain.unverified;
+    if (!domain.unverified_ok) {
+      domainWarnings.push(
+        'WARN IP redline scan could not list untracked entries — the unverified list below is incomplete',
+      );
+    }
+  } else {
+    domainWarnings.push(
+      `WARN IP redline scan could not bind to the git tracked domain (reason=${domain.reason}) — ` +
+        `fail closed to a full-tree scan of ${rootDir}; hits may include files that will never be published`,
+    );
+    files = listFiles(rootDir, rootDir, counters.skipped_dirs);
+  }
+  const findings = files.flatMap((filePath) => scanFile(filePath, rootDir, counters));
+  return { findings, ...counters, list_check: listCheck, scan_domain: domain.mode, domain_warnings: domainWarnings };
 }
 
 // 收尾判決是一個純函式：main() 只負責印與 exit，測試才能直接驗判準本身。
@@ -316,7 +390,14 @@ function decideExit(result, rootDir = ROOT_DIR) {
     `files_checked=${result.files_checked} lines_checked=${result.lines_checked} ` +
     `binary_skipped=${result.binary_skipped} read_errors=${readErrors.length} ` +
     `usable_patterns=${listCheck.usable_patterns}/${listCheck.declared_patterns} ` +
-    `skipped_dirs=${skippedDirs.length}`;
+    `skipped_dirs=${skippedDirs.length} scan_domain=${result.scan_domain || 'unknown'}`;
+
+  // 射程揭露是每一種收尾都欠的帳，不是 PASS 的附贈品。以前這行只寫在 code 0 分支，
+  // 結果閘一旦恆紅（走 code 1）就永遠印不出來——揭露只在「不需要它的時候」出現。
+  // 這裡把它抽成共用行，五個分支一律附上。
+  const scopeLines = skippedDirs.length
+    ? [`NOTE out of scan scope, counted as unverified (not as clean): ${skippedDirs.join(', ')}`]
+    : [];
 
   // 判準清單一條可用的都沒有 → 走拒絕分支。這在讀任何檔之前就能斷定，不必等掃完才說零命中。
   if (!listCheck.ok) {
@@ -325,6 +406,7 @@ function decideExit(result, rootDir = ROOT_DIR) {
       stream: 'error',
       lines: [
         `FAIL IP redline scan has no usable detection pattern — refused before reading any file (${checked})`,
+        ...scopeLines,
       ],
     };
   }
@@ -337,6 +419,7 @@ function decideExit(result, rootDir = ROOT_DIR) {
       lines: [
         `FAIL IP redline scan could not read ${readErrors.length} file(s) — scan is incomplete (${checked}):`,
         ...readErrors.map((entry) => `${entry.file} [read-error] ${entry.code}: ${entry.message}`),
+        ...scopeLines,
       ],
     };
   }
@@ -346,7 +429,10 @@ function decideExit(result, rootDir = ROOT_DIR) {
     return {
       code: 2,
       stream: 'error',
-      lines: [`FAIL IP redline scan checked 0 files under ${rootDir} — zero hits proves nothing (${checked})`],
+      lines: [
+        `FAIL IP redline scan checked 0 files under ${rootDir} — zero hits proves nothing (${checked})`,
+        ...scopeLines,
+      ],
     };
   }
 
@@ -357,18 +443,13 @@ function decideExit(result, rootDir = ROOT_DIR) {
       lines: [
         `FAIL IP redline scan found private markers or token-shaped secrets (${checked}):`,
         ...result.findings.map((finding) => `${finding.file}:${finding.line} [${finding.id}] ${finding.match}`),
+        ...scopeLines,
       ],
     };
   }
 
   // 通過也要交代射程：射程外的目錄一律具名列成「未驗」，不讓 PASS 被讀成整棵樹都掃過。
-  const passLines = [`PASS IP redline scan: no redline hits (${checked})`];
-  if (skippedDirs.length) {
-    passLines.push(
-      `NOTE out of scan scope, counted as unverified (not as clean): ${skippedDirs.join(', ')}`,
-    );
-  }
-  return { code: 0, stream: 'log', lines: passLines };
+  return { code: 0, stream: 'log', lines: [`PASS IP redline scan: no redline hits (${checked})`, ...scopeLines] };
 }
 
 function main(argv = process.argv.slice(2), env = process.env) {
@@ -385,7 +466,12 @@ function main(argv = process.argv.slice(2), env = process.env) {
   for (const warning of listCheck.warnings) {
     console.error(warning);
   }
-  const verdict = decideExit(scanTree(rootDir, listCheck), rootDir);
+  const result = scanTree(rootDir, listCheck);
+  // 掃描域退化（非 git checkout / git 叫不動）也要當場吼出來，不能只留在收尾那串計數裡。
+  for (const warning of result.domain_warnings || []) {
+    console.error(warning);
+  }
+  const verdict = decideExit(result, rootDir);
   for (const line of verdict.lines) {
     console[verdict.stream](line);
   }
@@ -402,6 +488,7 @@ module.exports = {
   scanTree,
   scanFile,
   decideExit,
+  resolveScanDomain,
   resolveRootDir,
   refuseRootVerdict,
   isAllowed,
