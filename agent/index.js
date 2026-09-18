@@ -136,6 +136,91 @@ function writeJsonFile(filePath, value) {
   }
 }
 
+// schemas/task.schema.json 從 Phase 1 就宣告了 task 的必填欄位與 status 列舉，
+// 但在這次之前全 repo 沒有任何一行程式讀它——契約只躺在檔案裡，落檔端想寫什麼都寫得進去。
+// 讀取端已經在替壞 row 擦屁股（下面的 isTaskRow / unreadableTaskRow），代價是失敗要等到
+// 讀的時候才發現，而那時目標檔早就被那份壞內容覆蓋掉、原本的好內容救不回來。
+// 改成存檔當下就對著同一份 schema 驗：驗不過就不換檔，磁碟上留的仍是上一份完整內容，
+// 並且吐一個具名 cause（缺哪個欄位／status 是什麼值），不讓讀取端去猜。
+// 這裡只實作 task.schema.json 實際用到的關鍵字（required / type / enum / minLength /
+// minimum / maximum / additionalProperties），不為了這件事引入 ajv——本 repo 目前零相依。
+const TASK_SCHEMA_PATH = path.join(ROOT_DIR, 'schemas', 'task.schema.json');
+let taskSchemaCache = null;
+
+function loadTaskSchema() {
+  if (!taskSchemaCache) {
+    taskSchemaCache = readJsonFile(TASK_SCHEMA_PATH);
+  }
+  return taskSchemaCache;
+}
+
+function typeViolation(key, value, expected) {
+  if (expected === 'integer') {
+    return Number.isInteger(value) ? null : `type:${key} expected integer got ${typeof value}`;
+  }
+  if (expected === 'string') {
+    return typeof value === 'string' ? null : `type:${key} expected string got ${typeof value}`;
+  }
+  return null;
+}
+
+// 回傳 null＝這份 task 可以落檔；回傳字串＝具名 cause，呼叫端據此拒絕換檔。
+function taskSchemaViolation(value) {
+  let schema;
+  try {
+    schema = loadTaskSchema();
+  } catch (error) {
+    // 契約本身讀不到就不放行：fail-closed。寧可這一次不換檔，也不要在沒有契約的狀態下亂寫。
+    return `schema_unreadable:${error.message}`;
+  }
+  if (!isTaskRow(value)) {
+    return `not_an_object:${unknownRowTypeOf(value)}`;
+  }
+  for (const key of schema.required || []) {
+    if (!(key in value)) {
+      return `missing_required:${key}`;
+    }
+  }
+  const properties = schema.properties || {};
+  for (const [key, entry] of Object.entries(value)) {
+    const rule = properties[key];
+    if (!rule) {
+      if (schema.additionalProperties === false) {
+        return `unknown_property:${key}`;
+      }
+      continue;
+    }
+    const mismatch = typeViolation(key, entry, rule.type);
+    if (mismatch) {
+      return mismatch;
+    }
+    if (rule.enum && !rule.enum.includes(entry)) {
+      return `enum:${key}=${String(entry)}`;
+    }
+    if (rule.minLength != null && String(entry).length < rule.minLength) {
+      return `too_short:${key}`;
+    }
+    if (rule.minimum != null && entry < rule.minimum) {
+      return `below_minimum:${key}=${entry}`;
+    }
+    if (rule.maximum != null && entry > rule.maximum) {
+      return `above_maximum:${key}=${entry}`;
+    }
+  }
+  return null;
+}
+
+// task 檔唯一的落檔口：先驗 schema 再換檔。驗不過回傳 false 並在 stderr 留具名 cause，
+// 目標檔維持上一份內容不動——「拒絕寫壞」優先於「一定要寫進去」。
+function safeWriteTaskFile(filePath, task) {
+  const violation = taskSchemaViolation(task);
+  if (violation) {
+    logStderr(`task schema violation, write refused (${filePath})`, violation);
+    return false;
+  }
+  return safeWriteJsonFile(filePath, task);
+}
+
 // 給非同步回呼（worker close / timeout / 進度管線）用的容錯寫入：
 // 寫失敗只導向 stderr 並回傳 false，不讓例外冒泡成 uncaughtException。
 function safeWriteJsonFile(filePath, value) {
@@ -742,7 +827,7 @@ function spawnMockWorker(task) {
     task.status = 'failed';
     task.error = error.message;
     task.updated_at = nowIso();
-    safeWriteJsonFile(taskPath(taskId), task);
+    safeWriteTaskFile(taskPath(taskId), task);
   });
 
   child.on('close', () => {
@@ -871,7 +956,7 @@ function updateTaskStatus(task, status, extra = {}) {
     status,
     updated_at: nowIso(),
   };
-  safeWriteJsonFile(taskPath(task.id), nextTask);
+  safeWriteTaskFile(taskPath(task.id), nextTask);
   if ((status === 'done' || status === 'blocked') && previousStatus !== status) {
     writeInboxEvent(nextTask, status);
   }
@@ -1012,6 +1097,11 @@ function createTaskObject(title, instruction, options = {}) {
     task.timeout_sec = timeoutSec;
   }
 
+  // 建檔這一路徑沿用原本「寫不成就拋」的語意：任務根本沒落檔就不該把 worker 放出去。
+  const violation = taskSchemaViolation(task);
+  if (violation) {
+    throw new Error(`task schema violation at create: ${violation}`);
+  }
   writeJsonFile(taskPath(task.id), task);
   startTaskWorker(task);
   return task;
@@ -1342,6 +1432,10 @@ module.exports = {
   readUtf8WithinLimit,
   readUtf8Tail,
   safeWriteJsonFile,
+  // 存檔當下驗 schema 這一包：violation 是純函式（好驗具名 cause），
+  // safeWriteTaskFile 是實際的落檔口（好驗「拒絕時目標檔不被動到」）。
+  taskSchemaViolation,
+  safeWriteTaskFile,
   appendProgressText,
   listTasks,
   installProcessGuards,

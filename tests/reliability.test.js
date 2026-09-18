@@ -403,6 +403,54 @@ test('crash guardrail: safeWriteJsonFile survives an unwritable path and reports
   assert.equal(result, false);
 });
 
+// 存檔當下驗 schema：壞掉的 task 不該先落檔、再靠讀取端事後補救。
+test('save-time schema gate: named cause per violation, and a valid task still lands', () => {
+  const validTask = {
+    id: '11111111-2222-3333-4444-555555555555',
+    title: 'ok',
+    instruction: 'do it',
+    status: 'pending',
+    created_at: '2026-09-18T00:00:00.000Z',
+    updated_at: '2026-09-18T00:00:00.000Z',
+  };
+  assert.equal(agentModule.taskSchemaViolation(validTask), null);
+
+  // 執行期真的會寫的兩個欄位（retry 路徑），必須是合法的，否則這道閘會擋掉正常重試。
+  assert.equal(
+    agentModule.taskSchemaViolation({ ...validTask, status: 'running', retry_count: 1, last_error: 'boom' }),
+    null,
+  );
+
+  const cases = [
+    [null, 'not_an_object:null'],
+    [[], 'not_an_object:array'],
+    [{ ...validTask, status: 'weird' }, 'enum:status=weird'],
+    [{ ...validTask, title: '' }, 'too_short:title'],
+    [{ ...validTask, timeout_sec: '600' }, 'type:timeout_sec expected integer got string'],
+    [{ ...validTask, timeout_sec: 99999 }, 'above_maximum:timeout_sec=99999'],
+    [{ ...validTask, surprise: 1 }, 'unknown_property:surprise'],
+  ];
+  for (const [value, expected] of cases) {
+    assert.equal(agentModule.taskSchemaViolation(value), expected);
+  }
+
+  const missingTitle = { ...validTask };
+  delete missingTitle.title;
+  assert.equal(agentModule.taskSchemaViolation(missingTitle), 'missing_required:title');
+
+  // 落檔口：驗不過就不換檔，目標檔留的必須還是上一份好內容。
+  resetDataDir();
+  const dir = path.join(DATA_DIR, 'schema-gate');
+  fs.mkdirSync(dir, { recursive: true });
+  const target = path.join(dir, 'task.json');
+  assert.equal(agentModule.safeWriteTaskFile(target, validTask), true);
+  assert.equal(JSON.parse(fs.readFileSync(target, 'utf8')).title, 'ok');
+
+  assert.equal(agentModule.safeWriteTaskFile(target, { ...validTask, status: 'weird', title: 'clobbered' }), false);
+  assert.equal(JSON.parse(fs.readFileSync(target, 'utf8')).title, 'ok');
+  assert.equal(JSON.parse(fs.readFileSync(target, 'utf8')).status, 'pending');
+});
+
 // --- (2) 任務失敗基本 retry ---
 test('task retry: real worker recovers on a later attempt and records retry_count', async () => {
   resetDataDir();

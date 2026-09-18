@@ -43,6 +43,13 @@
     },
     "blocked_reason": {
       "type": "string"
+    },
+    "retry_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_error": {
+      "type": "string"
     }
   }
 }
