@@ -241,6 +241,20 @@ function readTask(taskId) {
   return readJsonFile(filePath);
 }
 
+// readTask 在 JSON 壞掉時是會拋的（只擋 existsSync，不擋 parse）。從 worker 的
+// error / close 回呼裡呼叫它，一拋就直接衝去 uncaughtException——那一趟回呼剩下的事
+// 全不會發生，連「worker 為什麼掛掉」這張失敗收據都跟著消失，現場只剩一行
+// uncaughtException，看不出成因。收據不得消失：讀不動就回 null 並留具名 cause，
+// 讓呼叫端自己決定退回哪份 fallback，而不是整趟被吃掉。
+function readTaskSafely(taskId, context) {
+  try {
+    return readTask(taskId);
+  } catch (error) {
+    logStderr(`task file unreadable (${context}, ${taskId})`, error.message);
+    return null;
+  }
+}
+
 // 任務清單的每一筆都是獨立的 row：一筆讀不動不該讓整份清單消失。
 // 原本的 try/catch 只擋得住「parse 失敗」，擋不住「parse 成功但不是預期形狀」的
 // row（null／陣列／字串——舊版格式、或別的工具塞進來的檔）。這種 row 會一路流到
@@ -820,7 +834,10 @@ function spawnMockWorker(task) {
 
   child.on('error', (error) => {
     clearTimeout(timer);
-    const task = readTask(taskId);
+    // 先留收據再談落檔：task 檔可能已經不見或壞掉，那時下面整段都做不成，
+    // 但「worker 起不來、成因是什麼」這件事不該跟著一起消失。
+    logStderr(`mock worker spawn failed (${taskId})`, error.message);
+    const task = readTaskSafely(taskId, 'mock worker spawn error');
     if (!task) {
       return;
     }
@@ -835,7 +852,7 @@ function spawnMockWorker(task) {
     if (timedOut) {
       return;
     }
-    const latestTask = readTask(taskId);
+    const latestTask = readTaskSafely(taskId, 'mock worker close');
     if (!latestTask) {
       return;
     }
@@ -882,7 +899,9 @@ function normalizeOptionalTimeoutSec(value) {
 }
 
 function markTaskBlockedByTimeout(taskId, fallbackTask) {
-  const currentTask = readTask(taskId) || fallbackTask;
+  // 這裡是「worker 被砍」那條路：從 setTimeout 進來，一拋就沒人接，
+  // 連 blocked_reason=timeout 這張收據都不會產生。讀不動就退回 fallbackTask。
+  const currentTask = readTaskSafely(taskId, 'worker timeout kill') || fallbackTask;
   if (!currentTask || currentTask.status === 'done' || currentTask.status === 'blocked') {
     return currentTask;
   }
@@ -1030,7 +1049,9 @@ function spawnClaudeWorker(task, attempt = 1) {
     if (timedOut) {
       return;
     }
-    const currentTask = readTask(task.id) || runningTask;
+    // `|| runningTask` 原本只接得住「檔不見了」；檔還在但壞掉時 readTask 是拋的，
+    // 整條失敗判定（含 retry 與 failed 收據）會被那一拋整段跳過。
+    const currentTask = readTaskSafely(task.id, 'claude worker close') || runningTask;
 
     let failureReason = null;
     if (spawnError) {
@@ -1057,7 +1078,7 @@ function spawnClaudeWorker(task, attempt = 1) {
       );
       updateTaskStatus(currentTask, 'running', { retry_count: attempt, last_error: failureReason });
       setTimeout(() => {
-        spawnClaudeWorker(readTask(task.id) || currentTask, attempt + 1);
+        spawnClaudeWorker(readTaskSafely(task.id, 'retry respawn') || currentTask, attempt + 1);
       }, RETRY_BACKOFF_MS);
       return;
     }
@@ -1436,6 +1457,7 @@ module.exports = {
   // safeWriteTaskFile 是實際的落檔口（好驗「拒絕時目標檔不被動到」）。
   taskSchemaViolation,
   safeWriteTaskFile,
+  readTaskSafely,
   appendProgressText,
   listTasks,
   installProcessGuards,

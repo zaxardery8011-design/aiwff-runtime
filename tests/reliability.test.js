@@ -451,6 +451,32 @@ test('save-time schema gate: named cause per violation, and a valid task still l
   assert.equal(JSON.parse(fs.readFileSync(target, 'utf8')).status, 'pending');
 });
 
+// worker 回呼讀壞掉的 task 檔不得整趟爆掉：爆掉的話失敗收據會跟著消失。
+test('failure receipt: a corrupt task file degrades to a named cause instead of throwing out of the callback', () => {
+  resetDataDir();
+  fs.mkdirSync(TASKS_DIR, { recursive: true });
+  const taskId = '99999999-8888-7777-6666-555555555555';
+
+  // 檔不存在：本來就回 null，不是這題的重點，但要確認沒有改壞。
+  assert.equal(agentModule.readTaskSafely(taskId, 'unit'), null);
+
+  // 檔在但截斷（worker 寫到一半被砍就長這樣）——舊寫法 readTask 會拋，
+  // 回呼裡一拋就跳過後面所有落收據的動作。
+  fs.writeFileSync(path.join(TASKS_DIR, `${taskId}.json`), '{"id":"99999999-8888');
+  let value;
+  assert.doesNotThrow(() => {
+    value = agentModule.readTaskSafely(taskId, 'unit');
+  });
+  assert.equal(value, null);
+
+  // 好檔照樣讀得回來。
+  fs.writeFileSync(
+    path.join(TASKS_DIR, `${taskId}.json`),
+    JSON.stringify({ id: taskId, status: 'running' }),
+  );
+  assert.equal(agentModule.readTaskSafely(taskId, 'unit').status, 'running');
+});
+
 // --- (2) 任務失敗基本 retry ---
 test('task retry: real worker recovers on a later attempt and records retry_count', async () => {
   resetDataDir();
