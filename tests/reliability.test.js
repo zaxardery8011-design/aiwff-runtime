@@ -1023,16 +1023,43 @@ test('ip redline guard: an empty predicate list is refused at startup, not scann
   assert.match(emptyAllow.warnings[0], /declared=0 usable=0/);
 
   // 宣告了兩條卻全被 fail closed 掉，是最該被吼出來的那一種空：declared 與 usable 對不上。
+  // 每一條被拒都要單獨落帳（被拒原文＋具名理由），最後才是「一條都不剩」那句總結。
   const allBad = scanModule.checkListPredicates(scanModule.REDLINE_PATTERNS, [
     { file: '', regex: /token: gh/ },
     { file: null, regex: /.*/ },
   ]);
   assert.equal(allBad.usable_allow, 0);
-  assert.equal(allBad.warnings.length, 1);
-  assert.match(allBad.warnings[0], /declared=2 usable=0/);
+  assert.equal(allBad.rejected_allow.length, 2, JSON.stringify(allBad.rejected_allow));
+  assert.equal(allBad.rejected_allow[0].reason, 'file is an empty string (not a wildcard)');
+  assert.match(allBad.rejected_allow[0].definition, /regex=\/token: gh\//);
+  assert.equal(allBad.rejected_allow[1].reason, 'regex matches the empty string (match-all)');
+  assert.equal(allBad.warnings.length, 3, JSON.stringify(allBad.warnings));
+  assert.match(allBad.warnings[0], /^WARN .*entry #0 refused \(file is an empty string/);
+  assert.match(allBad.warnings[2], /declared=2 usable=0/);
 
-  // 有一條可用就不該再警告，否則警告本身沒有鑑別力。
-  assert.deepEqual(scanModule.checkListPredicates(scanModule.REDLINE_PATTERNS, [GOOD, { file: '' }]).warnings, []);
+  // 部分被拒才是最容易靜默的那一種：usable_allow 仍 >0，總結那句不會響，
+  // 所以被拒的那一條必須自己有一行帳，否則攔截率沒有分母。
+  const partial = scanModule.checkListPredicates(scanModule.REDLINE_PATTERNS, [GOOD, { file: '' }]);
+  assert.equal(partial.usable_allow, 1);
+  assert.equal(partial.rejected_allow.length, 1);
+  assert.equal(partial.rejected_allow[0].index, 1);
+  assert.equal(partial.warnings.length, 1, JSON.stringify(partial.warnings));
+  assert.match(partial.warnings[0], /entry #1 refused/);
+  // 沒有任何一條被拒時，警告要真的是空的，否則警告本身沒有鑑別力。
+  assert.deepEqual(scanModule.checkListPredicates(scanModule.REDLINE_PATTERNS, [GOOD]).warnings, []);
+
+  // 被拒對象的原文要逐字落帳，摘要掉就對不回是哪一條。
+  assert.equal(
+    scanModule.describeAllowEntry({ file: 'docs/x.md', regex: /abc/i, reason: 'documented sample' }),
+    'file="docs/x.md" regex=/abc/i reason="documented sample"',
+  );
+  assert.equal(scanModule.allowEntryRejectReason(GOOD), null);
+  assert.equal(scanModule.allowEntryRejectReason(null), 'entry is not an object');
+  assert.equal(scanModule.allowEntryRejectReason({ file: null }), 'regex is not a RegExp');
+  assert.equal(
+    scanModule.allowEntryRejectReason({ file: 7, regex: /abc/ }),
+    'file is neither null nor a string',
+  );
 });
 
 // --- (6) 落地類命令的 exit 0 必須綁「實際寫了什麼」的回讀 ---

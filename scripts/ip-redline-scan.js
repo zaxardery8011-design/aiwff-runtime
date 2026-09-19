@@ -149,20 +149,43 @@ function toRepoPath(filePath, rootDir = ROOT_DIR) {
 
 // 白名單條目是「豁免 redline」的權力，所以判準要 fail closed：寫壞的條目一律不匹配，
 // 不得因為欄位是空值而退化成 match-all，把整支偵測器靜默變成放行全部。
-function isUsableAllowEntry(entry) {
-  if (!entry || !(entry.regex instanceof RegExp)) {
-    return false;
+// 回傳 null＝這條可用；回傳字串＝具名的拒絕理由。
+function allowEntryRejectReason(entry) {
+  if (!entry) {
+    return 'entry is not an object';
+  }
+  if (!(entry.regex instanceof RegExp)) {
+    return 'regex is not a RegExp';
   }
   // 空 pattern（//、new RegExp('')）與 /.*/ 這類能匹配空字串的式子，對每一行都成立＝match-all。
   if (entry.regex.test('')) {
-    return false;
+    return 'regex matches the empty string (match-all)';
   }
   // file 只有兩種合法值：null/undefined＝明示涵蓋全部檔案；非空字串＝限定該檔。
   // 空字串或空白字串是「scope 欄位沒填好」，不是 wildcard。
   if (entry.file === null || entry.file === undefined) {
-    return true;
+    return null;
   }
-  return typeof entry.file === 'string' && entry.file.trim() !== '';
+  if (typeof entry.file !== 'string') {
+    return 'file is neither null nor a string';
+  }
+  return entry.file.trim() === '' ? 'file is an empty string (not a wildcard)' : null;
+}
+
+// 被 fail closed 掉的條目要能對回「是哪一條」，不然只知道少了幾條、不知道少了誰。
+// 原文逐字落帳（regex source 與 file scope），不做摘要。
+function describeAllowEntry(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return String(entry);
+  }
+  const file = entry.file === null || entry.file === undefined ? '*' : JSON.stringify(entry.file);
+  const regex = entry.regex instanceof RegExp ? String(entry.regex) : JSON.stringify(entry.regex);
+  const reason = entry.reason ? ` reason=${JSON.stringify(entry.reason)}` : '';
+  return `file=${file} regex=${regex}${reason}`;
+}
+
+function isUsableAllowEntry(entry) {
+  return allowEntryRejectReason(entry) === null;
 }
 
 // 偵測清單的條目只要「認得出是誰」＋「是個真的 RegExp」就算可用。這裡刻意不把 match-all
@@ -184,8 +207,22 @@ function checkListPredicates(patterns = REDLINE_PATTERNS, allowlist = ALLOWLIST)
   const patternList = Array.isArray(patterns) ? patterns : [];
   const allowEntries = Array.isArray(allowlist) ? allowlist : [];
   const usablePatterns = patternList.filter(isUsablePattern).length;
-  const usableAllow = allowEntries.filter(isUsableAllowEntry).length;
-  const warnings = [];
+  // 「幾條被 fail closed 掉」只有計數時，部分被拒是完全靜默的（2 條掉 1 條仍 usable>0）。
+  // 把每一條被拒的原文＋具名理由落帳，攔截才有分母可對。
+  const rejectedAllow = [];
+  let usableAllow = 0;
+  allowEntries.forEach((entry, index) => {
+    const reason = allowEntryRejectReason(entry);
+    if (reason === null) {
+      usableAllow += 1;
+      return;
+    }
+    rejectedAllow.push({ index, reason, definition: describeAllowEntry(entry) });
+  });
+  const warnings = rejectedAllow.map(
+    (rejected) =>
+      `WARN IP redline scan allowlist entry #${rejected.index} refused (${rejected.reason}): ${rejected.definition}`,
+  );
   if (usableAllow === 0) {
     warnings.push(
       `WARN IP redline scan allowlist has no usable entry (declared=${allowEntries.length} usable=0) — nothing will be exempted`,
@@ -197,6 +234,7 @@ function checkListPredicates(patterns = REDLINE_PATTERNS, allowlist = ALLOWLIST)
     usable_patterns: usablePatterns,
     declared_allow: allowEntries.length,
     usable_allow: usableAllow,
+    rejected_allow: rejectedAllow,
     warnings,
   };
 }
@@ -545,6 +583,7 @@ function decideExit(result, rootDir = ROOT_DIR) {
     `files_checked=${result.files_checked} lines_checked=${result.lines_checked} ` +
     `binary_skipped=${result.binary_skipped} read_errors=${readErrors.length} ` +
     `usable_patterns=${listCheck.usable_patterns}/${listCheck.declared_patterns} ` +
+    `usable_allow=${listCheck.usable_allow}/${listCheck.declared_allow} ` +
     `skipped_dirs=${skippedDirs.length} scan_domain=${result.scan_domain || 'unknown'} ` +
     `metadata_domain=${metaDomain} metadata_commits=${(metadata && metadata.commits_checked) || 0} ` +
     `metadata_refs=${(metadata && metadata.refs_checked) || 0} metadata_hits=${metaFindings.length}`;
@@ -664,6 +703,8 @@ module.exports = {
   refuseRootVerdict,
   isAllowed,
   isUsableAllowEntry,
+  allowEntryRejectReason,
+  describeAllowEntry,
   isUsablePattern,
   checkListPredicates,
   ALLOWLIST,
