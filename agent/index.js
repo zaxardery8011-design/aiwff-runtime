@@ -1019,6 +1019,7 @@ function spawnClaudeWorker(task, attempt = 1) {
   const child = spawnClaudeProcess(claudeCmd, args);
   let spawnError = null;
   let stderr = '';
+  let stdout = '';
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -1030,6 +1031,11 @@ function spawnClaudeWorker(task, attempt = 1) {
   }, timeoutMs);
 
   pipeStdoutProgress(task.id, child.stdout);
+  // headless 棒「內部錯誤後無輸出地掛住」時，stdout/stderr 兩邊都是空的；
+  // 不留 stdout 就無法把「全程沒講過話」跟「講了話但沒寫產物」分成兩個具名 cause。
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (chunk) => {
     stderr += chunk;
@@ -1058,10 +1064,14 @@ function spawnClaudeWorker(task, attempt = 1) {
       failureReason = spawnError.message;
     } else if (code !== 0) {
       const exitReason = code === null ? `signal ${signal || 'unknown'}` : `code ${code}`;
-      const tail = stderr.trim().slice(-1000);
-      failureReason = `Claude exited with ${exitReason}${tail ? `: ${tail}` : ''}`;
+      // stderr 空的時候，光一句 `exited with code 1` 不算具名；先退 stdout 尾巴，
+      // 兩邊都空就明講「兩條管道都沒輸出」，別讓帳上只剩一個數字。
+      const tail = stderr.trim().slice(-1000) || stdout.trim().slice(-1000);
+      failureReason = `Claude exited with ${exitReason}: ${tail || 'no stderr or stdout output'}`;
     } else if (!fs.existsSync(artifactResultPath(task.id))) {
-      failureReason = 'no artifact produced';
+      failureReason = stdout.trim()
+        ? 'no artifact produced'
+        : 'headless worker exited 0 with no output and no artifact (silent internal error)';
     }
 
     if (!failureReason) {

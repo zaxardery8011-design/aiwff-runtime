@@ -202,6 +202,22 @@ process.stdin.on('end', () => {
 });
 `;
 
+// 內部錯誤後「無輸出地退出」：stdout/stderr 全空、exit 0、沒有產物。
+const SILENT_CLAUDE = `
+process.stdin.resume();
+process.stdin.on('end', () => {
+  process.exit(0);
+});
+`;
+
+// 非零退出但 stderr 全空：帳上不能只剩一個 exit code。
+const SILENT_FAILURE_CLAUDE = `
+process.stdin.resume();
+process.stdin.on('end', () => {
+  process.exit(3);
+});
+`;
+
 test('real worker receives special-character and long zh-TW task text through stdin', async () => {
   resetDataDir();
   const claudeCmd = writeFakeClaude('capture-claude', CAPTURE_CLAUDE);
@@ -271,6 +287,54 @@ test('real worker success without artifact fails clearly', async () => {
     });
     const task = await waitForTaskStatus(runtime.port, created.id, ['failed']);
     assert.equal(task.error, 'no artifact produced');
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+test('silent headless worker gets a named cause, not a bare missing artifact', async () => {
+  resetDataDir();
+  const claudeCmd = writeFakeClaude('silent-claude', SILENT_CLAUDE);
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    ENABLE_REAL_CLAUDE_WORKER: '1',
+    CLAUDE_CMD: claudeCmd,
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'silent worker',
+      instruction: 'exit zero without printing anything',
+      timeout_sec: 10,
+    });
+    const task = await waitForTaskStatus(runtime.port, created.id, ['failed']);
+    assert.equal(
+      task.error,
+      'headless worker exited 0 with no output and no artifact (silent internal error)',
+    );
+    assert.notEqual(task.error, 'no artifact produced');
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+test('non-zero exit without stderr still records a named cause', async () => {
+  resetDataDir();
+  const claudeCmd = writeFakeClaude('silent-failure-claude', SILENT_FAILURE_CLAUDE);
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    ENABLE_REAL_CLAUDE_WORKER: '1',
+    CLAUDE_CMD: claudeCmd,
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'silent failure worker',
+      instruction: 'exit non-zero without printing anything',
+      timeout_sec: 10,
+    });
+    const task = await waitForTaskStatus(runtime.port, created.id, ['failed']);
+    assert.equal(task.error, 'Claude exited with code 3: no stderr or stdout output');
   } finally {
     await stopDaemon(runtime.daemon);
   }
