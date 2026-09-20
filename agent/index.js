@@ -302,6 +302,33 @@ function listTasks() {
     .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
 }
 
+// 篩選查詢回 0 筆時，光一個空陣列分不出三件事：庫裡本來就沒東西／有東西但這個
+// status 剛好沒人／status 根本拼錯所以這個查詢永遠不可能命中。三種的下一步動作
+// 完全不同（去建任務／去等／去改查詢），回裸 0 等於把判斷成本推給呼叫端。
+function taskStatusVocabulary() {
+  try {
+    const rule = loadTaskSchema().properties.status;
+    return Array.isArray(rule.enum) ? rule.enum : [];
+  } catch (error) {
+    // 契約讀不到就不宣稱知道合法值有哪些，寧可少講一個分支也不要編出一份清單。
+    return [];
+  }
+}
+
+function taskQueryZeroReason(status, totalTasks) {
+  if (totalTasks === 0) {
+    return { code: 'no_tasks_at_all', detail: '任務庫沒有任何 task 檔，不是篩選條件的問題' };
+  }
+  const vocabulary = taskStatusVocabulary();
+  if (vocabulary.length && !vocabulary.includes(status)) {
+    return {
+      code: 'unsearchable_status',
+      detail: `status=${status} 不在合法值內，這個查詢永遠不可能命中；合法值：${vocabulary.join(' / ')}`,
+    };
+  }
+  return { code: 'no_match_for_status', detail: `庫內共 ${totalTasks} 筆，沒有 status=${status} 的` };
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -1389,8 +1416,13 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && url.pathname === '/api/tasks') {
     const status = url.searchParams.get('status');
-    const tasks = status ? listTasks().filter((task) => task.status === status) : listTasks();
-    sendJson(res, 200, { ok: true, tasks });
+    const allTasks = listTasks();
+    const tasks = status ? allTasks.filter((task) => task.status === status) : allTasks;
+    const payload = { ok: true, tasks };
+    if (tasks.length === 0) {
+      payload.zero_reason = taskQueryZeroReason(status, allTasks.length);
+    }
+    sendJson(res, 200, payload);
     return;
   }
 
@@ -1512,6 +1544,8 @@ module.exports = {
   readTaskSafely,
   appendProgressText,
   listTasks,
+  // 0 筆的具名理由是純函式，開出入口才驗得到「三種 0 分得開」。
+  taskQueryZeroReason,
   installProcessGuards,
   startTelegramPolling,
   tgRequest,
