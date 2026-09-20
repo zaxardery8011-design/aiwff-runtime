@@ -44,6 +44,14 @@
     "blocked_reason": {
       "type": "string"
     },
+    "timeout_phase": {
+      "type": "string",
+      "enum": ["spawn", "prompt_sent", "streaming", "detached_no_stdio", "unknown"]
+    },
+    "timeout_phase_stuck_sec": {
+      "type": "integer",
+      "minimum": 0
+    },
     "retry_count": {
       "type": "integer",
       "minimum": 0

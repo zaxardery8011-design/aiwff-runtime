@@ -821,14 +821,17 @@ function spawnMockWorker(task) {
   const taskId = task.id;
   const timeoutMs = normalizeWorkerTimeoutSec(task) * 1000;
   let timedOut = false;
+  const phaseTracker = createWorkerPhaseTracker('spawn');
   const child = spawn('node', ['examples/mock-worker/worker.js', taskId], {
     cwd: ROOT_DIR,
     detached: true,
     stdio: 'ignore',
   });
+  // stdio 是 ignore，沒有輸出可以再細分；只能誠實說「已 detach、之後看不見」。
+  phaseTracker.enter('detached_no_stdio');
   const timer = setTimeout(() => {
     timedOut = true;
-    markTaskBlockedByTimeout(taskId, task);
+    markTaskBlockedByTimeout(taskId, task, phaseTracker);
     child.kill();
   }, timeoutMs);
 
@@ -898,15 +901,48 @@ function normalizeOptionalTimeoutSec(value) {
   return Math.min(parsed, MAX_WORKER_TIMEOUT_SEC);
 }
 
-function markTaskBlockedByTimeout(taskId, fallbackTask) {
+// 逾時只吐一個聚合總時長時，「根本沒起來」「起來了一個位元組都沒回」「講到一半停住」
+// 三種卡法在帳上長得一模一樣，下一棒只能整支重跑一次才知道要修哪段。
+// 追蹤器記住「現在在哪個 phase、在這個 phase 待了多久」，讓逾時收據點得出名字。
+function createWorkerPhaseTracker(initialPhase) {
+  let phase = initialPhase;
+  let since = Date.now();
+  return {
+    enter(nextPhase) {
+      if (phase === nextPhase) {
+        return;
+      }
+      phase = nextPhase;
+      since = Date.now();
+    },
+    snapshot() {
+      return { phase, stuck_sec: Math.round((Date.now() - since) / 1000) };
+    },
+  };
+}
+
+function markTaskBlockedByTimeout(taskId, fallbackTask, phaseTracker) {
   // 這裡是「worker 被砍」那條路：從 setTimeout 進來，一拋就沒人接，
   // 連 blocked_reason=timeout 這張收據都不會產生。讀不動就退回 fallbackTask。
   const currentTask = readTaskSafely(taskId, 'worker timeout kill') || fallbackTask;
   if (!currentTask || currentTask.status === 'done' || currentTask.status === 'blocked') {
     return currentTask;
   }
-  appendProgressText(taskId, `Worker timed out after ${normalizeWorkerTimeoutSec(currentTask)} seconds`);
-  return updateTaskStatus(currentTask, 'blocked', { blocked_reason: 'timeout' });
+  // 沒帶追蹤器的呼叫端寧可標 unknown，也不要讓帳上看起來像是查過了才沒寫。
+  const { phase, stuck_sec: stuckSec } = phaseTracker ? phaseTracker.snapshot() : { phase: 'unknown', stuck_sec: null };
+  const stuckDetail = stuckSec == null ? '' : `, stuck ${stuckSec}s`;
+  appendProgressText(
+    taskId,
+    `Worker timed out after ${normalizeWorkerTimeoutSec(currentTask)} seconds (phase=${phase}${stuckDetail})`,
+  );
+  // blocked_reason 維持 'timeout'（收件匣摘要與既有契約照舊），phase 走新欄位另外具名。
+  // stuck 秒數量不到時整個欄位不寫：task.schema.json 的 integer 欄位不收 null，
+  // 硬塞會讓落檔驗不過、連 blocked 收據都寫不進去。
+  const patch = { blocked_reason: 'timeout', timeout_phase: phase };
+  if (stuckSec != null) {
+    patch.timeout_phase_stuck_sec = stuckSec;
+  }
+  return updateTaskStatus(currentTask, 'blocked', patch);
 }
 
 function pipeStdoutProgress(taskId, stream) {
@@ -1016,6 +1052,7 @@ function spawnClaudeWorker(task, attempt = 1) {
   if (envFlag('CLAUDE_BYPASS_APPROVALS')) {
     args.unshift('--dangerously-skip-permissions');
   }
+  const phaseTracker = createWorkerPhaseTracker('spawn');
   const child = spawnClaudeProcess(claudeCmd, args);
   let spawnError = null;
   let stderr = '';
@@ -1023,7 +1060,7 @@ function spawnClaudeWorker(task, attempt = 1) {
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    const blockedTask = markTaskBlockedByTimeout(task.id, runningTask);
+    const blockedTask = markTaskBlockedByTimeout(task.id, runningTask, phaseTracker);
     if (blockedTask) {
       notifyTelegramTaskDone(blockedTask);
     }
@@ -1034,10 +1071,13 @@ function spawnClaudeWorker(task, attempt = 1) {
   // headless 棒「內部錯誤後無輸出地掛住」時，stdout/stderr 兩邊都是空的；
   // 不留 stdout 就無法把「全程沒講過話」跟「講了話但沒寫產物」分成兩個具名 cause。
   child.stdout.on('data', (chunk) => {
+    // 收到第一個位元組就換 phase：之後再逾時，就是「講過話但停住」而不是「從沒講過話」。
+    phaseTracker.enter('streaming');
     stdout += chunk;
   });
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (chunk) => {
+    phaseTracker.enter('streaming');
     stderr += chunk;
   });
 
@@ -1049,6 +1089,8 @@ function spawnClaudeWorker(task, attempt = 1) {
     stderr += `\nstdin error: ${error.message}`;
   });
   child.stdin.end(fullPrompt);
+  // prompt 已交出去：卡在這裡代表對面收了題目但一個字都還沒回。
+  phaseTracker.enter('prompt_sent');
 
   child.on('close', (code, signal) => {
     clearTimeout(timer);
