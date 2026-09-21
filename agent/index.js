@@ -33,6 +33,11 @@ function envInt(name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {})
   return Math.min(Math.max(parsed, min), max);
 }
 
+// 「卡住不恢復」與「只是慢」要分得開：無進展時間超過這個門檻才判 stalled，
+// 沒超過就只是撞到總預算的 slow。門檻會再被該 task 自己的 timeout_sec 夾住，
+// 否則短預算任務（例如 5 秒）永遠達不到門檻，兩種卡法又會被壓回同一個名字。
+const WORKER_STALL_IDLE_SEC = envInt('WORKER_STALL_IDLE_SEC', 120, { min: 1, max: 3600 });
+
 // 失敗任務基本 retry：預設重試 2 次（共 3 次嘗試），可用環境變數覆蓋。
 const MAX_TASK_RETRIES = envInt('MAX_TASK_RETRIES', 2, { min: 0, max: 10 });
 const RETRY_BACKOFF_MS = envInt('RETRY_BACKOFF_MS', 500, { min: 0, max: 60000 });
@@ -931,21 +936,45 @@ function normalizeOptionalTimeoutSec(value) {
 // 逾時只吐一個聚合總時長時，「根本沒起來」「起來了一個位元組都沒回」「講到一半停住」
 // 三種卡法在帳上長得一模一樣，下一棒只能整支重跑一次才知道要修哪段。
 // 追蹤器記住「現在在哪個 phase、在這個 phase 待了多久」，讓逾時收據點得出名字。
+// stuck_sec 是「進這個 phase 多久了」，一路穩定吐字的 worker 也會一直長大；
+// 要分「卡住不恢復」和「只是慢」得另外記最後一次有進展的時刻（idle_sec）。
 function createWorkerPhaseTracker(initialPhase) {
   let phase = initialPhase;
   let since = Date.now();
+  let lastProgressAt = since;
   return {
     enter(nextPhase) {
+      // 每次呼叫都算一次進展（stdout/stderr 每個 chunk 都會打進來），
+      // 相同 phase 時只更新 lastProgressAt，since 留給「這個 phase 待多久」。
+      lastProgressAt = Date.now();
       if (phase === nextPhase) {
         return;
       }
       phase = nextPhase;
-      since = Date.now();
+      since = lastProgressAt;
     },
     snapshot() {
-      return { phase, stuck_sec: Math.round((Date.now() - since) / 1000) };
+      const now = Date.now();
+      return {
+        phase,
+        stuck_sec: Math.round((now - since) / 1000),
+        idle_sec: Math.round((now - lastProgressAt) / 1000),
+      };
     },
   };
+}
+
+// 逾時的兩種具名判定（第三種是誠實的「看不到」）：
+//   stalled — 無進展時間超標，是真的卡住不恢復
+//   slow    — 一直有進展，只是總時長撞到預算
+//   unknown — 這條路沒有進展管道（stdio ignore / 沒帶追蹤器），觀測不到就不准硬判
+// 沒有 idle 訊號時判 stalled 等於拿「我沒看」當「它卡住」，那是偽造而不是判定。
+function classifyTimeout(phase, idleSec, timeoutSec) {
+  if (phase === 'unknown' || phase === 'detached_no_stdio' || !Number.isFinite(idleSec)) {
+    return 'unknown';
+  }
+  const threshold = Math.min(WORKER_STALL_IDLE_SEC, timeoutSec);
+  return idleSec >= threshold ? 'stalled' : 'slow';
 }
 
 function markTaskBlockedByTimeout(taskId, fallbackTask, phaseTracker) {
@@ -956,18 +985,26 @@ function markTaskBlockedByTimeout(taskId, fallbackTask, phaseTracker) {
     return currentTask;
   }
   // 沒帶追蹤器的呼叫端寧可標 unknown，也不要讓帳上看起來像是查過了才沒寫。
-  const { phase, stuck_sec: stuckSec } = phaseTracker ? phaseTracker.snapshot() : { phase: 'unknown', stuck_sec: null };
+  const { phase, stuck_sec: stuckSec, idle_sec: idleSec } = phaseTracker
+    ? phaseTracker.snapshot()
+    : { phase: 'unknown', stuck_sec: null, idle_sec: null };
+  const timeoutSec = normalizeWorkerTimeoutSec(currentTask);
+  const kind = classifyTimeout(phase, idleSec, timeoutSec);
   const stuckDetail = stuckSec == null ? '' : `, stuck ${stuckSec}s`;
+  const idleDetail = kind === 'unknown' ? '' : `, idle ${idleSec}s`;
   appendProgressText(
     taskId,
-    `Worker timed out after ${normalizeWorkerTimeoutSec(currentTask)} seconds (phase=${phase}${stuckDetail})`,
+    `Worker timed out after ${timeoutSec} seconds (kind=${kind}, phase=${phase}${stuckDetail}${idleDetail})`,
   );
-  // blocked_reason 維持 'timeout'（收件匣摘要與既有契約照舊），phase 走新欄位另外具名。
+  // blocked_reason 維持 'timeout'（收件匣摘要與既有契約照舊），phase / kind 走新欄位另外具名。
   // stuck 秒數量不到時整個欄位不寫：task.schema.json 的 integer 欄位不收 null，
-  // 硬塞會讓落檔驗不過、連 blocked 收據都寫不進去。
-  const patch = { blocked_reason: 'timeout', timeout_phase: phase };
+  // 硬塞會讓落檔驗不過、連 blocked 收據都寫不進去。idle 秒同理。
+  const patch = { blocked_reason: 'timeout', timeout_phase: phase, timeout_kind: kind };
   if (stuckSec != null) {
     patch.timeout_phase_stuck_sec = stuckSec;
+  }
+  if (kind !== 'unknown') {
+    patch.timeout_idle_sec = idleSec;
   }
   return updateTaskStatus(currentTask, 'blocked', patch);
 }
@@ -1550,6 +1587,11 @@ module.exports = {
   startTelegramPolling,
   tgRequest,
   envInt,
+  // 「卡住不恢復 vs 只是慢」這一包：追蹤器負責量 idle，classifyTimeout 是純函式判定。
+  // 兩個都開出入口，才驗得到「一路吐字的 worker 不會被判 stalled」。
+  createWorkerPhaseTracker,
+  classifyTimeout,
+  WORKER_STALL_IDLE_SEC,
   // 截斷揭露 + 進度時間戳這一包：collect* 是「未截斷的全量」，list* 是「切過上限的畫面用量」，
   // 兩者要分得開才講得出 dropped。這些函式在既有 tests 裡一條都沒有覆蓋，先開出入口。
   truncationInfo,

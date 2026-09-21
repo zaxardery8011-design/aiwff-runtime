@@ -52,6 +52,14 @@
       "type": "integer",
       "minimum": 0
     },
+    "timeout_kind": {
+      "type": "string",
+      "enum": ["stalled", "slow", "unknown"]
+    },
+    "timeout_idle_sec": {
+      "type": "integer",
+      "minimum": 0
+    },
     "retry_count": {
       "type": "integer",
       "minimum": 0

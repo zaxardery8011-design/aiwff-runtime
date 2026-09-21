@@ -1788,3 +1788,71 @@ test('ip redline guard: an unreachable git metadata domain is warned, never sile
   }
 });
 
+// --- (12) 「卡住不恢復」與「只是慢」要是兩個具名判定，不是同一個 timeout ---
+test('timeout kind: 一路吐字撞到總預算判 slow，無進展超標才判 stalled', () => {
+  const { classifyTimeout, WORKER_STALL_IDLE_SEC } = agentModule;
+  const budget = 600;
+  assert.ok(WORKER_STALL_IDLE_SEC < budget, `門檻要小於預算才分得開: ${WORKER_STALL_IDLE_SEC}`);
+
+  // 這一條就是缺陷本身：worker 從頭到尾穩定吐字、只是做不完，
+  // 舊寫法只有一個 timeout（stuck_sec 還會一路長大）看起來跟真卡住一模一樣。
+  assert.equal(classifyTimeout('streaming', 1, budget), 'slow');
+  assert.equal(classifyTimeout('streaming', WORKER_STALL_IDLE_SEC - 1, budget), 'slow');
+  // 無進展時間「超標」才判 stuck，門檻上是閉區間。
+  assert.equal(classifyTimeout('streaming', WORKER_STALL_IDLE_SEC, budget), 'stalled');
+  assert.equal(classifyTimeout('streaming', budget, budget), 'stalled');
+});
+
+test('timeout kind: 門檻被該 task 的預算夾住，短預算任務不會全部退化成 slow', () => {
+  const { classifyTimeout, WORKER_STALL_IDLE_SEC } = agentModule;
+  const shortBudget = 5;
+  assert.ok(shortBudget < WORKER_STALL_IDLE_SEC);
+  // 不夾住的話 idle 永遠達不到 120s，短預算任務的兩種卡法又會被壓回同一個名字。
+  assert.equal(classifyTimeout('streaming', shortBudget, shortBudget), 'stalled');
+  assert.equal(classifyTimeout('streaming', shortBudget - 3, shortBudget), 'slow');
+});
+
+test('timeout kind: 沒有進展管道就回 unknown，不准拿「我沒看」當「它卡住」', () => {
+  const { classifyTimeout } = agentModule;
+  // mock worker 是 stdio ignore，detach 後一個位元組都看不到；沒帶追蹤器的呼叫端同理。
+  assert.equal(classifyTimeout('detached_no_stdio', 999, 600), 'unknown');
+  assert.equal(classifyTimeout('unknown', 999, 600), 'unknown');
+  // idle 量不到時（null）也不得猜，回 unknown。
+  assert.equal(classifyTimeout('streaming', null, 600), 'unknown');
+  assert.equal(classifyTimeout('streaming', undefined, 600), 'unknown');
+});
+
+test('phase tracker: idle_sec 跟著每個 chunk 歸零，stuck_sec 只認 phase 轉換', async () => {
+  const tracker = agentModule.createWorkerPhaseTracker('spawn');
+  tracker.enter('streaming');
+  await sleep(1100);
+  // 同 phase 再進來 = 又吐了一個 chunk：idle 歸零，但「進 streaming 多久了」不該被洗掉。
+  tracker.enter('streaming');
+  const snap = tracker.snapshot();
+  assert.equal(snap.phase, 'streaming');
+  assert.ok(snap.stuck_sec >= 1, `stuck_sec 應累積到 >=1: ${JSON.stringify(snap)}`);
+  assert.equal(snap.idle_sec, 0, `idle_sec 應被最後一次進展歸零: ${JSON.stringify(snap)}`);
+  // 兩個數字分得開，才有辦法判成 slow 而不是 stalled。
+  assert.equal(agentModule.classifyTimeout(snap.phase, snap.idle_sec, 600), 'slow');
+});
+
+test('timeout kind: blocked 收據把 kind 寫進 task，schema 收得下這個欄位', () => {
+  const { taskSchemaViolation } = agentModule;
+  const base = {
+    id: '11111111-2222-4333-8444-555555555555',
+    title: 'timeout kind fixture',
+    instruction: 'x',
+    status: 'blocked',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    blocked_reason: 'timeout',
+    timeout_phase: 'streaming',
+    timeout_phase_stuck_sec: 600,
+  };
+  // 欄位沒進 schema 的話 additionalProperties:false 會讓整張 blocked 收據落不了檔。
+  assert.equal(taskSchemaViolation({ ...base, timeout_kind: 'stalled', timeout_idle_sec: 600 }), null);
+  assert.equal(taskSchemaViolation({ ...base, timeout_kind: 'slow', timeout_idle_sec: 1 }), null);
+  assert.equal(taskSchemaViolation({ ...base, timeout_kind: 'unknown' }), null);
+  assert.ok(taskSchemaViolation({ ...base, timeout_kind: 'probably_stuck' }));
+});
+
