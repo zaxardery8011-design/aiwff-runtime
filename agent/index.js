@@ -938,30 +938,61 @@ function normalizeOptionalTimeoutSec(value) {
 // 追蹤器記住「現在在哪個 phase、在這個 phase 待了多久」，讓逾時收據點得出名字。
 // stuck_sec 是「進這個 phase 多久了」，一路穩定吐字的 worker 也會一直長大；
 // 要分「卡住不恢復」和「只是慢」得另外記最後一次有進展的時刻（idle_sec）。
+//
+// 但只記「當下這個 phase」時，它之前那幾段在帳上等於不存在：收據寫
+// phase=streaming stuck=540s、預算 600s，中間那 60s 花在 spawn 還是 prompt_sent
+// 讀不出來——時間軸有洞，而洞的大小剛好是「還沒被點名的那幾段」。
+// 改成記 span：每次換 phase 就把上一段收起來，讓 tracker 起點到 now 這條線
+// 被連續切完，沒有任何一秒沒有歸屬（相鄰兩段共用同一個時間點）。
 function createWorkerPhaseTracker(initialPhase) {
-  let phase = initialPhase;
-  let since = Date.now();
-  let lastProgressAt = since;
+  const startedAt = Date.now();
+  // phases[i] 是第 i 段的名字，boundaries[i] 是它的起點；第 i 段的終點就是
+  // boundaries[i+1]（最後一段的終點是 snapshot 當下的 now）。邊界只存一份，
+  // 「上一段結束 === 下一段開始」就不是靠事後對帳維持的，而是資料結構本身。
+  const phases = [initialPhase];
+  const boundaries = [startedAt];
+  let lastProgressAt = startedAt;
   return {
     enter(nextPhase) {
       // 每次呼叫都算一次進展（stdout/stderr 每個 chunk 都會打進來），
-      // 相同 phase 時只更新 lastProgressAt，since 留給「這個 phase 待多久」。
+      // 相同 phase 時只更新 lastProgressAt，邊界留給「這個 phase 待多久」。
       lastProgressAt = Date.now();
-      if (phase === nextPhase) {
+      if (phases[phases.length - 1] === nextPhase) {
         return;
       }
-      phase = nextPhase;
-      since = lastProgressAt;
+      phases.push(nextPhase);
+      boundaries.push(lastProgressAt);
     },
     snapshot() {
       const now = Date.now();
+      const since = boundaries[boundaries.length - 1];
+      // 每個邊界只換算一次秒數再由前後兩段共用：各自 round 的話，同一個時間點
+      // 會被算出兩個值，湊出 1 秒的假空隙或假重疊——無 gap 就又變成近似的。
+      const edgeSec = [...boundaries, now].map((ms) => Math.round((ms - startedAt) / 1000));
       return {
-        phase,
+        phase: phases[phases.length - 1],
         stuck_sec: Math.round((now - since) / 1000),
         idle_sec: Math.round((now - lastProgressAt) / 1000),
+        // 相對 tracker 起點的秒數；span[i].end_sec === span[i+1].start_sec。
+        phase_spans: phases.map((name, i) => ({
+          phase: name,
+          start_sec: edgeSec[i],
+          end_sec: edgeSec[i + 1],
+        })),
       };
     },
   };
+}
+
+// 收據上的時間軸：`spawn 0-3s > prompt_sent 3-5s > streaming 5-600s`。
+// 落檔只留這個字串而不是 span 陣列——task.schema.json 的驗證器（見上面
+// taskSchemaViolation）只實作 string / integer 的 type 檢查，塞一個 array 欄位進去
+// 會是「schema 宣告了、驗證器不管」的空頭契約，反而多開一個沒人擋的落檔面。
+function formatPhaseSpans(spans) {
+  if (!Array.isArray(spans) || spans.length === 0) {
+    return null;
+  }
+  return spans.map((span) => `${span.phase} ${span.start_sec}-${span.end_sec}s`).join(' > ');
 }
 
 // 逾時的兩種具名判定（第三種是誠實的「看不到」）：
@@ -985,16 +1016,18 @@ function markTaskBlockedByTimeout(taskId, fallbackTask, phaseTracker) {
     return currentTask;
   }
   // 沒帶追蹤器的呼叫端寧可標 unknown，也不要讓帳上看起來像是查過了才沒寫。
-  const { phase, stuck_sec: stuckSec, idle_sec: idleSec } = phaseTracker
+  const { phase, stuck_sec: stuckSec, idle_sec: idleSec, phase_spans: phaseSpans } = phaseTracker
     ? phaseTracker.snapshot()
-    : { phase: 'unknown', stuck_sec: null, idle_sec: null };
+    : { phase: 'unknown', stuck_sec: null, idle_sec: null, phase_spans: null };
   const timeoutSec = normalizeWorkerTimeoutSec(currentTask);
   const kind = classifyTimeout(phase, idleSec, timeoutSec);
   const stuckDetail = stuckSec == null ? '' : `, stuck ${stuckSec}s`;
   const idleDetail = kind === 'unknown' ? '' : `, idle ${idleSec}s`;
+  const timeline = formatPhaseSpans(phaseSpans);
+  const timelineDetail = timeline ? `, timeline ${timeline}` : '';
   appendProgressText(
     taskId,
-    `Worker timed out after ${timeoutSec} seconds (kind=${kind}, phase=${phase}${stuckDetail}${idleDetail})`,
+    `Worker timed out after ${timeoutSec} seconds (kind=${kind}, phase=${phase}${stuckDetail}${idleDetail}${timelineDetail})`,
   );
   // blocked_reason 維持 'timeout'（收件匣摘要與既有契約照舊），phase / kind 走新欄位另外具名。
   // stuck 秒數量不到時整個欄位不寫：task.schema.json 的 integer 欄位不收 null，
@@ -1002,6 +1035,11 @@ function markTaskBlockedByTimeout(taskId, fallbackTask, phaseTracker) {
   const patch = { blocked_reason: 'timeout', timeout_phase: phase, timeout_kind: kind };
   if (stuckSec != null) {
     patch.timeout_phase_stuck_sec = stuckSec;
+  }
+  // 沒帶追蹤器的呼叫端量不到 span，整個欄位不寫——空字串會讓「沒量到」
+  // 看起來像「量到了一條空的時間軸」。
+  if (timeline) {
+    patch.timeout_phase_timeline = timeline;
   }
   if (kind !== 'unknown') {
     patch.timeout_idle_sec = idleSec;
@@ -1591,6 +1629,8 @@ module.exports = {
   // 兩個都開出入口，才驗得到「一路吐字的 worker 不會被判 stalled」。
   createWorkerPhaseTracker,
   classifyTimeout,
+  // 收據上那條無 gap 的時間軸怎麼被算出來的，要驗得到。
+  formatPhaseSpans,
   WORKER_STALL_IDLE_SEC,
   // 截斷揭露 + 進度時間戳這一包：collect* 是「未截斷的全量」，list* 是「切過上限的畫面用量」，
   // 兩者要分得開才講得出 dropped。這些函式在既有 tests 裡一條都沒有覆蓋，先開出入口。

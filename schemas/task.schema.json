@@ -52,6 +52,10 @@
       "type": "integer",
       "minimum": 0
     },
+    "timeout_phase_timeline": {
+      "type": "string",
+      "minLength": 1
+    },
     "timeout_kind": {
       "type": "string",
       "enum": ["stalled", "slow", "unknown"]

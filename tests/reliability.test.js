@@ -1836,6 +1836,91 @@ test('phase tracker: idle_sec 跟著每個 chunk 歸零，stuck_sec 只認 phase
   assert.equal(agentModule.classifyTimeout(snap.phase, snap.idle_sec, 600), 'slow');
 });
 
+// --- (13) phase 要記成 span，時間軸不得有洞 ---
+test('phase spans: 每段接著上一段開始，spawn 到 now 這條線沒有任何一秒沒歸屬', async () => {
+  const tracker = agentModule.createWorkerPhaseTracker('spawn');
+  await sleep(1100);
+  tracker.enter('prompt_sent');
+  await sleep(1100);
+  tracker.enter('streaming');
+  tracker.enter('streaming'); // 同 phase 再進來是「又吐一個 chunk」，不該多切一段
+  await sleep(1100);
+  const snap = tracker.snapshot();
+  const spans = snap.phase_spans;
+  const dump = JSON.stringify(spans);
+
+  // 這一條就是缺陷本身：舊寫法只留「當下是 streaming、待了 1s」，
+  // 前面那 2s 花在 spawn 還是 prompt_sent 完全讀不出來。
+  assert.deepEqual(spans.map((s) => s.phase), ['spawn', 'prompt_sent', 'streaming'], dump);
+  assert.equal(spans[0].start_sec, 0, dump);
+  for (let i = 1; i < spans.length; i += 1) {
+    // 無 gap 的定義：前一段的終點就是後一段的起點，逐字相等（不是「差不多」）。
+    assert.equal(spans[i].start_sec, spans[i - 1].end_sec, `span ${i} 與前一段之間有洞: ${dump}`);
+  }
+  // 最後一段收在 snapshot 當下，而不是停在最後一次 enter——不然尾巴會缺一塊。
+  assert.ok(spans[spans.length - 1].end_sec >= 3, dump);
+  assert.equal(spans[spans.length - 1].phase, snap.phase, dump);
+  // 各段長度加總 === 全長。這條擋的是另一種湊法：先把每段的毫秒長度各自 round
+  // 再累加當邊界——0.6s+0.6s 會變成 1+1=2，全長卻只有 1，誤差一路往後漂。
+  const covered = spans.reduce((sum, s) => sum + (s.end_sec - s.start_sec), 0);
+  assert.equal(covered, spans[spans.length - 1].end_sec, `覆蓋總長對不上全長: ${dump}`);
+});
+
+test('phase spans: 同一毫秒內連換兩次 phase，零長段仍首尾相接不被吃掉', () => {
+  const tracker = agentModule.createWorkerPhaseTracker('spawn');
+  // 一個位元組都還沒回就連跳兩段：三段都是 0 秒，但三段都得在帳上。
+  tracker.enter('prompt_sent');
+  tracker.enter('streaming');
+  const spans = tracker.snapshot().phase_spans;
+  const dump = JSON.stringify(spans);
+  assert.equal(spans.length, 3, dump);
+  for (let i = 1; i < spans.length; i += 1) {
+    assert.equal(spans[i].start_sec, spans[i - 1].end_sec, dump);
+  }
+  // 零長段被丟掉或邊界倒著長，時間軸就不是那次執行真正走過的路。
+  for (const span of spans) {
+    assert.ok(span.end_sec >= span.start_sec, dump);
+  }
+});
+
+test('phase spans: 收據把時間軸算成一行字串，量不到就整個不寫', () => {
+  const { formatPhaseSpans } = agentModule;
+  assert.equal(
+    formatPhaseSpans([
+      { phase: 'spawn', start_sec: 0, end_sec: 3 },
+      { phase: 'prompt_sent', start_sec: 3, end_sec: 5 },
+      { phase: 'streaming', start_sec: 5, end_sec: 600 },
+    ]),
+    'spawn 0-3s > prompt_sent 3-5s > streaming 5-600s',
+  );
+  // 沒帶追蹤器的呼叫端（mock 那條 stdio ignore 的路）量不到 span：
+  // 回 null 讓收據整個欄位不寫，空字串會讓「沒量到」看起來像「量到一條空的時間軸」。
+  assert.equal(formatPhaseSpans(null), null);
+  assert.equal(formatPhaseSpans([]), null);
+});
+
+test('phase spans: 時間軸欄位進得了 task schema，收據才落得了檔', () => {
+  const { taskSchemaViolation } = agentModule;
+  const base = {
+    id: '11111111-2222-4333-8444-555555555556',
+    title: 'phase spans fixture',
+    instruction: 'x',
+    status: 'blocked',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    blocked_reason: 'timeout',
+    timeout_phase: 'streaming',
+    timeout_kind: 'stalled',
+  };
+  // additionalProperties:false：欄位沒進 schema 的話整張 blocked 收據落不了檔。
+  assert.equal(
+    taskSchemaViolation({ ...base, timeout_phase_timeline: 'spawn 0-3s > streaming 3-600s' }),
+    null,
+  );
+  // 空字串不是合法時間軸——真的量不到時應該連欄位都不要出現。
+  assert.ok(taskSchemaViolation({ ...base, timeout_phase_timeline: '' }));
+});
+
 test('timeout kind: blocked 收據把 kind 寫進 task，schema 收得下這個欄位', () => {
   const { taskSchemaViolation } = agentModule;
   const base = {
