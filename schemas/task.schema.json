@@ -42,7 +42,8 @@
       "maximum": 3600
     },
     "blocked_reason": {
-      "type": "string"
+      "type": "string",
+      "enum": ["timeout"]
     }
   }
 }

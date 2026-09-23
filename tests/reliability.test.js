@@ -474,6 +474,19 @@ test('timeout marks task blocked and writes an inbox event', async () => {
   }
 });
 
+test('blocked_reason 列舉只有程式碼一份正本：寫入點不寫字面、schema enum 對得上', () => {
+  const values = Object.values(agentModule.BLOCKED_REASONS);
+  assert.ok(values.length > 0, 'BLOCKED_REASONS is empty');
+
+  // 寫入點一律引用常數；出現字面就是在第二個地方重抄列舉，改名時會跟正本分岔。
+  const source = fs.readFileSync(path.join(ROOT_DIR, 'agent', 'index.js'), 'utf8');
+  const literalWrites = source.match(/blocked_reason:\s*['"`]/g) || [];
+  assert.deepEqual(literalWrites, [], 'blocked_reason written as a literal instead of BLOCKED_REASONS');
+
+  const schema = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'schemas', 'task.schema.json'), 'utf8'));
+  assert.deepEqual([...schema.properties.blocked_reason.enum].sort(), [...values].sort());
+});
+
 test('real worker success without artifact fails clearly', async () => {
   resetDataDir();
   const claudeCmd = writeFakeClaude('no-artifact-claude', NO_ARTIFACT_CLAUDE);

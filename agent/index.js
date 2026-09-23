@@ -21,6 +21,8 @@ const MAX_WORKER_TIMEOUT_SEC = 3600;
 const MAX_MEMORY_BYTES = 256 * 1024;
 const MAX_LOG_BYTES = 128 * 1024;
 const DEFAULT_CLAUDE_DISALLOWED_TOOLS = 'Bash,PowerShell';
+// blocked_reason 的唯一正本：寫入點只引用這裡，schema 的 enum 由測試對回這份，不在別處重抄字面。
+const BLOCKED_REASONS = Object.freeze({ TIMEOUT: 'timeout' });
 let tgOffset = 0;
 const tgPendingNotify = {};
 
@@ -709,7 +711,7 @@ function markTaskBlockedByTimeout(taskId, fallbackTask) {
     return currentTask;
   }
   appendProgressText(taskId, `Worker timed out after ${normalizeWorkerTimeoutSec(currentTask)} seconds`);
-  return updateTaskStatus(currentTask, 'blocked', { blocked_reason: 'timeout' });
+  return updateTaskStatus(currentTask, 'blocked', { blocked_reason: BLOCKED_REASONS.TIMEOUT });
 }
 
 function pipeStdoutProgress(taskId, stream) {
@@ -1258,6 +1260,7 @@ module.exports = {
   startTelegramPolling,
   tgRequest,
   envInt,
+  BLOCKED_REASONS,
   MAX_TASK_RETRIES,
   RETRY_BACKOFF_MS,
   TG_API_BASE_URL,
