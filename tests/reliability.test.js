@@ -560,6 +560,32 @@ test('crash guardrail: safeWriteJsonFile survives an unwritable path and reports
   assert.equal(result, false);
 });
 
+test('config: blank env value counts as unset and falls back to .env', () => {
+  resetDataDir();
+  const dir = path.join(DATA_DIR, 'dotenv');
+  fs.mkdirSync(dir, { recursive: true });
+  const envPath = path.join(dir, '.env');
+  fs.writeFileSync(envPath, 'AIWFF_TEST_DOTENV_KEY=from-file\n');
+  const key = 'AIWFF_TEST_DOTENV_KEY';
+  try {
+    delete process.env[key];
+    agentModule.loadDotEnv(envPath);
+    const unsetResult = process.env[key];
+
+    for (const blank of ['', '   ']) {
+      process.env[key] = blank;
+      agentModule.loadDotEnv(envPath);
+      assert.equal(process.env[key], unsetResult, `blank ${JSON.stringify(blank)} should behave like unset`);
+    }
+
+    process.env[key] = 'from-shell';
+    agentModule.loadDotEnv(envPath);
+    assert.equal(process.env[key], 'from-shell');
+  } finally {
+    delete process.env[key];
+  }
+});
+
 // --- (2) 任務失敗基本 retry ---
 test('task retry: real worker recovers on a later attempt and records retry_count', async () => {
   resetDataDir();

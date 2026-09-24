@@ -62,8 +62,7 @@ function installProcessGuards() {
   });
 }
 
-function loadDotEnv() {
-  const envPath = path.join(ROOT_DIR, '.env');
+function loadDotEnv(envPath = path.join(ROOT_DIR, '.env')) {
   if (!fs.existsSync(envPath)) {
     return;
   }
@@ -74,7 +73,8 @@ function loadDotEnv() {
       continue;
     }
     const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-    if (!match || process.env[match[1]] != null) {
+    // 空白值＝未設定：shell 裡留一個空的 X= 不該把 .env 的值蓋掉。
+    if (!match || String(process.env[match[1]] ?? '').trim() !== '') {
       continue;
     }
     process.env[match[1]] = match[2].replace(/^['"]|['"]$/g, '');
@@ -1252,6 +1252,7 @@ if (require.main === module) {
 
 // 測試用曝面：僅在被 require 時提供純函式，不改變 daemon 執行行為。
 module.exports = {
+  loadDotEnv,
   safeWriteJsonFile,
   appendProgressText,
   installProcessGuards,
