@@ -555,6 +555,9 @@ function countTasksByStatus(tasks) {
 }
 
 function runtimeWorkerMode() {
+  if (shouldUseOpenAICompatibleWorker()) {
+    return 'openai_compatible';
+  }
   return shouldUseMockWorker() ? 'mock' : 'claude';
 }
 
@@ -931,7 +934,110 @@ function shouldUseMockWorker() {
   return envFlag('MOCK_WORKER') || !envFlag('ENABLE_REAL_CLAUDE_WORKER');
 }
 
+// OpenAI 相容端點插槽（vLLM / ollama / LM Studio 等）：預設關閉，AIWFF_WORKER_PROVIDER=openai_compatible 才啟用。
+// 這條路徑沒有工具，只把任務當一次 chat completion 送出、由 runtime 把回覆寫成 artifact，
+// 適合分類／短摘要／封閉抽取這類純文字任務；要動檔案或跑工具的任務請維持 Claude worker。
+function shouldUseOpenAICompatibleWorker() {
+  return (
+    !envFlag('MOCK_WORKER') &&
+    String(process.env.AIWFF_WORKER_PROVIDER || '').trim().toLowerCase() === 'openai_compatible'
+  );
+}
+
+function openAICompatibleConfig() {
+  return {
+    baseUrl: String(process.env.AIWFF_OPENAI_BASE_URL || '').trim().replace(/\/+$/, ''),
+    model: String(process.env.AIWFF_OPENAI_MODEL || '').trim(),
+    apiKey: String(process.env.AIWFF_OPENAI_API_KEY || '').trim(),
+  };
+}
+
+function buildOpenAICompatibleMessages(task) {
+  const facts = readTextFileIfExists(path.join(MEMORY_DIR, 'facts.md'));
+  const preferences = readTextFileIfExists(path.join(MEMORY_DIR, 'preferences.md'));
+  return [
+    {
+      role: 'system',
+      content: `你是用戶的本地 AI 助理。這條路徑沒有工具可用，請直接輸出任務結果本身。\n\n## 記憶\n${facts}\n${preferences}`.trim(),
+    },
+    { role: 'user', content: `標題: ${task.title}\n指令: ${task.instruction}` },
+  ];
+}
+
+async function requestOpenAICompatibleCompletion(task, timeoutMs) {
+  const config = openAICompatibleConfig();
+  if (!config.baseUrl || !config.model) {
+    throw new Error('AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required when AIWFF_WORKER_PROVIDER=openai_compatible');
+  }
+  const headers = { 'content-type': 'application/json' };
+  if (config.apiKey) {
+    headers.authorization = `Bearer ${config.apiKey}`;
+  }
+  const response = await fetch(`${config.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ model: config.model, messages: buildOpenAICompatibleMessages(task) }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const raw = await response.text();
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${raw.slice(0, 500)}`);
+  }
+  const content = JSON.parse(raw)?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string' || !content.trim()) {
+    throw new Error('empty completion content');
+  }
+  return content;
+}
+
+function runOpenAICompatibleWorker(task, attempt = 1) {
+  ensureDirectories();
+  const runningTask = updateTaskStatus(task, 'running');
+  const { baseUrl, model } = openAICompatibleConfig();
+  appendProgressText(task.id, `OpenAI-compatible request base_url=${baseUrl} model=${model} attempt=${attempt}`);
+
+  requestOpenAICompatibleCompletion(task, normalizeWorkerTimeoutSec(task) * 1000)
+    .then((content) => {
+      fs.writeFileSync(artifactResultPath(task.id), `${content.trim()}\n`);
+      const doneTask = updateTaskStatus(readTask(task.id) || runningTask, 'done', {
+        artifact_path: artifactResultRef(task.id),
+      });
+      notifyTelegramTaskDone(doneTask);
+    })
+    .catch((error) => {
+      const currentTask = readTask(task.id) || runningTask;
+      if (error && error.name === 'TimeoutError') {
+        const blockedTask = markTaskBlockedByTimeout(task.id, currentTask);
+        if (blockedTask) {
+          notifyTelegramTaskDone(blockedTask);
+        }
+        return;
+      }
+      const failureReason = `OpenAI-compatible request failed: ${error && error.message}`;
+      if (attempt <= MAX_TASK_RETRIES) {
+        appendProgressText(
+          task.id,
+          `Worker attempt ${attempt} failed (${failureReason}); retrying (${attempt}/${MAX_TASK_RETRIES}) in ${RETRY_BACKOFF_MS}ms`,
+        );
+        updateTaskStatus(currentTask, 'running', { retry_count: attempt, last_error: failureReason });
+        setTimeout(() => {
+          runOpenAICompatibleWorker(readTask(task.id) || currentTask, attempt + 1);
+        }, RETRY_BACKOFF_MS);
+        return;
+      }
+      const failedTask = updateTaskStatus(currentTask, 'failed', {
+        error: failureReason,
+        retry_count: attempt - 1,
+      });
+      notifyTelegramTaskDone(failedTask);
+    });
+}
+
 function startTaskWorker(task) {
+  if (shouldUseOpenAICompatibleWorker()) {
+    runOpenAICompatibleWorker(task);
+    return;
+  }
   if (shouldUseMockWorker()) {
     spawnMockWorker(task);
     return;

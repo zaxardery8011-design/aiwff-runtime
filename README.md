@@ -293,6 +293,28 @@ CLAUDE_BYPASS_APPROVALS=
 
 `WORK_DIR` appears in the design draft, but it is not present in the current `.env.example` and is not read by the current Phase 2 runtime.
 
+### Optional: OpenAI-compatible endpoint (experimental, off by default)
+
+You can point task execution at any OpenAI-compatible `/chat/completions` endpoint (vLLM, ollama, LM Studio, …). This path has **no tools**: the task title + instruction are sent as one chat completion and the reply is written to `data/artifacts/<id>.result.md` by the runtime. Use it for short classification, closed extraction or short summaries; keep the Claude worker for anything that needs to read or write files. In our tests a 32B local model was fine for short classification but unreliable for counting and long Chinese summaries.
+
+| Variable | Required? | Description |
+|---|---:|---|
+| `AIWFF_WORKER_PROVIDER` | To enable | Set to `openai_compatible`; empty or anything else keeps the existing mock / Claude behavior |
+| `AIWFF_OPENAI_BASE_URL` | Yes, when enabled | Base URL including `/v1`, e.g. `http://127.0.0.1:11434/v1` (ollama) or `http://127.0.0.1:8000/v1` (vLLM) |
+| `AIWFF_OPENAI_MODEL` | Yes, when enabled | Model name the endpoint expects |
+| `AIWFF_OPENAI_API_KEY` | No | Sent as `Authorization: Bearer …` only when set |
+
+`MOCK_WORKER=1` still wins, so clear it when enabling:
+
+```env
+MOCK_WORKER=
+AIWFF_WORKER_PROVIDER=openai_compatible
+AIWFF_OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+AIWFF_OPENAI_MODEL=qwen3:32b
+```
+
+`GET /api/settings` reports `worker_mode: "openai_compatible"` when it is active. Timeout and retry follow the same `timeout_sec` / `MAX_TASK_RETRIES` rules as the Claude worker.
+
 ## Vs Full AIWFF
 
 The rule of this repo: remove multi-node complexity, keep the single-machine agent loop understandable.
