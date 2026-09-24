@@ -299,6 +299,28 @@ CLAUDE_BYPASS_APPROVALS=
 
 `WORK_DIR` 出現在設計草稿裡，但目前 `.env.example` 沒有這個欄位，Phase 2 runtime 也不讀它。
 
+### 選用：OpenAI 相容端點（實驗中，預設關閉）
+
+可以把任務改交給任何 OpenAI 相容的 `/chat/completions` 端點（vLLM、ollama、LM Studio 等）。這條路徑**沒有工具**：任務標題和指令會當成一次對話送出，回覆由 runtime 寫進 `data/artifacts/<id>.result.md`。適合短分類、封閉式抽取、短摘要；要讀寫檔案的任務請繼續用 Claude worker。我們實測 32B 的本地模型做短分類可以，但計數和中文長摘要不可靠。
+
+| 變數 | 必填？ | 說明 |
+|---|---:|---|
+| `AIWFF_WORKER_PROVIDER` | 要啟用才填 | 設成 `openai_compatible`；留空或其他值時維持原本 mock／Claude 行為 |
+| `AIWFF_OPENAI_BASE_URL` | 啟用時必填 | 含 `/v1` 的網址，例如 `http://127.0.0.1:11434/v1`（ollama）或 `http://127.0.0.1:8000/v1`（vLLM） |
+| `AIWFF_OPENAI_MODEL` | 啟用時必填 | 端點認得的模型名稱 |
+| `AIWFF_OPENAI_API_KEY` | 否 | 有設才會以 `Authorization: Bearer …` 送出 |
+
+`MOCK_WORKER=1` 的優先權比較高，啟用時要把它清空：
+
+```env
+MOCK_WORKER=
+AIWFF_WORKER_PROVIDER=openai_compatible
+AIWFF_OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+AIWFF_OPENAI_MODEL=qwen3:32b
+```
+
+啟用後 `GET /api/settings` 會顯示 `worker_mode: "openai_compatible"`。逾時和重試沿用 Claude worker 的 `timeout_sec`／`MAX_TASK_RETRIES` 規則。
+
 ## 和完整 AIWFF 的差別
 
 這個 repo 的取捨很簡單：先把多節點複雜度拿掉，保留單機 agent loop，讓人看得懂、跑得起來、查得到狀態。

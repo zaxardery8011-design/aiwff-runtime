@@ -132,6 +132,7 @@ async function startDaemon(env = {}) {
       CLAUDE_BYPASS_APPROVALS: '',
       MOCK_WORKER: '1',
       ENABLE_REAL_CLAUDE_WORKER: '',
+      AIWFF_WORKER_PROVIDER: '',
       AIWFF_RUNTIME_TOKEN: RUNTIME_TOKEN,
       ...env,
     },
@@ -645,5 +646,88 @@ test('telegram reconnect: polling backs off then recovers after transient discon
   } finally {
     await stopDaemon(runtime.daemon);
     fake.server.close();
+  }
+});
+
+// --- (4) OpenAI 相容端點插槽 ---
+function startFakeOpenAI() {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+    });
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}');
+      requests.push({ url: req.url, authorization: req.headers.authorization, body });
+      const userText = (body.messages || []).map((m) => m.content).join('\n');
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'chatcmpl-test',
+        object: 'chat.completion',
+        model: body.model,
+        choices: [{ index: 0, message: { role: 'assistant', content: `分類：${/退款/.test(userText) ? 'refund' : 'other'}` }, finish_reason: 'stop' }],
+      }));
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      resolve({ server, port: server.address().port, requests });
+    });
+  });
+}
+
+test('openai_compatible provider: task is answered by the configured endpoint and written as artifact', async () => {
+  resetDataDir();
+  const fake = await startFakeOpenAI();
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    AIWFF_WORKER_PROVIDER: 'openai_compatible',
+    AIWFF_OPENAI_BASE_URL: `http://127.0.0.1:${fake.port}/v1/`,
+    AIWFF_OPENAI_MODEL: 'qwen3-32b-test',
+    AIWFF_OPENAI_API_KEY: 'sk-test',
+  });
+
+  try {
+    const settings = await requestJson(runtime.port, 'GET', '/api/settings');
+    assert.equal(settings.worker_mode, 'openai_compatible');
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: '客服分類',
+      instruction: '把這句分類：我要退款',
+    }, AUTH_HEADERS);
+    const task = await waitForTaskStatus(runtime.port, created.id, ['done', 'failed'], 10000);
+    assert.equal(task.status, 'done', `task error: ${task.error}`);
+    assert.equal(fake.requests.length, 1);
+    assert.equal(fake.requests[0].url, '/v1/chat/completions');
+    assert.equal(fake.requests[0].authorization, 'Bearer sk-test');
+    assert.equal(fake.requests[0].body.model, 'qwen3-32b-test');
+    assert.match(fake.requests[0].body.messages[1].content, /我要退款/);
+    const artifact = fs.readFileSync(path.join(ROOT_DIR, task.artifact_path), 'utf8');
+    assert.equal(artifact, '分類：refund\n');
+  } finally {
+    await stopDaemon(runtime.daemon);
+    fake.server.close();
+  }
+});
+
+test('openai_compatible provider: missing base_url/model fails clearly without calling anything', async () => {
+  resetDataDir();
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    AIWFF_WORKER_PROVIDER: 'openai_compatible',
+    AIWFF_OPENAI_BASE_URL: '',
+    AIWFF_OPENAI_MODEL: '',
+    MAX_TASK_RETRIES: '0',
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'no config',
+      instruction: 'should fail',
+    }, AUTH_HEADERS);
+    const task = await waitForTaskStatus(runtime.port, created.id, ['failed'], 10000);
+    assert.match(task.error, /AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required/);
+  } finally {
+    await stopDaemon(runtime.daemon);
   }
 });
