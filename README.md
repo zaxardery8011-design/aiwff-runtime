@@ -334,7 +334,7 @@ Until this PR is merged, the public `master` baseline remains Phase 1. Phase 2 i
 ## Support
 
 - Technical support: [GitHub Issues](https://github.com/zaxardery8011-design/aiwff-runtime/issues).
-- Full / customized version: <https://zax.com.tw>
+- Full / customized version: <https://zax.com.tw/?utm_source=github_aiwff-runtime&utm_campaign=readme_support>
 
 ## Related — the discipline toolchain
 
