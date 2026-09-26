@@ -969,7 +969,8 @@ async function requestOpenAICompatibleCompletion(task, timeoutMs) {
   if (!config.baseUrl || !config.model) {
     throw new Error('AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required when AIWFF_WORKER_PROVIDER=openai_compatible');
   }
-  const headers = { 'content-type': 'application/json' };
+  // 帶上 task_id，讓 gateway／代理能把同一個任務的多次往返（含 retry）分成一組計算。
+  const headers = { 'content-type': 'application/json', 'x-aiwff-task-id': String(task.id) };
   if (config.apiKey) {
     headers.authorization = `Bearer ${config.apiKey}`;
   }
