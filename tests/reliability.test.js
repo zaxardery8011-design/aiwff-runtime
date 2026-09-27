@@ -561,6 +561,15 @@ test('crash guardrail: safeWriteJsonFile survives an unwritable path and reports
   assert.equal(result, false);
 });
 
+test('cmd.exe spawn path refuses arguments with " % or newline', () => {
+  assert.doesNotThrow(() =>
+    agentModule.assertCmdSafeArgs(['"C:\\Program Files\\claude\\claude.cmd"', '--print', '--allowedTools', 'Bash(git *)']),
+  );
+  for (const bad of ['a"b', '%PATH%', 'line1\nline2', 'x\ry']) {
+    assert.throws(() => agentModule.assertCmdSafeArgs(['claude', bad]), /Refusing to pass argument through cmd\.exe/);
+  }
+});
+
 // --- (2) 任務失敗基本 retry ---
 test('task retry: real worker recovers on a later attempt and records retry_count', async () => {
   resetDataDir();

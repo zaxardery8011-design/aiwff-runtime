@@ -796,6 +796,16 @@ function quoteWindowsCommand(command) {
   return `"${value.replace(/"/g, '\\"')}"`;
 }
 
+// cmd.exe 的 " 與 %VAR% 展開、換行都擋不住引號：這類字元一律拒絕走 shell 字串（任務文字只走 stdin）。
+function assertCmdSafeArgs(values) {
+  for (const value of values) {
+    const bare = String(value).trim().replace(/^"(.*)"$/, '$1');
+    if (/["%\r\n]/.test(bare)) {
+      throw new Error(`Refusing to pass argument through cmd.exe (contains " % or newline): ${JSON.stringify(String(value))}`);
+    }
+  }
+}
+
 function taskWorkspacePath(taskId) {
   return path.join(WORKSPACES_DIR, taskId);
 }
@@ -827,6 +837,7 @@ function spawnClaudeProcess(claudeCmd, args, optionsOverride = {}) {
     return spawn(claudeCmd, args, options);
   }
 
+  assertCmdSafeArgs([claudeCmd, ...args]);
   const commandLine = [quoteWindowsCommand(claudeCmd), ...args.map(quoteWindowsCommand)].join(' ');
   return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], {
     ...options,
@@ -857,7 +868,14 @@ function spawnClaudeWorker(task, attempt = 1) {
     appendProgressText(task.id, warning);
   }
   appendProgressText(task.id, `Claude spawn args=${JSON.stringify(args)} cwd=${workerCwd}`);
-  const child = spawnClaudeProcess(claudeCmd, args, { cwd: workerCwd });
+  let child;
+  try {
+    child = spawnClaudeProcess(claudeCmd, args, { cwd: workerCwd });
+  } catch (error) {
+    const failedTask = updateTaskStatus(runningTask, 'failed', { error: error.message, retry_count: attempt - 1 });
+    notifyTelegramTaskDone(failedTask);
+    return;
+  }
   let spawnError = null;
   let stderr = '';
   let timedOut = false;
@@ -1364,6 +1382,7 @@ module.exports = {
   startTelegramPolling,
   tgRequest,
   envInt,
+  assertCmdSafeArgs,
   MAX_TASK_RETRIES,
   RETRY_BACKOFF_MS,
   TG_API_BASE_URL,
