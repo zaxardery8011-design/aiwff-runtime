@@ -561,6 +561,25 @@ test('crash guardrail: safeWriteJsonFile survives an unwritable path and reports
   assert.equal(result, false);
 });
 
+test('restart heal: orphaned running tasks become blocked, terminal tasks are untouched', () => {
+  resetDataDir();
+  const tasksDir = path.join(DATA_DIR, 'tasks');
+  fs.mkdirSync(tasksDir, { recursive: true });
+  const base = { title: 't', instruction: 'i', created_at: '2026-09-28T00:00:00.000Z', updated_at: '2026-09-28T00:00:00.000Z' };
+  fs.writeFileSync(path.join(tasksDir, 'orphan-1.json'), JSON.stringify({ ...base, id: 'orphan-1', status: 'running' }));
+  fs.writeFileSync(path.join(tasksDir, 'done-1.json'), JSON.stringify({ ...base, id: 'done-1', status: 'done' }));
+
+  const healed = agentModule.healOrphanedRunningTasks();
+  assert.deepEqual(healed.map((task) => task.id), ['orphan-1']);
+
+  const orphan = JSON.parse(fs.readFileSync(path.join(tasksDir, 'orphan-1.json'), 'utf8'));
+  assert.equal(orphan.status, 'blocked');
+  assert.equal(orphan.blocked_reason, 'orphaned_on_restart');
+  assert.ok(fs.existsSync(path.join(DATA_DIR, 'inbox', 'orphan-1.blocked.json')));
+  const done = JSON.parse(fs.readFileSync(path.join(tasksDir, 'done-1.json'), 'utf8'));
+  assert.equal(done.status, 'done');
+});
+
 // --- (2) 任務失敗基本 retry ---
 test('task retry: real worker recovers on a later attempt and records retry_count', async () => {
   resetDataDir();

@@ -715,6 +715,30 @@ function markTaskBlockedByTimeout(taskId, fallbackTask) {
   return updateTaskStatus(currentTask, 'blocked', { blocked_reason: 'timeout' });
 }
 
+// 啟動時收掉上一個行程遺留的 running：worker 計時器跟著舊行程死了，
+// 不收就會永遠停在 Working。heal 前逐筆重讀檔，已被別處改成終態的不動。
+function healOrphanedRunningTasks() {
+  const healed = [];
+  for (const listed of listTasks()) {
+    if (listed.status !== 'running' || !isSafeTaskId(listed.id)) {
+      continue;
+    }
+    let currentTask;
+    try {
+      currentTask = readTask(listed.id);
+    } catch (error) {
+      logStderr(`orphan heal re-read failed (${listed.id})`, error);
+      continue;
+    }
+    if (!currentTask || currentTask.status !== 'running') {
+      continue;
+    }
+    appendProgressText(listed.id, 'Runtime restarted while task was running; marked blocked (orphaned)');
+    healed.push(updateTaskStatus(currentTask, 'blocked', { blocked_reason: 'orphaned_on_restart' }));
+  }
+  return healed;
+}
+
 function pipeStdoutProgress(taskId, stream) {
   let buffer = '';
   stream.setEncoding('utf8');
@@ -1332,6 +1356,10 @@ async function handleRequest(req, res) {
 function main() {
   installProcessGuards();
   ensureDirectories();
+  const healed = healOrphanedRunningTasks();
+  if (healed.length > 0) {
+    console.error(`Marked ${healed.length} orphaned running task(s) as blocked (orphaned_on_restart).`);
+  }
   if (!process.env.AIWFF_RUNTIME_TOKEN) {
     console.error('SECURITY WARNING: AIWFF_RUNTIME_TOKEN is not set; POST /api/tasks will reject all write requests.');
   }
@@ -1360,6 +1388,7 @@ if (require.main === module) {
 module.exports = {
   safeWriteJsonFile,
   appendProgressText,
+  healOrphanedRunningTasks,
   installProcessGuards,
   startTelegramPolling,
   tgRequest,
