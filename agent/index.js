@@ -16,6 +16,10 @@ const WORKSPACES_DIR = path.join(DATA_DIR, 'workspaces');
 const MEMORY_DIR = path.join(ROOT_DIR, 'memory');
 const PORT = Number(process.env.PORT || 3100);
 const RUNTIME_TOKEN_HEADER = 'x-aiwff-runtime-token';
+const RUNTIME_TOKEN_COOKIE = 'aiwff_runtime_token';
+// 寫入授權用的 runtime token：只存在記憶體。
+// 有設 AIWFF_RUNTIME_TOKEN 就沿用（固定 token，給腳本 / curl 用）；沒設則啟動時自動產生（Jupyter 模式）。
+let runtimeToken = '';
 const DEFAULT_WORKER_TIMEOUT_SEC = 600;
 const MAX_WORKER_TIMEOUT_SEC = 3600;
 const MAX_MEMORY_BYTES = 256 * 1024;
@@ -217,7 +221,70 @@ function getRequestToken(req) {
 
   const auth = req.headers.authorization || '';
   const match = String(auth).match(/^Bearer\s+(.+)$/i);
-  return match ? match[1] : '';
+  if (match) {
+    return match[1];
+  }
+
+  // WebUI 用登入連結換到的 HttpOnly cookie（見 handleLoginLink）。
+  return readCookie(req, RUNTIME_TOKEN_COOKIE);
+}
+
+function readCookie(req, name) {
+  const header = req.headers.cookie;
+  if (!header) {
+    return '';
+  }
+  for (const part of String(header).split(';')) {
+    const index = part.indexOf('=');
+    if (index < 0 || part.slice(0, index).trim() !== name) {
+      continue;
+    }
+    try {
+      return decodeURIComponent(part.slice(index + 1).trim());
+    } catch (_) {
+      return '';
+    }
+  }
+  return '';
+}
+
+// 啟動時決定 runtime token；回傳 generated 讓啟動訊息說明 token 來源。
+function initRuntimeToken() {
+  const configuredToken = process.env.AIWFF_RUNTIME_TOKEN || '';
+  runtimeToken = configuredToken || crypto.randomBytes(24).toString('hex');
+  return { generated: !configuredToken };
+}
+
+function runtimeLoginUrl() {
+  return `http://127.0.0.1:${PORT}/?token=${encodeURIComponent(runtimeToken)}`;
+}
+
+function hasValidRuntimeToken(token) {
+  return Boolean(runtimeToken) && timingSafeStringEqual(token, runtimeToken);
+}
+
+// GET ?token=：正確 → 發 HttpOnly cookie 並 302 到去掉 token 的同一路徑；錯誤 → 401、不發 cookie。
+function handleLoginLink(req, res, url) {
+  const token = url.searchParams.get('token') || '';
+  if (!hasValidRuntimeToken(token)) {
+    sendHtml(
+      res,
+      401,
+      '<!doctype html><meta charset="utf-8"><title>登入連結無效</title>' +
+        '<p>登入連結無效。runtime 每次重啟（未設固定 AIWFF_RUNTIME_TOKEN 時）都會換新 token，' +
+        '請回到跑 <code>npm run web</code> 的終端機，點最新印出的登入連結。</p>',
+    );
+    return;
+  }
+  const next = new URLSearchParams(url.searchParams);
+  next.delete('token');
+  const query = next.toString();
+  res.writeHead(302, {
+    location: `${url.pathname}${query ? `?${query}` : ''}`,
+    'set-cookie': `${RUNTIME_TOKEN_COOKIE}=${encodeURIComponent(runtimeToken)}; HttpOnly; SameSite=Strict; Path=/`,
+    'cache-control': 'no-store',
+  });
+  res.end();
 }
 
 function sameOriginWriteRequest(req) {
@@ -241,7 +308,7 @@ function sameOriginWriteRequest(req) {
 }
 
 function verifyWriteAccess(req) {
-  const configuredToken = process.env.AIWFF_RUNTIME_TOKEN || '';
+  const configuredToken = runtimeToken;
   if (!configuredToken) {
     return { ok: false, status: 401, error: 'AIWFF_RUNTIME_TOKEN is required for write requests' };
   }
@@ -1226,6 +1293,16 @@ function startTelegramPolling() {
 async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+  if (req.method === 'GET' && url.searchParams.has('token')) {
+    handleLoginLink(req, res, url);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/session') {
+    sendJson(res, 200, { ok: true, loggedIn: hasValidRuntimeToken(readCookie(req, RUNTIME_TOKEN_COOKIE)) });
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/') {
     sendHtml(res, 200, renderHome());
     return;
@@ -1329,20 +1406,26 @@ async function handleRequest(req, res) {
   sendJson(res, 404, { ok: false, error: '找不到路徑' });
 }
 
-function main() {
-  installProcessGuards();
-  ensureDirectories();
-  if (!process.env.AIWFF_RUNTIME_TOKEN) {
-    console.error('SECURITY WARNING: AIWFF_RUNTIME_TOKEN is not set; POST /api/tasks will reject all write requests.');
-  }
-  const server = http.createServer((req, res) => {
+function createRuntimeServer() {
+  return http.createServer((req, res) => {
     handleRequest(req, res).catch((error) => {
       sendJson(res, 500, { ok: false, error: error.message });
     });
   });
+}
+
+function main() {
+  installProcessGuards();
+  ensureDirectories();
+  const { generated } = initRuntimeToken();
+  const server = createRuntimeServer();
 
   server.listen(PORT, '127.0.0.1', () => {
     console.log(`AIWFF Runtime listening on http://127.0.0.1:${PORT}`);
+    console.log(`登入 WebUI：${runtimeLoginUrl()}`);
+    if (generated) {
+      console.log('（AIWFF_RUNTIME_TOKEN 未設：token 為本次啟動自動產生、只存在記憶體，重啟後會換新連結。）');
+    }
   });
 
   if (process.env.TG_BOT_TOKEN && !process.env.ADMIN_TG_CHAT_ID) {
@@ -1364,6 +1447,11 @@ module.exports = {
   startTelegramPolling,
   tgRequest,
   envInt,
+  ensureDirectories,
+  initRuntimeToken,
+  runtimeLoginUrl,
+  createRuntimeServer,
+  RUNTIME_TOKEN_COOKIE,
   MAX_TASK_RETRIES,
   RETRY_BACKOFF_MS,
   TG_API_BASE_URL,

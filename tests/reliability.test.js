@@ -295,11 +295,12 @@ test('POST /api/tasks requires runtime token and accepts the correct token', asy
   }
 });
 
-test('POST /api/tasks rejects writes when runtime token is not configured', async () => {
+test('POST /api/tasks without configured token uses an auto-generated token and prints a login link', async () => {
   resetDataDir();
   const runtime = await startDaemon({ AIWFF_RUNTIME_TOKEN: '', MOCK_WORKER: '1' });
 
   try {
+    // 沒設 AIWFF_RUNTIME_TOKEN 時 token 為啟動時自動產生，猜不到的固定值一律 401。
     await assert.rejects(
       () =>
         requestJson(
@@ -312,9 +313,24 @@ test('POST /api/tasks rejects writes when runtime token is not configured', asyn
           },
           AUTH_HEADERS,
         ),
-      (error) => error.statusCode === 401 && /AIWFF_RUNTIME_TOKEN/.test(error.message),
+      (error) => error.statusCode === 401 && /token/i.test(error.message),
     );
-    assert.match(runtime.logs.stderr, /AIWFF_RUNTIME_TOKEN is not set/);
+    const deadline = Date.now() + 3000;
+    while (!/登入 WebUI：/.test(runtime.logs.stdout) && Date.now() < deadline) {
+      await sleep(50);
+    }
+    const match = runtime.logs.stdout.match(/登入 WebUI：(http:\/\/127\.0\.0\.1:(\d+)\/\?token=([0-9a-f]{48}))/);
+    assert.ok(match, `login link missing from stdout: ${runtime.logs.stdout}`);
+    assert.equal(Number(match[2]), runtime.port);
+
+    const created = await requestJson(
+      runtime.port,
+      'POST',
+      '/api/tasks',
+      { title: 'generated token', instruction: 'should be accepted' },
+      { 'x-aiwff-runtime-token': match[3] },
+    );
+    assert.match(created.id, /^[0-9a-f-]{36}$/i);
   } finally {
     await stopDaemon(runtime.daemon);
   }
