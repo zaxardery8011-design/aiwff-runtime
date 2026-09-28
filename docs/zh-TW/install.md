@@ -31,7 +31,7 @@
 | §0 開始之前 | 你在讀的這節 | 是 |
 | §1 前置需求與費用說明 | 要準備什麼、哪些免費哪些要付費 | 是（裝之前一定要看） |
 | §2 mock 安裝與驗證 | 一步步把免費模式跑通 | 是 |
-| §3 啟用真 Claude worker | 接付費 AI、費用與核可提示 | 之後想升級再看 |
+| §3 接上真的 AI | 離開 mock：接本機免費模型，或接付費 Claude；第一句對話回得來才算完成 | mock 跑通後就看 |
 | §4 啟用 Telegram | 用手機傳訊息操作 | 之後想接手機再看 |
 | §5 疑難排解與支援管道 | 卡住了怎麼辦、去哪求助 | 是 |
 
@@ -208,17 +208,69 @@ npm run web        # 等同 npm start，兩個指令都會起同一個 WebUI
 
 > **換 port**：3100 被占用時，`npm run web` 不會自動換 port（會直接報 `EADDRINUSE`）。這時 Windows PowerShell 用 `$env:PORT=3200; npm run web`，bash / macOS / Linux 用 `PORT=3200 npm run web`，再開 `http://127.0.0.1:3200`。
 
-裝到這裡，你已經有一個**完全免費、跑在自己電腦上**的 AI 任務助手骨架了。接下來怎麼用它建任務、看產出，見 [使用手冊 usage.md](usage.md)。想升級成真 AI，再看下面 §3。
+裝到這裡，你已經有一個**完全免費、跑在自己電腦上**的 AI 任務助手骨架了。接下來怎麼用它建任務、看產出，見 [使用手冊 usage.md](usage.md)。
+
+> **注意：到這裡還是 mock，還沒接任何 AI 模型。** 打字只會收到示範產物，不是真的回答。要它第一次真的回你話，接著做 §3（有免費的本機模型路線）。
 
 > **關於 port 的一個誠實註記**：本節步驟 5 的「全綠」輸出，是在 port 3100 空著的乾淨機上驗到的預期樣子；我們自己的實測機因為 3100 已被其他服務占用，實際跑到的是上面那段 **WARN** 分支——兩條路徑都列在這裡，你落到哪條都有對照。
 
 ---
 
-## §3 啟用真 Claude worker
+## §3 接上真的 AI
 
-先跑通 §2 的 mock 流程，再切真 Claude worker。真 worker 會呼叫你本機的 Claude CLI，所以這一步會使用你的 Claude 帳號與訂閱額度。
+§2 做完，你的小主腦已經裝好、跑起來了，但它還是 **mock（模擬）**：你打什麼，它都只回示範產物，**還沒有接任何 AI 模型**。這一章教你接上真的模型，讓它第一次真的回你話。
 
-### 3.1 確認 Claude CLI 可用
+### 3.0 先確認：我現在是不是還在 mock？
+
+符合下面任一條，你就還在 mock：
+
+- WebUI 首頁（HUD）的「模式」顯示 `mock（示範）`。
+- 在「對話」分頁送一句話，任務完成後產出是 `data/artifacts/<task_id>.result.json`，裡面的 `summary` 只寫 `Mock worker completed task: <你打的標題>`，不是在回答你。
+
+這不是壞掉，是預設就這樣（見 §1.2）。往下選一條路接上模型。
+
+### 3.1 選一條路
+
+| 路線 | 誰來回話 | 要花錢嗎 | 能做什麼 | 適合 |
+|---|---|---|---|---|
+| **A. 本機模型（OpenAI 相容端點）** | 你自己電腦上跑的模型，例如 ollama | ❌ 不用金鑰、不用訂閱 | 只回文字：問答、摘要、分類、改寫；**不能動檔案、不能跑工具** | 想先免費看到它真的回話 |
+| **B. 真 Claude worker** | 你本機的 Claude CLI | ✅ 需要 Claude 付費訂閱（見 §1.3） | 能讀寫 repo 內檔案、用工具把任務做完 | 要它真的動手做事 |
+
+兩條路都是改 `.env` 再重開 `npm run web`，不會自動切換。走完任一條，都到 3.4 做同一個完成測試。
+
+### 3.2 路線 A：接本機模型（以 ollama 為例）
+
+1. **裝 ollama 並下載一個模型**。到 ollama 官網安裝後，在終端機下載一個你電腦跑得動的模型，再確認它在清單裡：
+
+   ```bash
+   ollama pull <模型名稱>
+   ollama list
+   ```
+
+   模型越大越吃記憶體與顯示卡；第一次先挑小一點的，能回話再換。`ollama list` 顯示的名稱（例如 `qwen3:32b`）等一下要**一字不差**填進 `.env`。
+
+2. **改 `.env`**（在 repo 根目錄）：
+
+   ```env
+   MOCK_WORKER=
+   AIWFF_WORKER_PROVIDER=openai_compatible
+   AIWFF_OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+   AIWFF_OPENAI_MODEL=<ollama list 顯示的名稱>
+   ```
+
+   - `MOCK_WORKER` **一定要清空**（或設 `0`）。它的優先權最高，留著 `1` 就永遠是 mock。
+   - 網址要帶 `/v1`；`11434` 是 ollama 的預設 port。用 LM Studio、vLLM 等其他 OpenAI 相容服務，換成它們的網址即可。
+   - `AIWFF_OPENAI_API_KEY` 本機 ollama 不用填；服務要金鑰才填，它只寫在你本機 `.env`，不進 git（§1.4）。
+
+3. **重開 runtime**：先在跑 `npm run web` 的終端機按 `Ctrl+C` 停掉，再跑一次 `npm run web`。HUD 的「模式」會變成 `openai_compatible`。
+
+接著做 3.4 的完成測試。
+
+### 3.3 路線 B：啟用真 Claude worker
+
+真 worker 會呼叫你本機的 Claude CLI，所以這一步會使用你的 Claude 帳號與訂閱額度。
+
+#### 3.3.1 確認 Claude CLI 可用
 
 在 repo 根目錄執行：
 
@@ -228,7 +280,7 @@ claude --version
 
 如果系統找不到 `claude`，或 CLI 要求你先登入，請先依 Claude CLI 當下顯示的官方流程處理。這份手冊不替你建立帳號、購買方案，也不替你跳過 Claude CLI 的安全提示。
 
-### 3.2 修改 `.env`
+#### 3.3.2 修改 `.env`
 
 把 mock 關掉，並明確開啟 real worker：
 
@@ -241,17 +293,48 @@ CLAUDE_BYPASS_APPROVALS=
 
 `MOCK_WORKER=1` 會強制走 mock；要跑真 worker，請把它設成 `0` 或留空。`CLAUDE_BYPASS_APPROVALS` 預設留空，代表不加 `--dangerously-skip-permissions`。
 
-### 3.3 啟動與驗證
+#### 3.3.3 重開 runtime
 
-重新啟動 runtime：
+先按 `Ctrl+C` 停掉原本的 `npm run web`，再跑一次：
 
 ```bash
 npm run web
 ```
 
-用 WebUI 建一個小任務，確認任務完成後在 `data/artifacts/<task_id>.result.md` 看到 Markdown 產出。真 worker 產出的最後一行應符合 `CLAUDE.md` 契約，寫成 `DONE: ...`。
+HUD 的「模式」會變成 `claude（真實 worker）`。真 worker 產出的最後一行應符合 `CLAUDE.md` 契約，寫成 `DONE: ...`。
 
 如果 Claude CLI 跳出核可提示，這是正常安全設計；逐次確認，或先回到 `MOCK_WORKER=1` 用免費 mock 模式驗流程。
+
+接著做 3.4 的完成測試。
+
+### 3.4 完成測試：第一句對話回得來
+
+不管走 A 還是 B，都用同一個方式確認：
+
+1. 在 WebUI 切到「對話 / 新任務」分頁，送一句：`你好，你是誰？`
+2. 等任務狀態變成 `done`，打開產出 `data/artifacts/<task_id>.result.md`（WebUI 任務詳情也看得到）。
+3. 判斷：
+
+| 你看到的 | 代表 |
+|---|---|
+| 一段真的在回答你的文字 | ✅ **接上了，這章完成**。之後怎麼給它個性與記憶，見 [usage.md](usage.md) §6 |
+| 產出是 `.result.json`、內容是 `Mock worker completed task: ...` | ❌ 還在 mock：`MOCK_WORKER` 沒清空，或改完 `.env` 沒重開 `npm run web` |
+| 任務變成 `failed` | ❌ 有設定沒接好，看 3.5 |
+
+### 3.5 接不上時先對這張表
+
+任務失敗的原因會寫在任務詳情的錯誤欄，也會記在 `data/tasks/<task_id>.progress.jsonl`。
+
+| 你看到的錯誤 | 原因 | 處理 |
+|---|---|---|
+| `AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required ...` | 路線 A 的網址或模型名稱沒填 | 補齊 3.2 的兩行，重開 `npm run web` |
+| `fetch failed`、連線被拒 | ollama 沒在跑，或網址／port 不對 | 確認 ollama 有開、`ollama list` 能跑；網址是 `http://127.0.0.1:11434/v1` |
+| `HTTP 404`，訊息提到 model | 模型名稱跟 `ollama list` 不一致，或還沒 `ollama pull` | 從 `ollama list` 複製名稱貼進 `AIWFF_OPENAI_MODEL` |
+| 等很久最後逾時 | 模型太大，電腦跑不動或第一次載入很慢 | 換小一點的模型，或第一次送出後多等一下再試 |
+| 找不到 `claude` 命令 | 路線 B 沒裝 Claude CLI，或 Windows 的 PATH 找不到 `claude.cmd` | 先讓 `claude --version` 能跑；Windows 也可在 `.env` 把 `CLAUDE_CMD` 設成完整路徑 |
+| 模式還是 `mock（示範）` | `MOCK_WORKER` 還是 `1`，或沒重開 | 清空 `MOCK_WORKER`，停掉再重跑 `npm run web` |
+
+都對不上：到 §5.2 開 Issue，附上你選的路線、`.env` 裡跟模型有關的幾行（**金鑰遮掉**）和完整錯誤訊息。
 
 ---
 
