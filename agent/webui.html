@@ -383,6 +383,9 @@
       border-radius: 8px;
       box-shadow: none;
     }
+    .msg.answer {
+      overflow-wrap: anywhere;
+    }
     .msg .meta {
       display: block;
       margin-top: 4px;
@@ -1075,11 +1078,19 @@
       return role === 'user' || role === 'assistant' || role === 'system' ? role : 'system';
     }
 
-    function chatMessageHtml(message) {
-      return '<div class="msg ' + safeChatRole(message.role) + '">' +
-        '<div class="text">' + escapeHtml(message.text || '') + '</div>' +
-        '<span class="meta">' + escapeHtml(message.meta || '') + '</span>' +
-      '</div>';
+    // 用 textContent 建訊息節點：模型回答等外部內容一律當純文字，不經 innerHTML。
+    function chatMessageNode(message) {
+      var node = document.createElement('div');
+      node.className = 'msg ' + safeChatRole(message.role) + (message.answer ? ' answer' : '');
+      var text = document.createElement('div');
+      text.className = 'text';
+      text.textContent = message.text || '';
+      var meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = message.meta || '';
+      node.appendChild(text);
+      node.appendChild(meta);
+      return node;
     }
 
     function setChatBadge(text) {
@@ -1099,7 +1110,10 @@
     function renderChat() {
       var box = byId('task-chat-messages');
       if (!box) return;
-      box.innerHTML = state.chatMessages.map(chatMessageHtml).join('');
+      box.textContent = '';
+      state.chatMessages.forEach(function(message) {
+        box.appendChild(chatMessageNode(message));
+      });
       var active = activeTrackedTask();
       if (!state.chatBusy) {
         setChatBadge(active ? ('任務 · ' + statusText(active.status)) : 'IDLE · 待機');
@@ -1109,8 +1123,10 @@
       }, 0);
     }
 
-    function appendChatMessage(role, text, meta, deferRender) {
-      state.chatMessages.push({ role: role, text: text, meta: meta || timeMeta('系統') });
+    function appendChatMessage(role, text, meta, deferRender, extra) {
+      var message = { role: role, text: text, meta: meta || timeMeta('系統') };
+      if (extra && extra.answer) message.answer = true;
+      state.chatMessages.push(message);
       if (!deferRender) renderChat();
     }
 
@@ -1145,6 +1161,21 @@
       };
     }
 
+    // 任務完成後讀 GET /api/tasks/:id/result（需登入 cookie），把回答當純文字附在聊天框。
+    async function showTaskAnswer(taskId) {
+      var text;
+      var extra = null;
+      try {
+        var data = await fetchJson('/api/tasks/' + encodeURIComponent(taskId) + '/result', { credentials: 'same-origin' });
+        text = String(data.content || '').trim() || '（產出是空的）';
+        if (data.truncated) text += '\n\n…（內容超過 64KB，已截斷；完整內容請看產出檔）';
+        extra = { answer: true };
+      } catch (error) {
+        text = '回答讀取失敗：' + error.message;
+      }
+      appendChatMessage('assistant', text, timeMeta('回答'), false, extra);
+    }
+
     function syncChatTasks() {
       Object.keys(state.chatTasks).forEach(function(taskId) {
         var tracked = state.chatTasks[taskId];
@@ -1153,6 +1184,11 @@
         if (task.status && task.status !== tracked.lastStatus) {
           tracked.lastStatus = task.status;
           appendChatMessage('assistant', taskStatusMessage(task, false), timeMeta('系統'), true);
+        }
+        // 每個任務只讀一次回答（refresh 每輪都會跑到這裡）。
+        if (task.status === 'done' && !tracked.answerRequested) {
+          tracked.answerRequested = true;
+          showTaskAnswer(taskId);
         }
       });
     }
