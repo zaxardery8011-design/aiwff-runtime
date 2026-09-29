@@ -325,6 +325,14 @@ function verifyWriteAccess(req) {
   return { ok: true };
 }
 
+// 需要 token 的讀取（目前只有任務產出內容）：同 getRequestToken 三種來源；GET 不做 Origin 檢查。
+function verifyReadAccess(req) {
+  if (!hasValidRuntimeToken(getRequestToken(req))) {
+    return { ok: false, status: 401, error: 'Missing or invalid runtime token' };
+  }
+  return { ok: true };
+}
+
 function htmlEscape(value) {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -684,7 +692,7 @@ function getSettingsSnapshot() {
     writable_data_dirs: ['data/tasks', 'data/artifacts', 'data/inbox'],
     endpoints: [
       { name: 'HUD', route: 'GET /api/hud + GET /api/health' },
-      { name: '對話 / 新任務', route: 'POST /api/tasks' },
+      { name: '對話 / 新任務', route: 'POST /api/tasks, GET /api/tasks/:id/result' },
       { name: '任務', route: 'GET /api/tasks, GET /api/tasks/:id' },
       { name: '進度 / 事件', route: 'GET /api/events, GET /api/tasks/:id/progress' },
       { name: '收件匣 / 卡住', route: 'GET /api/inbox, GET /api/tasks?status=blocked' },
@@ -750,6 +758,87 @@ function artifactResultPath(taskId) {
 
 function artifactResultRef(taskId) {
   return path.relative(ROOT_DIR, artifactResultPath(taskId)).replaceAll(path.sep, '/');
+}
+
+// 讀取任務產出給 WebUI 對話分頁顯示。task id 必須是 UUID（createTask 用 crypto.randomUUID）；
+// 路徑只由程式組出 data/artifacts/<id>.result.md 或 .result.json，不接受使用者給的路徑。
+const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_RESULT_CONTENT_BYTES = 64 * 1024;
+
+function isUuidTaskId(taskId) {
+  return TASK_ID_PATTERN.test(String(taskId));
+}
+
+// 依 UTF-8 位元組截斷，切點退到字元開頭，避免切出半個中文字。
+function truncateUtf8(text, maxBytes) {
+  const buffer = Buffer.from(String(text), 'utf8');
+  if (buffer.length <= maxBytes) {
+    return { content: buffer.toString('utf8'), truncated: false };
+  }
+  let end = maxBytes;
+  while (end > 0 && (buffer[end] & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  return { content: buffer.subarray(0, end).toString('utf8'), truncated: true };
+}
+
+function readTaskResult(taskId) {
+  const artifactRoot = path.resolve(ARTIFACTS_DIR);
+  const candidates = [
+    { format: 'md', file: path.resolve(ARTIFACTS_DIR, `${taskId}.result.md`) },
+    { format: 'json', file: path.resolve(ARTIFACTS_DIR, `${taskId}.result.json`) },
+  ];
+  for (const candidate of candidates) {
+    // 防路徑穿越的第二道：組出來的檔案必須直接落在 data/artifacts 底下。
+    if (path.dirname(candidate.file) !== artifactRoot || !fs.existsSync(candidate.file)) {
+      continue;
+    }
+    const raw = fs.readFileSync(candidate.file, 'utf8');
+    if (candidate.format === 'md') {
+      return { format: 'md', ...truncateUtf8(raw, MAX_RESULT_CONTENT_BYTES) };
+    }
+    let text = raw;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.summary === 'string') {
+        text = parsed.summary;
+      }
+    } catch (_) {
+      // JSON 壞掉就回原文字串。
+    }
+    return { format: 'json', ...truncateUtf8(text, MAX_RESULT_CONTENT_BYTES) };
+  }
+  return null;
+}
+
+function handleTaskResult(req, res, rawId) {
+  const readAccess = verifyReadAccess(req);
+  if (!readAccess.ok) {
+    sendJson(res, readAccess.status, { ok: false, error: readAccess.error });
+    return;
+  }
+  if (!isUuidTaskId(rawId)) {
+    sendJson(res, 400, { ok: false, error: 'invalid task id' });
+    return;
+  }
+  const task = readTask(rawId);
+  if (!task) {
+    sendJson(res, 404, { ok: false, error: '找不到任務' });
+    return;
+  }
+  const result = task.status === 'done' ? readTaskResult(rawId) : null;
+  if (!result) {
+    sendJson(res, 404, { ok: false, error: 'result not ready' });
+    return;
+  }
+  sendJson(res, 200, {
+    ok: true,
+    task_id: task.id || rawId,
+    status: task.status,
+    format: result.format,
+    content: result.content,
+    truncated: result.truncated,
+  });
 }
 
 function appendProgressText(taskId, line) {
@@ -1381,6 +1470,13 @@ async function handleRequest(req, res) {
       return;
     }
     await createTask(req, res);
+    return;
+  }
+
+  // 不 decode：合法 id 是 UUID，不會含編碼字元；%2F 之類原樣進格式驗證被擋成 400。
+  const resultMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/result$/);
+  if (req.method === 'GET' && resultMatch) {
+    handleTaskResult(req, res, resultMatch[1]);
     return;
   }
 
