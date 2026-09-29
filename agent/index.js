@@ -726,7 +726,7 @@ function spawnMockWorker(task) {
     safeWriteJsonFile(taskPath(taskId), task);
   });
 
-  child.on('close', () => {
+  child.on('close', (code, signal) => {
     clearTimeout(timer);
     if (timedOut) {
       return;
@@ -738,6 +738,15 @@ function spawnMockWorker(task) {
     if (latestTask.status === 'done' || latestTask.status === 'blocked') {
       writeInboxEvent(latestTask, latestTask.status);
       notifyTelegramTaskDone(latestTask);
+      return;
+    }
+    // worker 沒寫完結狀態就退出（例如一啟動就掛）：當場具名標 failed，不讓任務停在 running 等逾時。
+    if (latestTask.status !== 'failed') {
+      const exitReason = code === null ? `signal ${signal || 'unknown'}` : `code ${code}`;
+      const failedTask = updateTaskStatus(latestTask, 'failed', {
+        error: `Mock worker exited with ${exitReason} before finishing (status was ${latestTask.status})`,
+      });
+      notifyTelegramTaskDone(failedTask);
     }
   });
 
