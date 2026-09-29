@@ -16,7 +16,11 @@ const WORKSPACES_DIR = path.join(DATA_DIR, 'workspaces');
 const MEMORY_DIR = path.join(ROOT_DIR, 'memory');
 const PORT = Number(process.env.PORT || 3100);
 const RUNTIME_TOKEN_HEADER = 'x-aiwff-runtime-token';
-const RUNTIME_TOKEN_COOKIE = 'aiwff_runtime_token';
+// cookie 只綁 host、不分 port：名稱帶 port，同一台機器開多個 runtime 時才不會互相覆蓋。
+function runtimeTokenCookieName(port = PORT) {
+  return `aiwff_runtime_token_${port}`;
+}
+const RUNTIME_TOKEN_COOKIE = runtimeTokenCookieName();
 // 寫入授權用的 runtime token：只存在記憶體。
 // 有設 AIWFF_RUNTIME_TOKEN 就沿用（固定 token，給腳本 / curl 用）；沒設則啟動時自動產生（Jupyter 模式）。
 let runtimeToken = '';
@@ -1452,6 +1456,7 @@ module.exports = {
   runtimeLoginUrl,
   createRuntimeServer,
   RUNTIME_TOKEN_COOKIE,
+  runtimeTokenCookieName,
   MAX_TASK_RETRIES,
   RETRY_BACKOFF_MS,
   TG_API_BASE_URL,

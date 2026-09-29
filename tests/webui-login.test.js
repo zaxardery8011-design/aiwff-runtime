@@ -155,6 +155,31 @@ test('正確 ?token= → 302 + Set-Cookie HttpOnly SameSite=Strict，並去掉 t
   });
 });
 
+test('cookie 名稱帶 port：兩個不同 port 的 cookie 互不覆蓋', async () => {
+  const otherPort = port === 65535 ? port - 1 : port + 1;
+  const mine = agent.runtimeTokenCookieName(port);
+  const other = agent.runtimeTokenCookieName(otherPort);
+  assert.equal(agent.RUNTIME_TOKEN_COOKIE, mine);
+  assert.notEqual(mine, other);
+
+  await withServer(FIXED_TOKEN, async () => {
+    const cookie = await login(FIXED_TOKEN);
+    assert.equal(cookie, `${mine}=${FIXED_TOKEN}`);
+
+    // 瀏覽器同時帶著另一個 port 的 runtime cookie：不影響本 port 的登入。
+    const both = await request(port, 'GET', '/api/session', {
+      headers: { cookie: `${other}=other-runtime-token; ${cookie}` },
+    });
+    assert.equal(both.json.loggedIn, true);
+
+    // 只帶另一個 port 的 cookie（即使值是本 port 的正確 token）不算登入。
+    const otherOnly = await request(port, 'GET', '/api/session', {
+      headers: { cookie: `${other}=${FIXED_TOKEN}` },
+    });
+    assert.equal(otherOnly.json.loggedIn, false);
+  });
+});
+
 test('帶 cookie 的同源 POST /api/tasks → 通過授權（MOCK_WORKER=1）', async () => {
   await withServer(FIXED_TOKEN, async () => {
     const cookie = await login(FIXED_TOKEN);
