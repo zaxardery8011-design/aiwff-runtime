@@ -259,6 +259,7 @@ npm run web        # 等同 npm start，兩個指令都會起同一個 WebUI
    ```
 
    - `MOCK_WORKER` **一定要清空**（或設 `0`）。它的優先權最高，留著 `1` 就永遠是 mock。
+   - 請直接**改掉原本那一行**，不要在檔尾另外加一行：`.env` 裡同一個名稱寫兩次時，只有第一次出現的那行會生效，原本的 `MOCK_WORKER=1` 會蓋掉你後面加的。
    - 網址要帶 `/v1`；`11434` 是 ollama 的預設 port。用 LM Studio、vLLM 等其他 OpenAI 相容服務，換成它們的網址即可。
    - `AIWFF_OPENAI_API_KEY` 本機 ollama 不用填；服務要金鑰才填，它只寫在你本機 `.env`，不進 git（§1.4）。
 
@@ -312,7 +313,7 @@ HUD 的「模式」會變成 `claude（真實 worker）`。真 worker 產出的�
 不管走 A 還是 B，都用同一個方式確認：
 
 1. 在 WebUI 切到「對話 / 新任務」分頁，送一句：`你好，你是誰？`
-2. 等任務狀態變成 `done`，打開產出 `data/artifacts/<task_id>.result.md`（WebUI 任務詳情也看得到）。
+2. 等對話分頁出現「狀態：完成」和產出路徑，用檔案總管或編輯器打開那個檔 `data/artifacts/<task_id>.result.md`。WebUI 目前只顯示路徑，不會直接把回答內容秀在畫面上。
 3. 判斷：
 
 | 你看到的 | 代表 |
@@ -323,7 +324,7 @@ HUD 的「模式」會變成 `claude（真實 worker）`。真 worker 產出的�
 
 ### 3.5 接不上時先對這張表
 
-任務失敗的原因會寫在任務詳情的錯誤欄，也會記在 `data/tasks/<task_id>.progress.jsonl`。
+任務失敗的原因會顯示在 WebUI「任務」分頁那筆任務底下，也會記在 `data/tasks/<task_id>.progress.jsonl`。
 
 | 你看到的錯誤 | 原因 | 處理 |
 |---|---|---|
