@@ -151,7 +151,7 @@ npm start
 
 Then verify it:
 
-1. Open `http://127.0.0.1:3100`.
+1. Open the login link printed in the terminal (`登入 WebUI：http://127.0.0.1:3100/?token=...`). Without it the WebUI still loads, but the chat tab cannot create tasks.
 2. Send any message to your Telegram Bot.
 3. Confirm a new task appears in the WebUI.
 4. Wait for the Telegram completion notice.

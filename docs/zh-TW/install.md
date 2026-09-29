@@ -202,7 +202,7 @@ PASS task status is done: 10fe665b-ffc3-4099-9d27-8cfd552cb17d
 npm run web        # 等同 npm start，兩個指令都會起同一個 WebUI
 ```
 
-看到 `AIWFF Runtime listening on http://127.0.0.1:3100` 後，用瀏覽器打開這個網址，就會看到控制台首頁（HUD 分頁）：
+看到 `AIWFF Runtime listening on http://127.0.0.1:3100` 後，**用瀏覽器打開終端機印出的登入連結**（下一行 `登入 WebUI：http://127.0.0.1:3100/?token=...`），就會登入並看到控制台首頁（HUD 分頁）。直接開 `http://127.0.0.1:3100` 也看得到畫面，但沒登入時「對話」分頁不能建立任務；沒在 `.env` 設 `AIWFF_RUNTIME_TOKEN` 的話，每次重啟連結都會換新，要重點一次：
 
 ![WebUI HUD 首頁](../images/webui-01-hud-dashboard.png)
 

@@ -428,6 +428,16 @@
       cursor: not-allowed;
       background: var(--fg-2);
     }
+    .chat-login-notice {
+      flex-shrink: 0;
+      padding: 10px 24px;
+      border-top: 1px dashed var(--border-soft);
+      background: var(--bg-2);
+      color: var(--fg-1);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .chat-login-notice[hidden] { display: none; }
     .chat-state-badge {
       min-height: 42px;
       display: inline-flex;
@@ -814,6 +824,9 @@
       <section id="view-new-task" class="view">
         <div class="task-chat" aria-label="用對話建立任務">
           <div class="chat-messages" id="task-chat-messages" aria-live="polite"></div>
+          <div class="chat-login-notice" id="task-chat-login" role="status" hidden>
+            尚未登入，不能建立任務。請到跑 <code>npm run web</code> 的終端機，點「登入 WebUI：」後面那條登入連結。
+          </div>
           <div class="chat-input" id="task-chat-input-box">
             <div class="chat-input-row">
               <textarea id="task-chat-text" rows="1" placeholder="輸入新任務… Enter 送出 / Shift+Enter 換行"></textarea>
@@ -909,6 +922,8 @@
       lastSyncMs: 0,
       online: false,
       chatBusy: false,
+      // null = 還沒查過 /api/session；false = 沒有登入 cookie，對話分頁停用送出。
+      loggedIn: null,
       chatTasks: {},
       chatMessages: [
         {
@@ -928,7 +943,8 @@
       memory: '/api/memory',
       logs: '/api/logs',
       doctor: '/api/doctor',
-      settings: '/api/settings'
+      settings: '/api/settings',
+      session: '/api/session'
     };
 
     var STATUS_TEXT = {
@@ -1409,6 +1425,7 @@
       }
       renderAll();
       updateSyncChip();
+      await refreshSession();
     }
 
     // 資料新鮮度／連線狀態（借鏡 multi-agent orchestration dashboard：面板必須讓人一眼看出資料是不是 stale）
@@ -1447,11 +1464,33 @@
       });
     }
 
+    // 登入狀態：只看有沒有有效的 HttpOnly cookie（由終端機印的登入連結換得）。
+    function renderLoginGate() {
+      var loggedOut = state.loggedIn === false;
+      var notice = byId('task-chat-login');
+      if (notice) notice.hidden = !loggedOut;
+      var button = byId('task-chat-send');
+      if (button) button.disabled = loggedOut || state.chatBusy;
+      var input = byId('task-chat-text');
+      if (input) input.disabled = loggedOut;
+      if (loggedOut && !state.chatBusy) setChatBadge('未登入 · 停用');
+    }
+
+    async function refreshSession() {
+      try {
+        var data = await fetchJson(routes.session, { credentials: 'same-origin' });
+        state.loggedIn = !!data.loggedIn;
+      } catch (_) {
+        // 連不上 runtime 時維持原狀，由連線狀態列提示。
+      }
+      renderLoginGate();
+    }
+
     async function sendChatTask() {
       var input = byId('task-chat-text');
       var button = byId('task-chat-send');
       var text = input ? input.value.trim() : '';
-      if (!text || state.chatBusy) return;
+      if (!text || state.chatBusy || state.loggedIn === false) return;
       state.chatBusy = true;
       if (button) button.disabled = true;
       setChatBadge('建立中 · 送出中');
@@ -1459,6 +1498,7 @@
       try {
         var created = await fetchJson(routes.tasks, {
           method: 'POST',
+          credentials: 'same-origin',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
             title: taskTitleFromText(text),
@@ -1474,10 +1514,13 @@
         await refresh();
       } catch (error) {
         appendChatMessage('assistant', '建立失敗：' + error.message, timeMeta('系統'));
+        // runtime 重啟會換 token，舊 cookie 失效 → 重查登入狀態。
+        await refreshSession();
       } finally {
         state.chatBusy = false;
-        if (button) button.disabled = false;
+        if (button) button.disabled = state.loggedIn === false;
         renderChat();
+        renderLoginGate();
       }
     }
 
