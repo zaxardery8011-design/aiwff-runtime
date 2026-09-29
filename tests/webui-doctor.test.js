@@ -58,6 +58,11 @@ function fakeElement() {
     removeAttribute() {},
     addEventListener() {},
     closest: () => null,
+    children: [],
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
   };
 }
 
@@ -72,6 +77,7 @@ function loadWebui(fetchImpl) {
       return elements.get(id);
     },
     querySelectorAll: () => [],
+    createElement: () => fakeElement(), // 聊天訊息節點（chatMessageNode）載入時就會建
   };
   const context = {
     document,
