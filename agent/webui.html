@@ -983,7 +983,8 @@
       inbox_dir: '收件匣目錄',
       memory_dir: '記憶目錄',
       worker_mode: 'Worker 模式',
-      port: '連接埠'
+      port: '連接埠',
+      doctor_fetch: '診斷報告'
     };
 
     function byId(id) {
@@ -1386,7 +1387,9 @@
       var checks = report.checks.map(function(check) {
         return '<div class="check-row"><span class="' + (check.ok ? 'ok' : 'fail') + '">' + (check.ok ? '●' : '●') + '</span><div><b>' + escapeHtml(doctorLabel(check.id)) + '</b><div class="soft">' + escapeHtml(doctorDetail(check)) + '</div></div></div>';
       }).join('');
-      setHtml('doctor-list', checks || empty('尚無診斷報告'));
+      var failed = report.checks.filter(function(check) { return !check.ok; });
+      var summary = failed.length ? '<div class="check-row"><span class="fail">●</span><div><b>未通過 ' + failed.length + ' 項</b><div class="soft">' + escapeHtml(failed.map(function(check) { return doctorLabel(check.id); }).join('、')) + '</div></div></div>' : '';
+      setHtml('doctor-list', summary + checks || empty('尚無診斷報告'));
 
       var settings = state.settings || {};
       var rows = Object.keys(settings).filter(function(key) {
@@ -1428,8 +1431,22 @@
       state.progress = next;
     }
 
+    // doctor 的 ok:false 是診斷結果（某一項沒過），不是連線錯誤；不能讓它把整頁拖成「連線中斷」。
+    // 這裡永遠不 reject：端點本身讀不到時，回一份標出讀取失敗的報告。
+    async function fetchDoctorReport() {
+      try {
+        var response = await fetch(routes.doctor);
+        var data = await response.json();
+        if (response.ok && data && Array.isArray(data.checks)) return data;
+        throw new Error((data && data.error) || response.statusText);
+      } catch (error) {
+        return { ok: false, checks: [{ id: 'doctor_fetch', ok: false, detail: '診斷報告讀取失敗：' + error.message }] };
+      }
+    }
+
     async function refresh() {
       try {
+        var doctorPending = fetchDoctorReport();
         var results = await Promise.all([
           fetchJson(routes.health),
           fetchJson(routes.hud),
@@ -1438,7 +1455,6 @@
           fetchJson(routes.inbox),
           fetchJson(routes.memory),
           fetchJson(routes.logs),
-          fetchJson(routes.doctor),
           fetchJson(routes.settings)
         ]);
         state.health = results[0];
@@ -1448,8 +1464,8 @@
         state.inbox = results[4].events || [];
         state.memory = results[5].documents || [];
         state.logs = results[6];
-        state.doctor = results[7];
-        state.settings = results[8];
+        state.settings = results[7];
+        state.doctor = await doctorPending;
         await refreshProgress();
         syncChatTasks();
         state.lastSyncMs = Date.now();
