@@ -5,20 +5,22 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-success)
-![Default mode](https://img.shields.io/badge/default-mock%20%2F%20free-blue)
+![Default mode](https://img.shields.io/badge/default-mock%20%2F%20no%20API%20key-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Phase](https://img.shields.io/badge/scope-Phase%202-informational)
 [![Docs zh-TW](https://img.shields.io/badge/docs-zh--TW-ff69b4)](README.zh-TW.md)
 
-每件任務留收據。引擎可以換。然後才是 Telegram。然後才是 Claude。
+每件任務留收據。然後才是 Telegram。然後才是 Claude。
 
-aiwff-runtime 跑在你的電腦上。你丟一件事。worker 跑完。結果是一份檔。瀏覽器看得到進度。這版接上的是 mock，或 Claude CLI。OpenAI 相容端點是選用，預設關閉。Gemini 與 Codex 這版沒接成 worker。
+這版預設 mock。真 worker 是 Claude CLI。Gemini 與 Codex 這版沒接成 worker。換引擎是以後的事。
+
+aiwff-runtime 跑在你的電腦上。你丟一件事。worker 跑完。結果是一份檔。瀏覽器看得到進度。OpenAI 相容端點是選用，預設關閉。
 
 ![aiwff-runtime 架構圖：Telegram 與 WebUI 輸入、本機 daemon（背景任務程式）、mock 或 Claude worker、file-bus 輸出](docs/images/aiwff-architecture.png)
 
 ## 這是什麼？
 
-你可以把 aiwff-runtime 想成「單機版的小主腦」。它在你的電腦上常駐一個 daemon，也就是背景一直跑、負責收任務和派工的 Node.js 程式。你可以從 WebUI 建立任務、看進度、找結果。
+aiwff-runtime 是單機任務引擎。人丟一件事。worker 跑完。結果是一份檔。它在你的電腦上常駐一個 daemon，也就是背景一直跑、負責收任務和派工的 Node.js 程式。你可以從 WebUI 建立任務、看進度、找結果。
 
 先把兩個會一直出現的詞說清楚：artifact 是任務完成後留下來的成果檔；file-bus 是用一般檔案傳任務、進度和結果，不需要額外的資料庫。
 
@@ -27,7 +29,7 @@ aiwff-runtime 跑在你的電腦上。你丟一件事。worker 跑完。結果�
 | 只是另一個聊天視窗 | 它會建立任務、派 worker、寫 artifact，並回報完成狀態 |
 | 只是包一層模型 API | 它用你的電腦、你的檔案、你的 Claude CLI 來跑 |
 | 所有步驟都要先畫成固定流程 | 它收一段任務指令後，讓 Claude 在設定邊界內規劃和用工具 |
-| 任務狀態存在雲端服務 | 任務、進度、結果都存在 repo（這個專案資料夾）內的檔案裡 |
+| 任務、進度和結果 | 寫在這個專案資料夾的檔案裡。 |
 
 最短流程長這樣：
 
@@ -47,7 +49,7 @@ Telegram message
 | L2 | API wrapper | 把模型 API 包成自己的介面 | 在它下面 |
 | L3 | IDE 或 CLI assistant | 可以用工具，但狀態多半跟著單次 session | 在它下面 |
 | L4 | n8n / Make / Zapier | 事先畫好的流程照路線跑 | 在它下面 |
-| L5 | Local agent runtime | 收任務、規劃、用工具、保留任務狀態 | **aiwff-runtime minimal-brain** |
+| L5 | Local agent runtime | 收任務、規劃、用工具、保留任務狀態 | **aiwff-runtime 是單機任務引擎。** |
 | L6 | Multi-node orchestration | 多台機器、多個 agent 協作 | 完整 AIWFF |
 
 aiwff-runtime 是 L5 基底：單機、可看見、可驗證的任務執行環。完整 AIWFF 則是更大的 L6 多節點系統。
@@ -325,12 +327,12 @@ AIWFF_OPENAI_MODEL=qwen3:32b
 
 這個 repo 的取捨很簡單：先把多節點複雜度拿掉，保留單機 agent loop，讓人看得懂、跑得起來、查得到狀態。
 
-| 面向 | 完整 AIWFF | aiwff-runtime minimal-brain |
+| 面向 | 完整 AIWFF | 這個 repo 是單機。 |
 |---|---|---|
 | 大腦設定 | 多檔治理堆疊，包含身份、邊界和操作規則 | 一個 `CLAUDE.md` 放身份、邊界、規則和輸出契約 |
 | 跨 session 記憶 | 結構化記憶、frontmatter、沉澱與去重 | 輕量 Markdown memory 檔注入 prompt |
 | 任務治理 | inbox、watching、patrol、backlog SSOT | minimal design target：簡化的 inbox 和 watching surface |
-| 節點規模 | 主腦機器 + 其他節點 + 跨機 dispatch | 單機 |
+| 節點規模 | 完整版是多台機器。 | 這個 repo 是單機。 |
 | 外部諮詢 | Gemini / Codex / 其他 advisory workers | 未來可擴充，不是 Phase 2 必要條件 |
 | 自我驗證 | 多 agent review 與更強治理檢查 | 目前先檢查 artifact 是否存在；完整 self-review 留到 hardening |
 | 操作介面 | TG、LINE、WebUI 等更多介面 | Phase 2 是 TG + WebUI |
@@ -342,7 +344,7 @@ AIWFF_OPENAI_MODEL=qwen3:32b
 
 | 限制 | 意思 |
 |---|---|
-| 真 worker 需要 Claude 訂閱 | mock 模式免費；真 Claude worker 取決於付費 Claude 帳號與 CLI 權限 |
+| 真 worker 需要 Claude 訂閱 | 預設 mock 不需要 API key。要叫 Claude CLI 真的跑，要用你自己的 Claude 帳號。 |
 | 單人使用設計 | 一個 Telegram bot 綁一個 admin chat ID；它不是多人客服系統 |
 | 沒有多節點 fleet | 這個 runtime 跑在一台機器上，不協調一整組機器 |
 | Windows PATH 設定 | Windows 上需要讓 `claude.cmd` 可以從 PATH 找到 |
@@ -354,23 +356,23 @@ AIWFF_OPENAI_MODEL=qwen3:32b
 | Phase | 狀態 | 範圍 |
 |---|---|---|
 | Phase 1 | Done | Mock-first task lifecycle、local file-bus、WebUI、demo verification |
-| Phase 2 | PR branch / 尚未合併成公開 baseline | Claude CLI worker、TG Bot polling、`CLAUDE.md` brain configuration、lightweight memory injection |
+| Phase 2 | 這版預設 mock。真 worker 是 Claude CLI。 | Claude CLI worker、TG Bot polling、`CLAUDE.md` brain configuration、lightweight memory injection |
 | Phase 3 | Planned | Memory Layer hardening：更好的抽取、整理和長期 context 管理 |
 
-在這個 PR merge 前，公開 `master` baseline 仍是 Phase 1。Phase 2 是目前 PR branch 的範圍。
+這版預設 mock。真 worker 是 Claude CLI。Gemini 與 Codex 這版沒接成 worker。換引擎是以後的事。
 
 ## 支援
 
 - 技術回報：GitHub Issues -> <https://github.com/zaxardery8011-design/aiwff-runtime/issues>。如果目前無法建立 issue，請改從 <https://zax.com.tw/?utm_source=github_aiwff-runtime&utm_campaign=readme_zh_support> 聯絡。
 - 完整版 / 客製化：<https://zax.com.tw/?utm_source=github_aiwff-runtime&utm_campaign=readme_zh_support>
 
-## Related — 守紀律工具鏈
+## 相關工具
 
-aiwff-runtime 是**引擎**——真的能跑得動你的 agent 的 local runtime。想讓它跑起來以後還守紀律？搭配這兩個護欄：
+aiwff-runtime 是本機任務引擎。soplint 掃紀律。execution-proofs 用檔案和時間戳核對「做完了」。
 
-- **[soplint](https://github.com/zaxardery8011-design/soplint)** — 靜態掃描 AI 工作節點的 SOP 紀律合規
-- **[execution-proofs](https://github.com/zaxardery8011-design/execution-proofs)** — MCP telemetry gateway：逼 agent 用真實檔案與時間戳證明「做完了」
-- **[aiwff-runtime](https://github.com/zaxardery8011-design/aiwff-runtime)** — the local agent runtime（本專案）
+- **[soplint](https://github.com/zaxardery8011-design/soplint)**. soplint 掃紀律。
+- **[execution-proofs](https://github.com/zaxardery8011-design/execution-proofs)**. execution-proofs 用檔案和時間戳核對「做完了」。
+- **[aiwff-runtime](https://github.com/zaxardery8011-design/aiwff-runtime)**. aiwff-runtime 是本機任務引擎。（本專案）
 
 > 引擎（跑得動的 agent）＋護欄（審紀律、逼證明），同一套「讓 AI 守紀律」哲學的兩面。
 

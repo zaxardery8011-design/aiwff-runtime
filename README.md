@@ -6,14 +6,14 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-success)
-![Default mode](https://img.shields.io/badge/default-mock%20%2F%20free-blue)
+![Default mode](https://img.shields.io/badge/default-mock%20%2F%20no%20API%20key-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Phase](https://img.shields.io/badge/scope-Phase%202-informational)
 [![Docs zh-TW](https://img.shields.io/badge/docs-zh--TW-ff69b4)](README.zh-TW.md)
 
 ## What is this?
 
-Each task leaves a receipt. The engine can change. Then Telegram. Then Claude.
+Each task leaves a receipt. Then Telegram. Then Claude.
 
 It runs on your machine for one operator. You send a task. A worker runs it. The result is a file you can open. You can watch progress in the browser. This build runs a mock worker, or Claude CLI. An OpenAI-compatible endpoint is optional and off by default. Gemini and Codex are not wired as workers in this build.
 
@@ -24,7 +24,7 @@ It runs on your machine for one operator. You send a task. A worker runs it. The
 | A chatbot that only replies once and stops | A local agent loop that can create a task, run Claude CLI, write artifacts, and report completion |
 | An API wrapper around a hosted chat model | A file-backed local runtime using your machine, your files, and your Claude CLI |
 | A fixed workflow builder where every path is drawn in advance | A task queue where Claude can plan and use tools inside the configured boundary |
-| A SaaS service where your task state lives elsewhere | A repo-local daemon, file-bus, WebUI, memory files, and optional Telegram interface |
+| Where task state lives | 任務、進度和結果寫在這個專案資料夾的檔案裡。 |
 
 The shortest version is:
 
@@ -44,7 +44,7 @@ Telegram message
 | L2 | API wrapper | A model API is wrapped with a custom UI | Below aiwff-runtime |
 | L3 | IDE or CLI assistant | Tool use exists, but state is mostly session-bound | Below aiwff-runtime |
 | L4 | n8n / Make / Zapier | Predefined workflows run along fixed paths | Below aiwff-runtime |
-| L5 | Local agent runtime | Receive arbitrary instructions, plan, use tools, keep task state | **aiwff-runtime minimal-brain** |
+| L5 | Local agent runtime | Receive arbitrary instructions, plan, use tools, keep task state | **This repo is a single-machine task engine.** |
 | L6 | Multi-node orchestration | Several machines and agents coordinate as a fleet | Full AIWFF |
 
 aiwff-runtime is the L5 base: a single-machine agent runtime with persistent task state. Full AIWFF is the larger L6 system.
@@ -319,12 +319,12 @@ AIWFF_OPENAI_MODEL=qwen3:32b
 
 The rule of this repo: remove multi-node complexity, keep the single-machine agent loop understandable.
 
-| Area | Full AIWFF | aiwff-runtime minimal-brain |
+| Area | Full AIWFF | This repo is a single-machine task engine. |
 |---|---|---|
 | Brain configuration | Multi-file governance stack for identity, boundaries, and operating rules | `CLAUDE.md` for identity, boundaries, rules, and output contract |
 | Cross-session memory | Structured memory, typed frontmatter, sedimentation, dedupe | Lightweight Markdown memory files injected into the prompt |
 | Task governance | Inbox, watching, patrol, backlog SSOT | Minimal design target: simplified inbox and watching surfaces |
-| Fleet | Main brain machine + other nodes + cross-machine dispatch | Single-machine only |
+| Fleet | The full system runs on more than one machine. | This repo is a single-machine task engine. |
 | External consultation | Gemini / Codex / other advisory workers | Optional future extension, not required for Phase 2 |
 | Self-verification | Multi-agent review and stronger governance checks | Artifact existence check now; fuller self-review is a hardening target |
 | Interfaces | TG, LINE, WebUI, and more | TG plus WebUI in Phase 2 |
@@ -336,7 +336,7 @@ These limitations are intentionally not softened.
 
 | Limitation | Meaning |
 |---|---|
-| Claude subscription required for real worker mode | Mock mode is free; real Claude worker mode depends on a paid Claude account and CLI access |
+| Claude subscription required for real worker mode | 預設 mock 不需要 API key。要叫 Claude CLI 真的跑，要用你自己的 Claude 帳號。 |
 | Single-user design | One Telegram bot is bound to one admin chat ID; this is not a multi-user helpdesk |
 | No multi-node fleet | This runtime runs on one machine and does not coordinate a fleet |
 | Windows PATH setup | Claude CLI on Windows needs `claude.cmd` available on PATH |
@@ -348,23 +348,23 @@ These limitations are intentionally not softened.
 | Phase | Status | Scope |
 |---|---|---|
 | Phase 1 | Done | Mock-first task lifecycle, local file-bus, WebUI, demo verification |
-| Phase 2 | PR branch / not public baseline until merged | Claude CLI worker, TG Bot polling, `CLAUDE.md` brain configuration, lightweight memory injection |
+| Phase 2 | 這版預設 mock。真 worker 要設 ENABLE_REAL_CLAUDE_WORKER=1，而且這版是 Claude CLI。 | Claude CLI worker, TG Bot polling, `CLAUDE.md` brain configuration, lightweight memory injection |
 | Phase 3 | Planned | Memory Layer hardening: better extraction, organization, and long-term context management |
 
-Until this PR is merged, the public `master` baseline remains Phase 1. Phase 2 is the current PR branch scope.
+這版預設 mock。真 worker 要設 ENABLE_REAL_CLAUDE_WORKER=1，而且這版是 Claude CLI。
 
 ## Support
 
 - Technical support: [GitHub Issues](https://github.com/zaxardery8011-design/aiwff-runtime/issues).
 - Full / customized version: <https://zax.com.tw/?utm_source=github_aiwff-runtime&utm_campaign=readme_support>
 
-## Related — the discipline toolchain
+## 相關工具
 
-aiwff-runtime is the **engine** — the local agent runtime that actually runs your agents. Want it to stay disciplined once it's running? Pair it with the guardrails:
+aiwff-runtime 是本機任務引擎。soplint 掃紀律。execution-proofs 用檔案和時間戳核對「做完了」。
 
-- **[soplint](https://github.com/zaxardery8011-design/soplint)** — static SOP-compliance audit for AI work nodes
-- **[execution-proofs](https://github.com/zaxardery8011-design/execution-proofs)** — MCP telemetry gateway: force agents to prove "done" with real files & timestamps
-- **[aiwff-runtime](https://github.com/zaxardery8011-design/aiwff-runtime)** — the local agent runtime (this repo)
+- **[soplint](https://github.com/zaxardery8011-design/soplint)**. soplint 掃紀律。
+- **[execution-proofs](https://github.com/zaxardery8011-design/execution-proofs)**. execution-proofs 用檔案和時間戳核對「做完了」。
+- **[aiwff-runtime](https://github.com/zaxardery8011-design/aiwff-runtime)**. aiwff-runtime 是本機任務引擎。 (this repo)
 
 > 引擎（跑得動的 agent）＋護欄（審紀律、逼證明），同一套「讓 AI 守紀律」哲學的兩面。
 
