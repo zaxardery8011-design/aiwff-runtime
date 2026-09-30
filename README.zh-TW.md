@@ -10,9 +10,9 @@
 ![Phase](https://img.shields.io/badge/scope-Phase%202-informational)
 [![Docs zh-TW](https://img.shields.io/badge/docs-zh--TW-ff69b4)](README.zh-TW.md)
 
-aiwff-runtime 是裝在你自己電腦上的小型 AI 任務跑台：你丟一件事，它幫你建任務、跑 worker（真正執行任務的子程序）、把結果寫成檔案。
-它適合想用 Telegram（手機訊息入口）或 WebUI（瀏覽器操作畫面）交辦事情，讓 Claude CLI（命令列啟動 Claude 的工具）在本機背景做事的人。
-預設 mock（不呼叫 Claude、不花錢的模擬模式）不用接外部服務；要跑真 Claude 時，再接 Claude CLI 和 Telegram。
+每件任務留收據。引擎可以換。然後才是 Telegram。然後才是 Claude。
+
+aiwff-runtime 跑在你的電腦上。你丟一件事。worker 跑完。結果是一份檔。瀏覽器看得到進度。這版接上的是 mock，或 Claude CLI。OpenAI 相容端點是選用，預設關閉。Gemini 與 Codex 這版沒接成 worker。
 
 ![aiwff-runtime 架構圖：Telegram 與 WebUI 輸入、本機 daemon（背景任務程式）、mock 或 Claude worker、file-bus 輸出](docs/images/aiwff-architecture.png)
 

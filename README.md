@@ -13,9 +13,9 @@
 
 ## What is this?
 
-aiwff-runtime is a local minimal brain for personal AI work: send a message to Telegram, Claude runs on your machine autonomously, the result is pushed back to you, and you can watch progress in the browser.
+Each task leaves a receipt. The engine can change. Then Telegram. Then Claude.
 
-It is designed for a single local operator who wants an agent runtime, not just another chat surface.
+It runs on your machine for one operator. You send a task. A worker runs it. The result is a file you can open. You can watch progress in the browser. This build runs a mock worker, or Claude CLI. An OpenAI-compatible endpoint is optional and off by default. Gemini and Codex are not wired as workers in this build.
 
 ![aiwff-runtime architecture: Telegram and WebUI inputs, local daemon, mock or Claude worker, and file-bus outputs](docs/images/aiwff-architecture.png)
 
