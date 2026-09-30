@@ -1520,19 +1520,27 @@ function main() {
   const { generated } = initRuntimeToken();
   const server = createRuntimeServer();
 
+  server.once('error', (err) => {
+    logStderr(
+      'server-listen',
+      `failed to bind http://127.0.0.1:${PORT}: ${err.code || err.message}. Set PORT to a free port and retry.`,
+    );
+    process.exit(1);
+  });
+
   server.listen(PORT, '127.0.0.1', () => {
     console.log(`AIWFF Runtime listening on http://127.0.0.1:${PORT}`);
     console.log(`登入 WebUI：${runtimeLoginUrl()}`);
     if (generated) {
       console.log('（AIWFF_RUNTIME_TOKEN 未設：token 為本次啟動自動產生、只存在記憶體，重啟後會換新連結。）');
     }
-  });
 
-  if (process.env.TG_BOT_TOKEN && !process.env.ADMIN_TG_CHAT_ID) {
-    console.error('Refusing Telegram polling: ADMIN_TG_CHAT_ID is required when TG_BOT_TOKEN is set.');
-  } else if (process.env.TG_BOT_TOKEN) {
-    startTelegramPolling();
-  }
+    if (process.env.TG_BOT_TOKEN && !process.env.ADMIN_TG_CHAT_ID) {
+      console.error('Refusing Telegram polling: ADMIN_TG_CHAT_ID is required when TG_BOT_TOKEN is set.');
+    } else if (process.env.TG_BOT_TOKEN) {
+      startTelegramPolling();
+    }
+  });
 }
 
 if (require.main === module) {

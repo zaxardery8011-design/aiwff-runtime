@@ -1,0 +1,64 @@
+const assert = require('node:assert/strict');
+const net = require('node:net');
+const path = require('node:path');
+const test = require('node:test');
+const { spawn } = require('node:child_process');
+
+const ROOT_DIR = path.resolve(__dirname, '..');
+
+function listen(server) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+}
+
+function close(server) {
+  return new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+}
+
+function startRuntime(port) {
+  return new Promise((resolve, reject) => {
+    const runtime = spawn(process.execPath, ['agent/index.js'], {
+      cwd: ROOT_DIR,
+      env: {
+        ...process.env,
+        PORT: String(port),
+        TG_BOT_TOKEN: '',
+        ADMIN_TG_CHAT_ID: '',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    runtime.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const timeout = setTimeout(() => {
+      runtime.kill();
+      reject(new Error(`runtime did not exit after listen failure; stderr: ${stderr}`));
+    }, 5000);
+    runtime.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    runtime.once('close', (code, signal) => {
+      clearTimeout(timeout);
+      resolve({ code, signal, stderr });
+    });
+  });
+}
+
+test('runtime exits 1 and reports EADDRINUSE when its port is occupied', async () => {
+  const holder = net.createServer();
+  await listen(holder);
+  const { port } = holder.address();
+
+  try {
+    const result = await startRuntime(port);
+    assert.equal(result.code, 1);
+    assert.equal(result.signal, null);
+    assert.match(result.stderr, /EADDRINUSE/);
+  } finally {
+    await close(holder);
+  }
+});
