@@ -1,3 +1,4 @@
+const fs = require('fs');
 const http = require('http');
 const net = require('net');
 const path = require('path');
@@ -34,7 +35,7 @@ async function choosePort() {
   });
 }
 
-function requestJson(port, method, route, payload) {
+function requestJson(port, method, route, payload, headers = {}) {
   return new Promise((resolve, reject) => {
     const body = payload ? JSON.stringify(payload) : '';
     const req = http.request(
@@ -46,18 +47,49 @@ function requestJson(port, method, route, payload) {
         headers: {
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(body),
+          ...headers,
         },
       },
       (res) => {
         let raw = '';
+        let settled = false;
+        // 回應在 body 中途被砍時（node v22 實測）res 依序發 'aborted' → 'error' ECONNRESET → 'close'，
+        // 從頭到尾不發 'end'，req 的 'error' 也不觸發：只掛 'end' 的寫法會讓這個 Promise 永遠不 settle，
+        // 呼叫端無聲卡死到 deadline 都跑不完。中途中斷一律 signal 成具名 abort，且空 body 不得
+        // 折成 `{}` 當成功回應——那是把「連線收在半路」報成 clean EOF。
+        const fail = (reason) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          reject(new Error(`${method} ${route}: ${reason}`));
+        };
+        res.on('aborted', () => {
+          fail(`response stream aborted after ${raw.length} bytes — the body was never completed`);
+        });
+        res.on('error', (error) => {
+          fail(`response stream failed after ${raw.length} bytes — ${error.code || error.message}`);
+        });
         res.on('data', (chunk) => {
           raw += chunk;
         });
         res.on('end', () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (!raw) {
+            const error = new Error(`${method} ${route}: HTTP ${res.statusCode} closed with an empty body — no JSON to read`);
+            error.statusCode = res.statusCode;
+            reject(error);
+            return;
+          }
           try {
-            const parsed = raw ? JSON.parse(raw) : {};
+            const parsed = JSON.parse(raw);
             if (res.statusCode >= 400) {
-              reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
+              const error = new Error(parsed.error || `HTTP ${res.statusCode}`);
+              error.statusCode = res.statusCode;
+              reject(error);
               return;
             }
             resolve(parsed);
@@ -105,6 +137,31 @@ async function waitForTaskDone(port, taskId) {
   throw new Error(`Task ${taskId} did not finish within 30 seconds`);
 }
 
+// 「任務回報 done」不等於「檔案真的落地」：把 demo 宣告的 artifact 讀回來實檢，
+// 缺檔／空檔／壞 JSON／內容對不上任務都必須讓 demo 以非 0 收場，不得只憑 API 回 done 判成功。
+function readBackArtifact(artifactPath, taskId) {
+  if (!fs.existsSync(artifactPath)) {
+    throw new Error(`task reported done but no artifact was written at ${artifactPath}`);
+  }
+  const buffer = fs.readFileSync(artifactPath);
+  if (buffer.length === 0) {
+    throw new Error(`artifact was written but is empty (0 bytes) at ${artifactPath}`);
+  }
+  let artifact;
+  try {
+    artifact = JSON.parse(buffer.toString('utf8'));
+  } catch (error) {
+    throw new Error(`artifact is not valid JSON at ${artifactPath}: ${error.message}`);
+  }
+  if (artifact.task_id && artifact.task_id !== taskId) {
+    throw new Error(`artifact task_id mismatch at ${artifactPath}: expected ${taskId}, found ${artifact.task_id}`);
+  }
+  if (!artifact.completed_at) {
+    throw new Error(`artifact completed_at is missing at ${artifactPath}`);
+  }
+  return { bytes: buffer.length, completed_at: artifact.completed_at };
+}
+
 async function main() {
   const port = await choosePort();
   const daemon = spawn('node', ['agent/index.js'], {
@@ -124,9 +181,11 @@ async function main() {
     });
     const task = await waitForTaskDone(port, created.id);
     const artifactPath = path.join(ROOT_DIR, 'data', 'artifacts', `${task.id}.result.json`);
+    const readback = readBackArtifact(artifactPath, task.id);
 
     console.log(`Task ID: ${task.id}`);
     console.log(`Artifact: ${artifactPath}`);
+    console.log(`Artifact readback: bytes=${readback.bytes} completed_at=${readback.completed_at}`);
     console.log(`Status: ${task.status}`);
     console.log('✓ Demo completed — task lifecycle verified');
   } finally {
@@ -134,7 +193,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(`FAIL demo: ${error.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(`FAIL demo: ${error.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { readBackArtifact, requestJson };

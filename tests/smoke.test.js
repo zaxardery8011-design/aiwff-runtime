@@ -1,11 +1,11 @@
 const assert = require('assert');
 const fs = require('fs');
-const http = require('http');
 const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
+const { requestJson } = require('../scripts/demo');
 const RUNTIME_TOKEN = 'smoke-runtime-token';
 const AUTH_HEADERS = { 'x-aiwff-runtime-token': RUNTIME_TOKEN };
 
@@ -22,45 +22,6 @@ function getOpenPort() {
       server.close(() => resolve(address.port));
     });
     server.listen(0, '127.0.0.1');
-  });
-}
-
-function requestJson(port, method, route, payload, headers = {}) {
-  return new Promise((resolve, reject) => {
-    const body = payload ? JSON.stringify(payload) : '';
-    const req = http.request(
-      {
-        hostname: '127.0.0.1',
-        port,
-        path: route,
-        method,
-        headers: {
-          'content-type': 'application/json',
-          'content-length': Buffer.byteLength(body),
-          ...headers,
-        },
-      },
-      (res) => {
-        let raw = '';
-        res.on('data', (chunk) => {
-          raw += chunk;
-        });
-        res.on('end', () => {
-          try {
-            const parsed = raw ? JSON.parse(raw) : {};
-            if (res.statusCode >= 400) {
-              reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
-              return;
-            }
-            resolve(parsed);
-          } catch (error) {
-            reject(error);
-          }
-        });
-      },
-    );
-    req.on('error', reject);
-    req.end(body);
   });
 }
 

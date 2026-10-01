@@ -13,6 +13,7 @@
     "verify-demo": "node scripts/verify-demo.js",
     "test": "node tests/smoke.test.js && node --test tests/reliability.test.js && node --test tests/port-bind-exit.test.js && node --test tests/webui-login.test.js && node --test tests/chat-result.test.js && node --test tests/webui-doctor.test.js",
     "scan:ip": "node scripts/ip-redline-scan.js",
+    "hooks:install": "node scripts/install-hooks.js",
     "web": "node agent/index.js"
   }
 }

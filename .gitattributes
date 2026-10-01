@@ -1,0 +1,4 @@
+# git hook 是交給 sh 執行的腳本：行尾被 checkout 換成 CRLF 會讓 shebang 帶著 \r，
+# 在 Windows 的 Git Bash 下直接執行失敗。而 pre-push 失敗的樣子是「hook 沒擋住」——
+# 一道靜默沒生效的閘比沒有閘更糟，所以這裡把行尾釘死成 LF，不交給 core.autocrlf 決定。
+scripts/git-hooks/** text eol=lf

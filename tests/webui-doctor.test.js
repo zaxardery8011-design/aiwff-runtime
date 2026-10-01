@@ -81,7 +81,10 @@ function loadWebui(fetchImpl) {
   };
   const context = {
     document,
-    window: {},
+    // 分頁深連結（applyHashTab）載入時就讀 location.hash、掛 hashchange。
+    window: { addEventListener() {} },
+    location: { hash: '' },
+    history: { replaceState() {} },
     localStorage: { getItem: () => null, setItem() {} },
     fetch: fetchImpl,
     setInterval: () => 0,
