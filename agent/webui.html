@@ -1320,8 +1320,28 @@
       return '<div class="task-row">' +
         '<div>' + statusLabel(task.status) + '</div>' +
         '<div><div class="task-title">' + escapeHtml(task.title || task.id) + '</div><div class="muted mono">' + escapeHtml(task.id || '') + '</div><div class="soft">' + escapeHtml(taskSummary(task)) + '</div></div>' +
-        '<div class="muted">' + escapeHtml(fmtDate(task.updated_at || task.created_at)) + '</div>' +
+        '<div class="muted">' + escapeHtml(fmtDate(task.updated_at || task.created_at)) + '<div>' + taskElapsedHtml(task) + '</div></div>' +
       '</div>';
+    }
+
+    // 任務耗時（借鏡 py-gpt「working timer」）：執行中每秒前進，結束後停在總耗時；起點缺值顯示「—」
+    function taskElapsedHtml(task) {
+      var start = Date.parse(task.created_at || '');
+      if (!Number.isFinite(start)) return '<span class="task-elapsed">—</span>';
+      if (task.status === 'running' || task.status === 'pending') {
+        return '<span class="task-elapsed" data-elapsed-start="' + start + '">已跑 ' + escapeHtml(fmtDuration((Date.now() - start) / 1000)) + '</span>';
+      }
+      var end = Date.parse(task.updated_at || '');
+      if (!Number.isFinite(end)) return '<span class="task-elapsed">—</span>';
+      return '<span class="task-elapsed">總耗時 ' + escapeHtml(fmtDuration((end - start) / 1000)) + '</span>';
+    }
+
+    function tickElapsed() {
+      var nodes = document.querySelectorAll('[data-elapsed-start]');
+      for (var i = 0; i < nodes.length; i++) {
+        var start = Number(nodes[i].getAttribute('data-elapsed-start'));
+        nodes[i].textContent = '已跑 ' + fmtDuration((Date.now() - start) / 1000);
+      }
     }
 
     function renderTasks() {
@@ -1615,6 +1635,7 @@
       var now = new Date();
       setText('hud-clock', now.toLocaleTimeString([], { hour12: false }));
       updateSyncChip();
+      tickElapsed();
     }
     tickClock();
     setInterval(tickClock, 1000);
