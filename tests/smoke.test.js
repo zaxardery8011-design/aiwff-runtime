@@ -5,9 +5,9 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
-// 這支 harness 以前自己抄了一份 requestJson，於是「中途斷線要 signal 成 abort」的修法得改三個地方。
-// 改成共用 demo.js 那一份：修一次就三邊同時生效，也不會有哪一份偷偷漂回舊行為。
-const { requestJson } = require(path.join(ROOT_DIR, 'scripts', 'demo.js'));
+const { requestJson } = require('../scripts/demo');
+const RUNTIME_TOKEN = 'smoke-runtime-token';
+const AUTH_HEADERS = { 'x-aiwff-runtime-token': RUNTIME_TOKEN };
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,7 +62,7 @@ async function main() {
   const port = await getOpenPort();
   const daemon = spawn('node', ['agent/index.js'], {
     cwd: ROOT_DIR,
-    env: { ...process.env, PORT: String(port), MOCK_WORKER: '1' },
+    env: { ...process.env, PORT: String(port), MOCK_WORKER: '1', AIWFF_RUNTIME_TOKEN: RUNTIME_TOKEN },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -75,7 +75,7 @@ async function main() {
     const created = await requestJson(port, 'POST', '/api/tasks', {
       title: 'Smoke test task',
       instruction: 'Verify the mock worker lifecycle end to end.',
-    });
+    }, AUTH_HEADERS);
     assert.match(created.id, /^[0-9a-f-]{36}$/i);
 
     const task = await waitForTaskDone(port, created.id);

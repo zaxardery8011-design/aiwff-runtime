@@ -35,7 +35,7 @@ async function choosePort() {
   });
 }
 
-function requestJson(port, method, route, payload) {
+function requestJson(port, method, route, payload, headers = {}) {
   return new Promise((resolve, reject) => {
     const body = payload ? JSON.stringify(payload) : '';
     const req = http.request(
@@ -47,6 +47,7 @@ function requestJson(port, method, route, payload) {
         headers: {
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(body),
+          ...headers,
         },
       },
       (res) => {
@@ -78,13 +79,17 @@ function requestJson(port, method, route, payload) {
           }
           settled = true;
           if (!raw) {
-            reject(new Error(`${method} ${route}: HTTP ${res.statusCode} closed with an empty body — no JSON to read`));
+            const error = new Error(`${method} ${route}: HTTP ${res.statusCode} closed with an empty body — no JSON to read`);
+            error.statusCode = res.statusCode;
+            reject(error);
             return;
           }
           try {
             const parsed = JSON.parse(raw);
             if (res.statusCode >= 400) {
-              reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
+              const error = new Error(parsed.error || `HTTP ${res.statusCode}`);
+              error.statusCode = res.statusCode;
+              reject(error);
               return;
             }
             resolve(parsed);

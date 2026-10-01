@@ -10,6 +10,8 @@ const { spawn, spawnSync } = require('node:child_process');
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
 const TASKS_DIR = path.join(DATA_DIR, 'tasks');
+const RUNTIME_TOKEN = 'test-runtime-token';
+const AUTH_HEADERS = { 'x-aiwff-runtime-token': RUNTIME_TOKEN };
 const agentModule = require(path.join(ROOT_DIR, 'agent', 'index.js'));
 
 function sleep(ms) {
@@ -94,6 +96,8 @@ async function startDaemon(env = {}) {
       CLAUDE_BYPASS_APPROVALS: '',
       MOCK_WORKER: '1',
       ENABLE_REAL_CLAUDE_WORKER: '',
+      AIWFF_WORKER_PROVIDER: '',
+      AIWFF_RUNTIME_TOKEN: RUNTIME_TOKEN,
       ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -218,6 +222,203 @@ process.stdin.on('end', () => {
 });
 `;
 
+function captureSpawnClaudeScript(captureFile) {
+  return `
+const fs = require('fs');
+const path = require('path');
+const captureFile = ${JSON.stringify(captureFile)};
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  const outMatch = input.match(/結果請寫到: (.+)/);
+  if (!outMatch) {
+    console.error('missing artifact path');
+    process.exit(3);
+  }
+  fs.mkdirSync(path.dirname(captureFile), { recursive: true });
+  fs.writeFileSync(captureFile, JSON.stringify({ cwd: process.cwd(), argv: process.argv.slice(2) }, null, 2));
+  const outPath = path.resolve(__dirname, '..', '..', outMatch[1].trim().replace(/\\//g, path.sep));
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, 'DONE: captured spawn boundary\\\\n');
+});
+`;
+}
+
+test('POST /api/tasks requires runtime token and accepts the correct token', async () => {
+  resetDataDir();
+  const runtime = await startDaemon({ AIWFF_RUNTIME_TOKEN: RUNTIME_TOKEN, MOCK_WORKER: '1' });
+
+  try {
+    await assert.rejects(
+      () =>
+        requestJson(runtime.port, 'POST', '/api/tasks', {
+          title: 'missing token',
+          instruction: 'should be rejected',
+        }),
+      (error) => error.statusCode === 401 && /token/i.test(error.message),
+    );
+
+    const created = await requestJson(
+      runtime.port,
+      'POST',
+      '/api/tasks',
+      {
+        title: 'authorized task',
+        instruction: 'should be accepted',
+      },
+      AUTH_HEADERS,
+    );
+    assert.match(created.id, /^[0-9a-f-]{36}$/i);
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+test('POST /api/tasks without configured token uses an auto-generated token and prints a login link', async () => {
+  resetDataDir();
+  const runtime = await startDaemon({ AIWFF_RUNTIME_TOKEN: '', MOCK_WORKER: '1' });
+
+  try {
+    // 沒設 AIWFF_RUNTIME_TOKEN 時 token 為啟動時自動產生，猜不到的固定值一律 401。
+    await assert.rejects(
+      () =>
+        requestJson(
+          runtime.port,
+          'POST',
+          '/api/tasks',
+          {
+            title: 'missing configured token',
+            instruction: 'should be rejected',
+          },
+          AUTH_HEADERS,
+        ),
+      (error) => error.statusCode === 401 && /token/i.test(error.message),
+    );
+    const deadline = Date.now() + 3000;
+    while (!/登入 WebUI：/.test(runtime.logs.stdout) && Date.now() < deadline) {
+      await sleep(50);
+    }
+    const match = runtime.logs.stdout.match(/登入 WebUI：(http:\/\/127\.0\.0\.1:(\d+)\/\?token=([0-9a-f]{48}))/);
+    assert.ok(match, `login link missing from stdout: ${runtime.logs.stdout}`);
+    assert.equal(Number(match[2]), runtime.port);
+
+    const created = await requestJson(
+      runtime.port,
+      'POST',
+      '/api/tasks',
+      { title: 'generated token', instruction: 'should be accepted' },
+      { 'x-aiwff-runtime-token': match[3] },
+    );
+    assert.match(created.id, /^[0-9a-f-]{36}$/i);
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+test('POST /api/tasks rejects cross-origin browser writes', async () => {
+  resetDataDir();
+  const runtime = await startDaemon({ AIWFF_RUNTIME_TOKEN: RUNTIME_TOKEN, MOCK_WORKER: '1' });
+
+  try {
+    await assert.rejects(
+      () =>
+        requestJson(
+          runtime.port,
+          'POST',
+          '/api/tasks',
+          {
+            title: 'csrf',
+            instruction: 'should be rejected',
+          },
+          { ...AUTH_HEADERS, origin: 'https://example.invalid' },
+        ),
+      (error) => error.statusCode === 403 && /Cross-origin/.test(error.message),
+    );
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+test('real worker spawn is scoped to a per-task workspace and logs args/cwd', async () => {
+  resetDataDir();
+  const captureFile = path.join(DATA_DIR, 'spawn-capture.json');
+  const claudeCmd = writeFakeClaude('spawn-capture-claude', captureSpawnClaudeScript(captureFile));
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    ENABLE_REAL_CLAUDE_WORKER: '1',
+    CLAUDE_CMD: claudeCmd,
+    CLAUDE_BYPASS_APPROVALS: '1',
+    AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS: '',
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'spawn boundary',
+      instruction: 'capture args and cwd',
+      timeout_sec: 10,
+    }, AUTH_HEADERS);
+    const task = await waitForTaskStatus(runtime.port, created.id, ['done']);
+    assert.equal(task.status, 'done');
+
+    const capture = JSON.parse(fs.readFileSync(captureFile, 'utf8'));
+    assert.equal(capture.cwd, path.join(DATA_DIR, 'workspaces', created.id));
+    assert.notEqual(capture.cwd, ROOT_DIR);
+    assert.deepEqual(capture.argv, [
+      '--print',
+      '--add-dir',
+      path.join(DATA_DIR, 'artifacts'),
+      '--disallowedTools',
+      'Bash,PowerShell',
+    ]);
+    assert.match(runtime.logs.stderr, /CLAUDE_BYPASS_APPROVALS ignored/);
+
+    const progress = await requestJson(runtime.port, 'GET', `/api/tasks/${created.id}/progress`);
+    assert.ok(
+      progress.lines.some((line) => line.includes('"--add-dir"') && line.includes(' cwd=')),
+      `expected spawn args/cwd progress line, got: ${JSON.stringify(progress.lines)}`,
+    );
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+test('dangerous Claude bypass requires explicit double opt-in and emits a warning', async () => {
+  resetDataDir();
+  const captureFile = path.join(DATA_DIR, 'spawn-dangerous-capture.json');
+  const claudeCmd = writeFakeClaude('spawn-dangerous-claude', captureSpawnClaudeScript(captureFile));
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    ENABLE_REAL_CLAUDE_WORKER: '1',
+    CLAUDE_CMD: claudeCmd,
+    CLAUDE_BYPASS_APPROVALS: '1',
+    AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS: '1',
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'dangerous spawn boundary',
+      instruction: 'capture dangerous args',
+      timeout_sec: 10,
+    }, AUTH_HEADERS);
+    await waitForTaskStatus(runtime.port, created.id, ['done']);
+
+    const capture = JSON.parse(fs.readFileSync(captureFile, 'utf8'));
+    assert.deepEqual(capture.argv, [
+      '--dangerously-skip-permissions',
+      '--print',
+      '--add-dir',
+      path.join(DATA_DIR, 'artifacts'),
+      '--disallowedTools',
+      'Bash,PowerShell',
+    ]);
+    assert.equal(capture.cwd, path.join(DATA_DIR, 'workspaces', created.id));
+    assert.match(runtime.logs.stderr, /--dangerously-skip-permissions/);
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
 test('real worker receives special-character and long zh-TW task text through stdin', async () => {
   resetDataDir();
   const claudeCmd = writeFakeClaude('capture-claude', CAPTURE_CLAUDE);
@@ -238,7 +439,7 @@ test('real worker receives special-character and long zh-TW task text through st
       title: 'stdin reliability',
       instruction,
       timeout_sec: 10,
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['done']);
     assert.equal(task.status, 'done');
     assert.match(task.artifact_path, /\.result\.md$/);
@@ -257,7 +458,7 @@ test('timeout marks task blocked and writes an inbox event', async () => {
       title: 'timeout reliability',
       instruction: 'mock worker should be stopped by timeout',
       timeout_sec: 2,
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['blocked'], 8000);
     assert.equal(task.blocked_reason, 'timeout');
     const inboxFile = path.join(DATA_DIR, 'inbox', `${created.id}.blocked.json`);
@@ -284,7 +485,7 @@ test('real worker success without artifact fails clearly', async () => {
       title: 'missing artifact',
       instruction: 'exit zero but do not write the result file',
       timeout_sec: 10,
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['failed']);
     assert.equal(task.error, 'no artifact produced');
   } finally {
@@ -306,7 +507,7 @@ test('silent headless worker gets a named cause, not a bare missing artifact', a
       title: 'silent worker',
       instruction: 'exit zero without printing anything',
       timeout_sec: 10,
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['failed']);
     assert.equal(
       task.error,
@@ -332,7 +533,7 @@ test('non-zero exit without stderr still records a named cause', async () => {
       title: 'silent failure worker',
       instruction: 'exit non-zero without printing anything',
       timeout_sec: 10,
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['failed']);
     assert.equal(task.error, 'Claude exited with code 3: no stderr or stdout output');
   } finally {
@@ -541,6 +742,32 @@ test('failure receipt: a corrupt task file degrades to a named cause instead of 
   assert.equal(agentModule.readTaskSafely(taskId, 'unit').status, 'running');
 });
 
+test('config: blank env value counts as unset and falls back to .env', () => {
+  resetDataDir();
+  const dir = path.join(DATA_DIR, 'dotenv');
+  fs.mkdirSync(dir, { recursive: true });
+  const envPath = path.join(dir, '.env');
+  fs.writeFileSync(envPath, 'AIWFF_TEST_DOTENV_KEY=from-file\n');
+  const key = 'AIWFF_TEST_DOTENV_KEY';
+  try {
+    delete process.env[key];
+    agentModule.loadDotEnv(envPath);
+    const unsetResult = process.env[key];
+
+    for (const blank of ['', '   ']) {
+      process.env[key] = blank;
+      agentModule.loadDotEnv(envPath);
+      assert.equal(process.env[key], unsetResult, `blank ${JSON.stringify(blank)} should behave like unset`);
+    }
+
+    process.env[key] = 'from-shell';
+    agentModule.loadDotEnv(envPath);
+    assert.equal(process.env[key], 'from-shell');
+  } finally {
+    delete process.env[key];
+  }
+});
+
 // --- (2) 任務失敗基本 retry ---
 test('task retry: real worker recovers on a later attempt and records retry_count', async () => {
   resetDataDir();
@@ -559,7 +786,7 @@ test('task retry: real worker recovers on a later attempt and records retry_coun
       title: 'retry recover',
       instruction: 'fail once then succeed',
       timeout_sec: 20,
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['done'], 20000);
     assert.equal(task.status, 'done');
     assert.equal(task.retry_count, 1);
@@ -590,7 +817,7 @@ test('task retry: real worker gives up as failed after retries are exhausted', a
       title: 'retry exhaust',
       instruction: 'always fail',
       timeout_sec: 20,
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['failed'], 20000);
     assert.equal(task.status, 'failed');
     assert.equal(task.retry_count, 1);
@@ -679,14 +906,28 @@ function makeScanRoot(files) {
   return root;
 }
 
+// 私有詞判準一律用假詞 fixture：真詞表只在維護者本機、不進版控，測試不得依賴它，
+// 也不得把任何真詞（含編碼後的形式）寫進這支檔。假詞是刻意造的無意義字串，不是真詞的變形。
+const FAKE_TERM = 'quokkaplinthfixture';
+const FAKE_TERM_HASH = require('node:crypto').createHash('sha256').update(FAKE_TERM, 'utf8').digest('hex');
+const FAKE_TERM_HASHES = new Set([FAKE_TERM_HASH]);
+const FAKE_TERMS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ip-redline-terms-'));
+const FAKE_TERMS_FILE = path.join(FAKE_TERMS_DIR, 'terms.fixture.json');
+fs.writeFileSync(FAKE_TERMS_FILE, JSON.stringify({ hashes: [FAKE_TERM_HASH] }), 'utf8');
+process.on('exit', () => fs.rmSync(FAKE_TERMS_DIR, { recursive: true, force: true }));
+
 // 掃描根一律用明示參數交給腳本；ambient IP_SCAN_ROOT 先清掉，要測繼承行為的測項自己塞回去。
-function runScan(rootDir, { explicit = true, ambientRoot = null } = {}) {
+// 詞表預設帶假詞 fixture；terms=null 表示不帶 --terms，terms='' 表示帶了旗標卻沒給檔。
+function runScan(rootDir, { explicit = true, ambientRoot = null, terms = FAKE_TERMS_FILE } = {}) {
   const env = { ...process.env };
   delete env.IP_SCAN_ROOT;
   if (ambientRoot !== null) {
     env.IP_SCAN_ROOT = ambientRoot;
   }
   const args = explicit ? [SCAN_SCRIPT, `--root=${rootDir}`] : [SCAN_SCRIPT];
+  if (terms !== null) {
+    args.push(`--terms=${terms}`);
+  }
   const result = spawnSync(process.execPath, args, { env, encoding: 'utf8' });
   return { code: result.status, out: `${result.stdout}${result.stderr}` };
 }
@@ -812,6 +1053,44 @@ test('ip redline guard: an inherited scan root without --root fails closed inste
     assert.ok(![0, 1, 2, 3, 4].includes(inherited.code), `root 拒絕態的 rc 撞到既有態: ${inherited.code}`);
   } finally {
     fs.rmSync(wrongTree, { recursive: true, force: true });
+  }
+});
+
+test('ip redline guard: an unusable term list exits 6 and a refused root exits 5 before terms are read', () => {
+  const root = makeScanRoot({ 'readme.md': 'nothing sensitive here\n' });
+  const badTerms = path.join(FAKE_TERMS_DIR, 'invalid.fixture.json');
+  fs.writeFileSync(badTerms, JSON.stringify({ hashes: ['not-a-sha256'] }), 'utf8');
+  const missingTerms = path.join(FAKE_TERMS_DIR, 'does-not-exist.json');
+
+  try {
+    // 正向對照：同一棵樹帶可用的假詞 fixture → PASS，證明下面的 6 是詞表造成的。
+    const ok = runScan(root);
+    assert.equal(ok.code, 0, ok.out);
+
+    // code 6：詞表缺檔／格式錯／旗標沒帶檔，一律連掃都不掃，不得印 PASS。
+    const cases = [
+      { label: 'missing', terms: missingTerms, reason: /reason=terms_file_missing/ },
+      { label: 'invalid', terms: badTerms, reason: /reason=terms_file_invalid/ },
+      { label: 'empty flag', terms: '', reason: /reason=empty_explicit_terms/ },
+    ];
+    for (const entry of cases) {
+      const run = runScan(root, { terms: entry.terms });
+      assert.equal(run.code, 6, `${entry.label}: ${run.out}`);
+      assert.match(run.out, entry.reason, run.out);
+      assert.match(run.out, /private term matching was not executed/);
+      assert.doesNotMatch(run.out, /^PASS /m);
+      assert.doesNotMatch(run.out, /files_checked=/, `${entry.label}: 拒掃卻有掃描計數`);
+    }
+
+    // code 5 先於 code 6：根拿不到時，詞表再壞也回 5——根是第一道判準。
+    const emptyRoot = runScan('', { terms: missingTerms });
+    assert.equal(emptyRoot.code, 5, emptyRoot.out);
+    assert.match(emptyRoot.out, /--root was given without a directory/);
+    const inherited = runScan(root, { explicit: false, ambientRoot: root, terms: badTerms });
+    assert.equal(inherited.code, 5, inherited.out);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(badTerms, { force: true });
   }
 });
 
@@ -1271,6 +1550,34 @@ function freePort() {
   });
 }
 
+// --- (4) OpenAI 相容端點插槽 ---
+function startFakeOpenAI() {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+    });
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}');
+      requests.push({ url: req.url, authorization: req.headers.authorization, body });
+      const userText = (body.messages || []).map((m) => m.content).join('\n');
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'chatcmpl-test',
+        object: 'chat.completion',
+        model: body.model,
+        choices: [{ index: 0, message: { role: 'assistant', content: `分類：${/退款/.test(userText) ? 'refund' : 'other'}` }, finish_reason: 'stop' }],
+      }));
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      resolve({ server, port: server.address().port, requests });
+    });
+  });
+}
+
 function withOccupiedPort(run) {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -1643,9 +1950,8 @@ test('collectTaskEvents: sinceMs 之前的不進來，回未切上限的全量�
 });
 
 // --- (6) git metadata 射程：外洩不是只走檔案內容 ---
-// 禁詞一律從掃描器同一份 base64 還原出來，不落明文——否則這支測試檔自己會變成
-// 日後 grep 稽核的假命中源，而且會讓 scan:ip 掃到自己。
-const REDLINE_WORD = Buffer.from('bG9uZWx5Ym8=', 'base64').toString('utf8');
+// 注入用的禁詞就是假詞 fixture（runScan 預設帶 --terms 指向它），不用任何真詞或真詞的編碼形式。
+const REDLINE_WORD = FAKE_TERM;
 const CLEAN_NAME = 'aiwff-runtime maintainer';
 const CLEAN_EMAIL = 'maintainer@example.invalid';
 
@@ -1675,7 +1981,7 @@ test('ip redline guard: commit authors, ref names and the current identity are i
     assert.match(clean.out, /^PASS /m);
     assert.match(clean.out, /metadata_domain=git_metadata/);
     assert.match(clean.out, /metadata_hits=0/);
-    const cleanMeta = scanModule.scanGitMetadata(root);
+    const cleanMeta = scanModule.scanGitMetadata(root, FAKE_TERM_HASHES);
     assert.equal(cleanMeta.ok, true, JSON.stringify(cleanMeta));
     assert.equal(cleanMeta.commits_checked, 1);
     assert.ok(cleanMeta.refs_checked >= 3, `branch/tag/config 的分母不該是 ${cleanMeta.refs_checked}`);
@@ -1728,12 +2034,12 @@ test('ip redline guard: commit authors, ref names and the current identity are i
       assert.match(red.out, /^FAIL /m);
       assert.doesNotMatch(red.out, /^PASS /m);
 
-      const meta = scanModule.scanGitMetadata(root);
+      const meta = scanModule.scanGitMetadata(root, FAKE_TERM_HASHES);
       const hit = meta.findings.find(
         (finding) => finding.scope === injection.scope && finding.field === injection.field,
       );
       assert.ok(hit, `${injection.label} 沒被具名指認: ${JSON.stringify(meta.findings)}`);
-      assert.equal(hit.id, 'internal-keyword');
+      assert.equal(hit.id, 'private-term-hash');
       assert.ok(hit.ref && hit.ref.trim() !== '', `${injection.label} 命中沒講是哪顆 commit／哪個 ref`);
       // 具名到 commit／ref 這一層才算「講得出是哪顆」，只說「有命中」等於要人自己去翻。
       assert.match(red.out, new RegExp(`git-metadata ${injection.scope}:`), red.out);
@@ -1941,3 +2247,57 @@ test('timeout kind: blocked 收據把 kind 寫進 task，schema 收得下這個�
   assert.ok(taskSchemaViolation({ ...base, timeout_kind: 'probably_stuck' }));
 });
 
+test('openai_compatible provider: task is answered by the configured endpoint and written as artifact', async () => {
+  resetDataDir();
+  const fake = await startFakeOpenAI();
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    AIWFF_WORKER_PROVIDER: 'openai_compatible',
+    AIWFF_OPENAI_BASE_URL: `http://127.0.0.1:${fake.port}/v1/`,
+    AIWFF_OPENAI_MODEL: 'qwen3-32b-test',
+    AIWFF_OPENAI_API_KEY: 'sk-test',
+  });
+
+  try {
+    const settings = await requestJson(runtime.port, 'GET', '/api/settings');
+    assert.equal(settings.worker_mode, 'openai_compatible');
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: '客服分類',
+      instruction: '把這句分類：我要退款',
+    }, AUTH_HEADERS);
+    const task = await waitForTaskStatus(runtime.port, created.id, ['done', 'failed'], 10000);
+    assert.equal(task.status, 'done', `task error: ${task.error}`);
+    assert.equal(fake.requests.length, 1);
+    assert.equal(fake.requests[0].url, '/v1/chat/completions');
+    assert.equal(fake.requests[0].authorization, 'Bearer sk-test');
+    assert.equal(fake.requests[0].body.model, 'qwen3-32b-test');
+    assert.match(fake.requests[0].body.messages[1].content, /我要退款/);
+    const artifact = fs.readFileSync(path.join(ROOT_DIR, task.artifact_path), 'utf8');
+    assert.equal(artifact, '分類：refund\n');
+  } finally {
+    await stopDaemon(runtime.daemon);
+    fake.server.close();
+  }
+});
+
+test('openai_compatible provider: missing base_url/model fails clearly without calling anything', async () => {
+  resetDataDir();
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    AIWFF_WORKER_PROVIDER: 'openai_compatible',
+    AIWFF_OPENAI_BASE_URL: '',
+    AIWFF_OPENAI_MODEL: '',
+    MAX_TASK_RETRIES: '0',
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'no config',
+      instruction: 'should fail',
+    }, AUTH_HEADERS);
+    const task = await waitForTaskStatus(runtime.port, created.id, ['failed'], 10000);
+    assert.match(task.error, /AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required/);
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});

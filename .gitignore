@@ -3,4 +3,6 @@ node_modules/
 data/
 logs/
 *.log
+.ip-redline-terms.local.json
+.bak_iptermfix_20260824_0006
 

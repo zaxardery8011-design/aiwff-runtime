@@ -403,6 +403,9 @@
       border-radius: 8px;
       box-shadow: none;
     }
+    .msg.answer {
+      overflow-wrap: anywhere;
+    }
     .msg .meta {
       display: block;
       margin-top: 4px;
@@ -448,6 +451,16 @@
       cursor: not-allowed;
       background: var(--fg-2);
     }
+    .chat-login-notice {
+      flex-shrink: 0;
+      padding: 10px 24px;
+      border-top: 1px dashed var(--border-soft);
+      background: var(--bg-2);
+      color: var(--fg-1);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .chat-login-notice[hidden] { display: none; }
     .chat-state-badge {
       min-height: 42px;
       display: inline-flex;
@@ -973,6 +986,9 @@
       <section id="view-new-task" class="view">
         <div class="task-chat" aria-label="用對話建立任務">
           <div class="chat-messages" id="task-chat-messages" aria-live="polite"></div>
+          <div class="chat-login-notice" id="task-chat-login" role="status" hidden>
+            尚未登入，不能建立任務。請到跑 <code>npm run web</code> 的終端機，點「登入 WebUI：」後面那條登入連結。
+          </div>
           <div class="chat-input" id="task-chat-input-box">
             <div class="chat-input-row">
               <textarea id="task-chat-text" rows="1" placeholder="輸入新任務… Enter 送出 / Shift+Enter 換行"></textarea>
@@ -1111,6 +1127,8 @@
       lastSyncMs: 0,
       online: false,
       chatBusy: false,
+      // null = 還沒查過 /api/session；false = 沒有登入 cookie，對話分頁停用送出。
+      loggedIn: null,
       chatTasks: {},
       chatMessages: [
         {
@@ -1130,7 +1148,8 @@
       memory: '/api/memory',
       logs: '/api/logs',
       doctor: '/api/doctor',
-      settings: '/api/settings'
+      settings: '/api/settings',
+      session: '/api/session'
     };
 
     var STATUS_TEXT = {
@@ -1166,7 +1185,8 @@
       inbox_dir: '收件匣目錄',
       memory_dir: '記憶目錄',
       worker_mode: 'Worker 模式',
-      port: '連接埠'
+      port: '連接埠',
+      doctor_fetch: '診斷報告'
     };
 
     function byId(id) {
@@ -1273,11 +1293,19 @@
       return role === 'user' || role === 'assistant' || role === 'system' ? role : 'system';
     }
 
-    function chatMessageHtml(message) {
-      return '<div class="msg ' + safeChatRole(message.role) + '">' +
-        '<div class="text">' + escapeHtml(message.text || '') + '</div>' +
-        '<span class="meta">' + escapeHtml(message.meta || '') + '</span>' +
-      '</div>';
+    // 用 textContent 建訊息節點：模型回答等外部內容一律當純文字，不經 innerHTML。
+    function chatMessageNode(message) {
+      var node = document.createElement('div');
+      node.className = 'msg ' + safeChatRole(message.role) + (message.answer ? ' answer' : '');
+      var text = document.createElement('div');
+      text.className = 'text';
+      text.textContent = message.text || '';
+      var meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = message.meta || '';
+      node.appendChild(text);
+      node.appendChild(meta);
+      return node;
     }
 
     function setChatBadge(text) {
@@ -1297,7 +1325,10 @@
     function renderChat() {
       var box = byId('task-chat-messages');
       if (!box) return;
-      box.innerHTML = state.chatMessages.map(chatMessageHtml).join('');
+      box.textContent = '';
+      state.chatMessages.forEach(function(message) {
+        box.appendChild(chatMessageNode(message));
+      });
       var active = activeTrackedTask();
       if (!state.chatBusy) {
         setChatBadge(active ? ('任務 · ' + statusText(active.status)) : 'IDLE · 待機');
@@ -1307,8 +1338,10 @@
       }, 0);
     }
 
-    function appendChatMessage(role, text, meta, deferRender) {
-      state.chatMessages.push({ role: role, text: text, meta: meta || timeMeta('系統') });
+    function appendChatMessage(role, text, meta, deferRender, extra) {
+      var message = { role: role, text: text, meta: meta || timeMeta('系統') };
+      if (extra && extra.answer) message.answer = true;
+      state.chatMessages.push(message);
       if (!deferRender) renderChat();
     }
 
@@ -1343,6 +1376,21 @@
       };
     }
 
+    // 任務完成後讀 GET /api/tasks/:id/result（需登入 cookie），把回答當純文字附在聊天框。
+    async function showTaskAnswer(taskId) {
+      var text;
+      var extra = null;
+      try {
+        var data = await fetchJson('/api/tasks/' + encodeURIComponent(taskId) + '/result', { credentials: 'same-origin' });
+        text = String(data.content || '').trim() || '（產出是空的）';
+        if (data.truncated) text += '\n\n…（內容超過 64KB，已截斷；完整內容請看產出檔）';
+        extra = { answer: true };
+      } catch (error) {
+        text = '回答讀取失敗：' + error.message;
+      }
+      appendChatMessage('assistant', text, timeMeta('回答'), false, extra);
+    }
+
     function syncChatTasks() {
       Object.keys(state.chatTasks).forEach(function(taskId) {
         var tracked = state.chatTasks[taskId];
@@ -1351,6 +1399,11 @@
         if (task.status && task.status !== tracked.lastStatus) {
           tracked.lastStatus = task.status;
           appendChatMessage('assistant', taskStatusMessage(task, false), timeMeta('系統'), true);
+        }
+        // 每個任務只讀一次回答（refresh 每輪都會跑到這裡）。
+        if (task.status === 'done' && !tracked.answerRequested) {
+          tracked.answerRequested = true;
+          showTaskAnswer(taskId);
         }
       });
     }
@@ -1481,8 +1534,28 @@
       return '<div class="task-row">' +
         '<div>' + statusLabel(task.status) + '</div>' +
         '<div><div class="task-title">' + escapeHtml(task.title || task.id) + '</div><div class="muted mono">' + escapeHtml(task.id || '') + '</div><div class="soft">' + escapeHtml(taskSummary(task)) + '</div></div>' +
-        '<div class="muted">' + escapeHtml(fmtDate(task.updated_at || task.created_at)) + '</div>' +
+        '<div class="muted">' + escapeHtml(fmtDate(task.updated_at || task.created_at)) + '<div>' + taskElapsedHtml(task) + '</div></div>' +
       '</div>';
+    }
+
+    // 任務耗時（借鏡 py-gpt「working timer」）：執行中每秒前進，結束後停在總耗時；起點缺值顯示「—」
+    function taskElapsedHtml(task) {
+      var start = Date.parse(task.created_at || '');
+      if (!Number.isFinite(start)) return '<span class="task-elapsed">—</span>';
+      if (task.status === 'running' || task.status === 'pending') {
+        return '<span class="task-elapsed" data-elapsed-start="' + start + '">已跑 ' + escapeHtml(fmtDuration((Date.now() - start) / 1000)) + '</span>';
+      }
+      var end = Date.parse(task.updated_at || '');
+      if (!Number.isFinite(end)) return '<span class="task-elapsed">—</span>';
+      return '<span class="task-elapsed">總耗時 ' + escapeHtml(fmtDuration((end - start) / 1000)) + '</span>';
+    }
+
+    function tickElapsed() {
+      var nodes = document.querySelectorAll('[data-elapsed-start]');
+      for (var i = 0; i < nodes.length; i++) {
+        var start = Number(nodes[i].getAttribute('data-elapsed-start'));
+        nodes[i].textContent = '已跑 ' + fmtDuration((Date.now() - start) / 1000);
+      }
     }
 
     function renderTasks() {
@@ -1550,7 +1623,9 @@
       var checks = report.checks.map(function(check) {
         return '<div class="check-row"><span class="' + (check.ok ? 'ok' : 'fail') + '">' + (check.ok ? '●' : '●') + '</span><div><b>' + escapeHtml(doctorLabel(check.id)) + '</b><div class="soft">' + escapeHtml(doctorDetail(check)) + '</div></div></div>';
       }).join('');
-      setHtml('doctor-list', checks || empty('尚無診斷報告'));
+      var failed = report.checks.filter(function(check) { return !check.ok; });
+      var summary = failed.length ? '<div class="check-row"><span class="fail">●</span><div><b>未通過 ' + failed.length + ' 項</b><div class="soft">' + escapeHtml(failed.map(function(check) { return doctorLabel(check.id); }).join('、')) + '</div></div></div>' : '';
+      setHtml('doctor-list', summary + checks || empty('尚無診斷報告'));
 
       var settings = state.settings || {};
       var rows = Object.keys(settings).filter(function(key) {
@@ -2067,8 +2142,22 @@
       }
     }
 
+    // doctor 的 ok:false 是診斷結果（某一項沒過），不是連線錯誤；不能讓它把整頁拖成「連線中斷」。
+    // 這裡永遠不 reject：端點本身讀不到時，回一份標出讀取失敗的報告。
+    async function fetchDoctorReport() {
+      try {
+        var response = await fetch(routes.doctor);
+        var data = await response.json();
+        if (response.ok && data && Array.isArray(data.checks)) return data;
+        throw new Error((data && data.error) || response.statusText);
+      } catch (error) {
+        return { ok: false, checks: [{ id: 'doctor_fetch', ok: false, detail: '診斷報告讀取失敗：' + error.message }] };
+      }
+    }
+
     async function refresh() {
       try {
+        var doctorPending = fetchDoctorReport();
         var results = await Promise.all([
           fetchJson(routes.health),
           fetchJson(routes.hud),
@@ -2077,7 +2166,6 @@
           fetchJson(routes.inbox),
           fetchJson(routes.memory),
           fetchJson(routes.logs),
-          fetchJson(routes.doctor),
           fetchJson(routes.settings)
         ]);
         state.health = results[0];
@@ -2089,8 +2177,8 @@
         state.truncation.inbox = results[4].truncation || null;
         state.memory = results[5].documents || [];
         state.logs = results[6];
-        state.doctor = results[7];
-        state.settings = results[8];
+        state.settings = results[7];
+        state.doctor = await doctorPending;
         await refreshProgress();
         await refreshTraceEntries();
         syncChatTasks();
@@ -2103,6 +2191,7 @@
       }
       renderAll();
       updateSyncChip();
+      await refreshSession();
     }
 
     // 資料新鮮度／連線狀態（借鏡 multi-agent orchestration dashboard：面板必須讓人一眼看出資料是不是 stale）
@@ -2205,11 +2294,33 @@
       });
     }
 
+    // 登入狀態：只看有沒有有效的 HttpOnly cookie（由終端機印的登入連結換得）。
+    function renderLoginGate() {
+      var loggedOut = state.loggedIn === false;
+      var notice = byId('task-chat-login');
+      if (notice) notice.hidden = !loggedOut;
+      var button = byId('task-chat-send');
+      if (button) button.disabled = loggedOut || state.chatBusy;
+      var input = byId('task-chat-text');
+      if (input) input.disabled = loggedOut;
+      if (loggedOut && !state.chatBusy) setChatBadge('未登入 · 停用');
+    }
+
+    async function refreshSession() {
+      try {
+        var data = await fetchJson(routes.session, { credentials: 'same-origin' });
+        state.loggedIn = !!data.loggedIn;
+      } catch (_) {
+        // 連不上 runtime 時維持原狀，由連線狀態列提示。
+      }
+      renderLoginGate();
+    }
+
     async function sendChatTask() {
       var input = byId('task-chat-text');
       var button = byId('task-chat-send');
       var text = input ? input.value.trim() : '';
-      if (!text || state.chatBusy) return;
+      if (!text || state.chatBusy || state.loggedIn === false) return;
       state.chatBusy = true;
       if (button) button.disabled = true;
       setChatBadge('建立中 · 送出中');
@@ -2217,6 +2328,7 @@
       try {
         var created = await fetchJson(routes.tasks, {
           method: 'POST',
+          credentials: 'same-origin',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
             title: taskTitleFromText(text),
@@ -2232,10 +2344,13 @@
         await refresh();
       } catch (error) {
         appendChatMessage('assistant', '建立失敗：' + error.message, timeMeta('系統'));
+        // runtime 重啟會換 token，舊 cookie 失效 → 重查登入狀態。
+        await refreshSession();
       } finally {
         state.chatBusy = false;
-        if (button) button.disabled = false;
+        if (button) button.disabled = state.loggedIn === false;
         renderChat();
+        renderLoginGate();
       }
     }
 
@@ -2278,6 +2393,7 @@
       var now = new Date();
       setText('hud-clock', now.toLocaleTimeString([], { hour12: false }));
       updateSyncChip();
+      tickElapsed();
     }
     tickClock();
     setInterval(tickClock, 1000);

@@ -1,39 +1,78 @@
 #!/usr/bin/env node
 
+// IP redline scan — 推上 public repo 之前的閘。
+//
+// 私有詞的來源只有一份：本機的 .ip-redline-terms.local.json（sha256 hash 清單，不進版控）。
+// 檔案內容與 git metadata（commit author／email／subject、分支名、tag 名、當前 identity）
+// 都用同一份 hash 比對；原始碼裡不內嵌任何詞（明文或編碼都不放）。
+//
+// 用法：
+//   node scripts/ip-redline-scan.js [--root=<dir>] [--terms=<hash-file>]
+//   node scripts/ip-redline-scan.js <dir>          （舊版位置參數，等同 --root=<dir>，只收一個）
+//
+// exit code 對照（每一種失敗各自一個碼，不共用）：
+//   0  PASS：掃了 >=1 個檔，檔案內容與 metadata 都零命中
+//   1  命中：檔案內容或 git metadata 掃到私有詞／token 形狀的 secret／非公開 IPv4
+//   2  空掃：掃了 0 個檔——零命中什麼都證明不了
+//   3  讀檔錯誤：有檔讀不到，掃描不完整（具名列出檔案與 errno）
+//   4  判準清單空：REDLINE_PATTERNS 沒有任何可用條目，讀檔前就拒絕
+//   5  掃描根被拒：沿用繼承來的 IP_SCAN_ROOT、--root 沒給值、或位置參數不只一個
+//   6  詞表不可用：私有詞 hash 檔不存在、無法解析、為空或格式不對——私有詞比對沒執行
+
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
-// 吃根路徑的入口一律要求明示參數：掃描根的 override 只認呼叫端當場給的 `--root=<dir>`。
-// 繼承來的 IP_SCAN_ROOT 不算明示——殘留在 shell／CI job 裡的舊值會讓正式閘
+// 吃根路徑的入口一律要求明示參數：掃描根的 override 只認呼叫端當場給的 `--root=<dir>`
+// （或舊版的單一位置參數）。繼承來的 IP_SCAN_ROOT 不算明示——殘留在 shell／CI job 裡的舊值會讓正式閘
 // （npm run scan:ip）靜默掃到別的樹，而且因為 files_checked>=1 還會印出 PASS，
 // 等於拿一份掃錯對象的綠燈蓋掉真正的 repo。缺明示參數就 fail closed，不猜呼叫端的意圖。
 const DEFAULT_ROOT = path.join(__dirname, '..');
 // 模組層常數只從 __dirname 推導，載入時不讀任何 ambient 狀態。
 const ROOT_DIR = path.resolve(DEFAULT_ROOT);
+// 詞表預設跟著 scanner 所在的 repo 走，不跟著掃描根走：worktree／暫存解壓目錄裡沒有詞表，
+// 要用別份就明示 --terms=<file>。
+const LOCAL_TERMS_FILE = path.join(ROOT_DIR, '.ip-redline-terms.local.json');
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'data', 'logs']);
+const SKIP_FILES = new Set(['.bak_iptermfix_20260824_0006']);
+const MAX_HASH_CANDIDATE_CHARS = 80;
+const BASE64_TOKEN_REGEX = /[A-Za-z0-9+/_-]{4,}={0,2}/g;
 
 const ROOT_FLAG = '--root';
+const TERMS_FLAG = '--terms';
 
-function parseRootFlag(argv) {
+function parseFlag(argv, flag) {
   for (const arg of argv) {
-    if (arg === ROOT_FLAG) {
+    if (arg === flag) {
       return { present: true, value: '' };
     }
-    if (arg.startsWith(`${ROOT_FLAG}=`)) {
-      return { present: true, value: arg.slice(ROOT_FLAG.length + 1) };
+    if (arg.startsWith(`${flag}=`)) {
+      return { present: true, value: arg.slice(flag.length + 1) };
     }
   }
   return { present: false, value: '' };
 }
 
+function parseRootFlag(argv) {
+  return parseFlag(argv, ROOT_FLAG);
+}
+
+function positionalArgs(argv) {
+  return argv.filter((arg) => !arg.startsWith('--'));
+}
+
 // 純函式回傳 { ok, reason, root, declared }，讓測試能直接驗這條判準本身而不是驗 spawn 的副作用。
 function resolveRootDir(argv = process.argv.slice(2), env = process.env) {
   const flag = parseRootFlag(argv);
+  const positional = positionalArgs(argv);
   if (flag.present) {
     // 給了旗標卻沒給值 ＝ 參數沒填好，不是「用預設」。
     if (flag.value.trim() === '') {
       return { ok: false, reason: 'empty_explicit_root', root: null, declared: ROOT_FLAG };
+    }
+    if (positional.length) {
+      return { ok: false, reason: 'ambiguous_root', root: null, declared: `${ROOT_FLAG}=${flag.value} ${positional.join(' ')}` };
     }
     return {
       ok: true,
@@ -41,6 +80,13 @@ function resolveRootDir(argv = process.argv.slice(2), env = process.env) {
       root: path.resolve(flag.value),
       declared: `${ROOT_FLAG}=${flag.value}`,
     };
+  }
+  // 舊版呼叫法（master 的 pre-push hook 解 git archive 後傳目錄）相容保留：單一位置參數等同 --root。
+  if (positional.length > 1) {
+    return { ok: false, reason: 'ambiguous_root', root: null, declared: positional.join(' ') };
+  }
+  if (positional.length === 1) {
+    return { ok: true, reason: 'explicit_positional', root: path.resolve(positional[0]), declared: positional[0] };
   }
   const inherited = typeof env.IP_SCAN_ROOT === 'string' ? env.IP_SCAN_ROOT.trim() : '';
   if (inherited !== '') {
@@ -54,7 +100,7 @@ function resolveRootDir(argv = process.argv.slice(2), env = process.env) {
   return { ok: true, reason: 'default_repo_root', root: path.resolve(DEFAULT_ROOT), declared: '__dirname/..' };
 }
 
-// 根路徑被拒有專屬 exit code 5，跟「掃壞了」(3)、「掃到了」(1)、「空掃」(2) 在 rc 層分得開。
+// 根路徑被拒有專屬 exit code 5，跟「掃壞了」(3)、「掃到了」(1)、「空掃」(2)、「詞表不可用」(6) 在 rc 層分得開。
 function refuseRootVerdict(resolution) {
   const lines = {
     inherited_root_without_flag:
@@ -64,6 +110,9 @@ function refuseRootVerdict(resolution) {
     empty_explicit_root:
       `FAIL IP redline scan refused: ${ROOT_FLAG} was given without a directory — ` +
       'an empty root is a missing parameter, not the repo root',
+    ambiguous_root:
+      `FAIL IP redline scan refused: more than one scan root given (${resolution.declared}) — ` +
+      `pass exactly one ${ROOT_FLAG}=<dir>`,
   };
   return {
     code: 5,
@@ -75,58 +124,125 @@ function refuseRootVerdict(resolution) {
   };
 }
 
-const ENCODED_KEYWORD_TERMS = [
-  'U09VTA==',
-  'c291bF9iYXNlbGluZQ==',
-  'YmFzZWxpbmUuanNvbg==',
-  'Ymxlc3M=',
-  'U291bEludGVncml0eQ==',
-  'UHJlVG9vbFVzZQ==',
-  'TG9uZWx5Ym8=',
-  'bG9uZWx5Ym8=',
-  '5a+C5a+e5Lyv',
-  '6ZqK6ZW3',
-  '6Ie75a6J6ZGr',
-  '6Z+T',
-  'QUlXRkZf5ryU6K6K5Y+y',
-  '5LiJ6Zec',
-  'ZGlzcGF0Y2ggdGllcg==',
-  'bm9kZV9yZXBvcnQ=',
-  'cGVlcl9pbmJveA==',
-  'b3V0Ym94X3F1ZXVl',
-  'QlBD',
-  'ZmFjdG9yeV9zdHJlYW0=',
-  '5bel5bug55u05pKt',
-  '5ZCN5YaK',
-  'Z292ZXJuYW5jZV9odWI=',
-  'WkFYLUNPUkU=',
-  'dGFpbHNjYWxl',
-  'dGFpbG5ldA==',
-];
-
-function decodeBase64(value) {
-  return Buffer.from(value, 'base64').toString('utf8');
+function resolveTermsFile(argv = process.argv.slice(2)) {
+  const flag = parseFlag(argv, TERMS_FLAG);
+  if (flag.present) {
+    if (flag.value.trim() === '') {
+      return { ok: false, reason: 'empty_explicit_terms', file: null };
+    }
+    return { ok: true, reason: 'explicit_flag', file: path.resolve(flag.value) };
+  }
+  return { ok: true, reason: 'default_local_file', file: LOCAL_TERMS_FILE };
 }
 
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// 私有詞 hash 只放在不進版控的本機檔。純函式回傳 { ok, reason, hashes, file }，
+// 拿不到就由 main() 走 code 6——跟「空掃」(2) 分開：空掃是射程問題，缺詞表是判準問題。
+function loadLocalTermHashes(termsFile = LOCAL_TERMS_FILE) {
+  const fail = (reason, detail) => ({ ok: false, reason, detail, hashes: null, file: termsFile });
+  if (!termsFile || !fs.existsSync(termsFile)) {
+    return fail('terms_file_missing', 'file does not exist');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(termsFile, 'utf8'));
+  } catch (error) {
+    return fail('terms_file_unparseable', error.message);
+  }
+  const hashes = Array.isArray(parsed) ? parsed : parsed && parsed.hashes;
+  if (!Array.isArray(hashes) || hashes.length === 0) {
+    return fail('terms_file_empty', 'no hash entries');
+  }
+  if (!hashes.every((value) => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value))) {
+    return fail('terms_file_invalid', 'every entry must be a 64-char sha256 hex string');
+  }
+  return { ok: true, reason: 'ok', detail: '', hashes: new Set(hashes.map((value) => value.toLowerCase())), file: termsFile };
 }
 
-function buildKeywordRegex() {
-  const terms = ENCODED_KEYWORD_TERMS.map(decodeBase64).map(escapeRegExp);
-  const scopedIpv4 = `${decodeBase64('MTAw')}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}`;
-  return new RegExp([...terms, scopedIpv4].join('|'), 'i');
+function refuseTermsVerdict(load) {
+  return {
+    code: 6,
+    stream: 'error',
+    lines: [
+      `FAIL IP redline scan refused: private term hash list unusable (reason=${load.reason}: ${load.detail}) ` +
+        `at ${load.file ? path.basename(load.file) : TERMS_FLAG} — private term matching was not executed`,
+    ],
+  };
+}
+
+function normalizeTerm(value) {
+  return value.normalize('NFKC').toLowerCase();
+}
+
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(normalizeTerm(value), 'utf8').digest('hex');
+}
+
+function hasPrivateTermHash(value, termHashes) {
+  if (!termHashes || termHashes.size === 0) {
+    return false;
+  }
+  const chars = [...value];
+  for (let start = 0; start < chars.length; start += 1) {
+    const maxEnd = Math.min(chars.length, start + MAX_HASH_CANDIDATE_CHARS);
+    for (let end = start + 1; end <= maxEnd; end += 1) {
+      if (termHashes.has(sha256Hex(chars.slice(start, end).join('')))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function decodeBase64Token(token) {
+  const padded = token.replaceAll('-', '+').replaceAll('_', '/').padEnd(Math.ceil(token.length / 4) * 4, '=');
+  try {
+    const decoded = Buffer.from(padded, 'base64').toString('utf8');
+    if (!decoded || decoded.includes('�') || /[\u0000-\u0008\u000E-\u001F]/.test(decoded)) {
+      return null;
+    }
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+function hasEncodedPrivateTermHash(line, termHashes) {
+  if (!termHashes || termHashes.size === 0) {
+    return false;
+  }
+  for (const match of line.matchAll(BASE64_TOKEN_REGEX)) {
+    const decoded = decodeBase64Token(match[0]);
+    if (decoded && hasPrivateTermHash(decoded, termHashes)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isNonPublicIpv4(value) {
+  const octets = value.split('.').map(Number);
+  if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
+    return false;
+  }
+  const [a, b] = octets;
+  return (
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127)
+  );
 }
 
 const REDLINE_PATTERNS = [
   {
-    id: 'internal-keyword',
-    regex: buildKeywordRegex(),
-  },
-  {
     id: 'secret-token',
     regex:
       /([0-9]{8,10}:[A-Za-z0-9_-]{35,})|(sk-ant-[A-Za-z0-9_-]{20,})|(ghp_[A-Za-z0-9_]{20,})|(xox[baprs]-[A-Za-z0-9-]{20,})|(AIza[0-9A-Za-z_-]{20,})|(AKIA[0-9A-Z]{16})|-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----/,
+  },
+  {
+    id: 'non-public-ipv4',
+    regex: /\b(?:\d{1,3}\.){3}\d{1,3}\b/,
+    predicate: isNonPublicIpv4,
   },
 ];
 
@@ -255,6 +371,31 @@ function isBinary(buffer) {
   return buffer.includes(0);
 }
 
+// 一個字串（一行檔案內容或一個 metadata 欄位）的共用判準：先過白名單，再比私有詞 hash
+// （明文＋base64 解碼後），最後逐條 pattern。所有命中一律遮蔽，不讓偵測器的輸出自己變成第二個外洩點。
+function matchValue(scope, value, termHashes) {
+  const hits = [];
+  if (typeof value !== 'string' || value === '' || isAllowed(scope, value)) {
+    return hits;
+  }
+  if (hasPrivateTermHash(value, termHashes)) {
+    hits.push({ id: 'private-term-hash', match: '<redacted private term hash match>' });
+  }
+  if (hasEncodedPrivateTermHash(value, termHashes)) {
+    hits.push({ id: 'encoded-private-term-hash', match: '<redacted encoded private term hash match>' });
+  }
+  for (const pattern of REDLINE_PATTERNS) {
+    const match = value.match(pattern.regex);
+    if (match && (!pattern.predicate || pattern.predicate(match[0]))) {
+      hits.push({
+        id: pattern.id,
+        match: pattern.id === 'secret-token' ? '<redacted secret pattern>' : '<redacted redline pattern>',
+      });
+    }
+  }
+  return hits;
+}
+
 // 射程對帳：SKIP_DIRS 排掉的目錄是「沒驗到」，不是「驗過且乾淨」。掃的時候照實際目錄樹
 // （不是照宣告清單）把真的遇到、真的被排掉的目錄逐個記下來，收尾才講得出這張 PASS 沒涵蓋哪裡。
 // 閘沒射到的地方一定會漂，而一份不揭露射程的 PASS 會被讀成「整棵樹都乾淨」。
@@ -269,7 +410,7 @@ function listFiles(dir, rootDir = ROOT_DIR, skipped = []) {
       result.push(...listFiles(path.join(dir, entry.name), rootDir, skipped));
       continue;
     }
-    if (entry.isFile()) {
+    if (entry.isFile() && !SKIP_FILES.has(entry.name)) {
       result.push(path.join(dir, entry.name));
     }
   }
@@ -337,35 +478,14 @@ function resolveScanDomain(rootDir = ROOT_DIR) {
 // 檔案內容型的閘只掃 blob，但推上 public repo 的不只 blob：commit 的 author 名／email／
 // subject、分支名、tag 名，GitHub 的 /commits 頁面一行一行公開印出來。閘在工作樹層綠了，
 // 不代表推出去的東西乾淨——這是射程問題，不是 pattern 不夠多的問題。
-// 這一段拿同一份 ENCODED_KEYWORD_TERMS（不另開一份，免得兩份清單各漂各的）去掃四類 metadata。
+// 這一段拿同一份本機 hash 詞表（不另開一份，免得兩份清單各漂各的）去掃四類 metadata。
 const METADATA_FIELD_SEP = '\x1f';
 
-// 與 scanFile 同一套判準：先過白名單，再逐條 pattern；secret-token 一樣遮蔽，
-// 不讓偵測器的輸出自己變成第二個外洩點。
-function matchMetadata(scope, ref, field, value) {
-  const findings = [];
-  if (typeof value !== 'string' || value === '') {
-    return findings;
-  }
-  if (isAllowed(scope, value)) {
-    return findings;
-  }
-  for (const pattern of REDLINE_PATTERNS) {
-    const match = value.match(pattern.regex);
-    if (match) {
-      findings.push({
-        scope,
-        ref,
-        field,
-        id: pattern.id,
-        match: pattern.id === 'secret-token' ? '<redacted secret pattern>' : match[0],
-      });
-    }
-  }
-  return findings;
+function matchMetadata(scope, ref, field, value, termHashes = null) {
+  return matchValue(scope, value, termHashes).map((hit) => ({ scope, ref, field, ...hit }));
 }
 
-function scanGitMetadata(rootDir = ROOT_DIR) {
+function scanGitMetadata(rootDir = ROOT_DIR, termHashes = null) {
   const empty = { findings: [], commits_checked: 0, refs_checked: 0, unverified: [] };
   const inside = runGit(rootDir, ['rev-parse', '--is-inside-work-tree']);
   if (!inside.ok) {
@@ -395,9 +515,9 @@ function scanGitMetadata(rootDir = ROOT_DIR) {
       const [sha, authorName, authorEmail, subject] = row.split(METADATA_FIELD_SEP);
       commitsChecked += 1;
       const short = (sha || '').slice(0, 7) || '<unknown>';
-      findings.push(...matchMetadata('commit', short, 'author_name', authorName));
-      findings.push(...matchMetadata('commit', short, 'author_email', authorEmail));
-      findings.push(...matchMetadata('commit', short, 'subject', subject));
+      findings.push(...matchMetadata('commit', short, 'author_name', authorName, termHashes));
+      findings.push(...matchMetadata('commit', short, 'author_email', authorEmail, termHashes));
+      findings.push(...matchMetadata('commit', short, 'subject', subject, termHashes));
     }
   }
 
@@ -432,7 +552,7 @@ function scanGitMetadata(rootDir = ROOT_DIR) {
     }
     for (const name of res.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
       refsChecked += 1;
-      findings.push(...matchMetadata(source.scope, name, 'name', name));
+      findings.push(...matchMetadata(source.scope, name, 'name', name, termHashes));
     }
   }
 
@@ -444,7 +564,7 @@ function scanGitMetadata(rootDir = ROOT_DIR) {
       continue;
     }
     refsChecked += 1;
-    findings.push(...matchMetadata('config', key, 'value', res.stdout.trim()));
+    findings.push(...matchMetadata('config', key, 'value', res.stdout.trim(), termHashes));
   }
 
   return {
@@ -457,7 +577,7 @@ function scanGitMetadata(rootDir = ROOT_DIR) {
   };
 }
 
-function scanFile(filePath, rootDir = ROOT_DIR, counters = null) {
+function scanFile(filePath, rootDir = ROOT_DIR, counters = null, termHashes = null) {
   const repoPath = toRepoPath(filePath, rootDir);
   let buffer;
   try {
@@ -481,33 +601,18 @@ function scanFile(filePath, rootDir = ROOT_DIR, counters = null) {
     return [];
   }
 
-  const findings = [];
   const lines = buffer.toString('utf8').split(/\r?\n/);
   if (counters) {
     counters.files_checked += 1;
     counters.lines_checked += lines.length;
   }
-  lines.forEach((line, index) => {
-    if (isAllowed(repoPath, line)) {
-      return;
-    }
-    for (const pattern of REDLINE_PATTERNS) {
-      const match = line.match(pattern.regex);
-      if (match) {
-        findings.push({
-          file: repoPath,
-          line: index + 1,
-          id: pattern.id,
-          match: pattern.id === 'secret-token' ? '<redacted secret pattern>' : match[0],
-        });
-      }
-    }
-  });
-  return findings;
+  return lines.flatMap((line, index) =>
+    matchValue(repoPath, line, termHashes).map((hit) => ({ file: repoPath, line: index + 1, ...hit })),
+  );
 }
 
 // 回傳 findings + 實際檢查量。零命中只有在 files_checked >= 1 時才有意義。
-function scanTree(rootDir = ROOT_DIR, listCheck = checkListPredicates()) {
+function scanTree(rootDir = ROOT_DIR, listCheck = checkListPredicates(), termHashes = null) {
   const counters = {
     files_checked: 0,
     lines_checked: 0,
@@ -530,7 +635,7 @@ function scanTree(rootDir = ROOT_DIR, listCheck = checkListPredicates()) {
   const domainWarnings = [];
   // metadata 拿不到（不是 git checkout／git 叫不動）不得靜默：那代表 commit author、
   // 分支名、tag 名這一整塊射程這趟完全沒驗到，要當場吼出來並列進未驗清單。
-  const metadata = scanGitMetadata(rootDir);
+  const metadata = scanGitMetadata(rootDir, termHashes);
   if (!metadata.ok) {
     domainWarnings.push(
       `WARN IP redline scan could not bind to the git metadata domain (reason=${metadata.reason}) — ` +
@@ -553,7 +658,7 @@ function scanTree(rootDir = ROOT_DIR, listCheck = checkListPredicates()) {
     );
     files = listFiles(rootDir, rootDir, counters.skipped_dirs);
   }
-  const findings = files.flatMap((filePath) => scanFile(filePath, rootDir, counters));
+  const findings = files.flatMap((filePath) => scanFile(filePath, rootDir, counters, termHashes));
   return {
     findings,
     ...counters,
@@ -566,7 +671,7 @@ function scanTree(rootDir = ROOT_DIR, listCheck = checkListPredicates()) {
 
 // 收尾判決是一個純函式：main() 只負責印與 exit，測試才能直接驗判準本身。
 // 五態各自一個 exit code，否則「判準空了」「掃壞了」「掃到了」在 rc 層無法區分。
-// 第六態（根路徑拿不到明示參數）在讀 argv 時就判掉、不進這裡，見 refuseRootVerdict。
+// 根路徑被拒 (5) 與詞表不可用 (6) 在讀 argv／詞表時就判掉、不進這裡，見 refuseRootVerdict／refuseTermsVerdict。
 function decideExit(result, rootDir = ROOT_DIR) {
   const readErrors = result.read_errors || [];
   const listCheck = result.list_check || checkListPredicates();
@@ -669,12 +774,22 @@ function main(argv = process.argv.slice(2), env = process.env) {
     process.exit(refusal.code);
   }
   const rootDir = resolution.root;
+  // 詞表拿不到就連掃都不掃：沒有私有詞判準的零命中，跟空掃一樣什麼都證明不了，但原因不同、碼不同。
+  const termsResolution = resolveTermsFile(argv);
+  const termsLoad = termsResolution.ok
+    ? loadLocalTermHashes(termsResolution.file)
+    : { ok: false, reason: termsResolution.reason, detail: `${TERMS_FLAG} was given without a file`, file: null };
+  if (!termsLoad.ok) {
+    const refusal = refuseTermsVerdict(termsLoad);
+    console[refusal.stream](refusal.lines[0]);
+    process.exit(refusal.code);
+  }
   // 啟動時就把清單型判準檢一次並把警告吼出來，不等第一個檔被讀進來。
   const listCheck = checkListPredicates();
   for (const warning of listCheck.warnings) {
     console.error(warning);
   }
-  const result = scanTree(rootDir, listCheck);
+  const result = scanTree(rootDir, listCheck, termsLoad.hashes);
   // 掃描域退化（非 git checkout / git 叫不動）也要當場吼出來，不能只留在收尾那串計數裡。
   for (const warning of result.domain_warnings || []) {
     console.error(warning);
@@ -699,8 +814,13 @@ module.exports = {
   resolveScanDomain,
   scanGitMetadata,
   matchMetadata,
+  matchValue,
   resolveRootDir,
   refuseRootVerdict,
+  resolveTermsFile,
+  loadLocalTermHashes,
+  refuseTermsVerdict,
+  sha256Hex,
   isAllowed,
   isUsableAllowEntry,
   allowEntryRejectReason,

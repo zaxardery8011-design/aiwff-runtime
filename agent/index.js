@@ -12,12 +12,23 @@ const TASKS_DIR = path.join(DATA_DIR, 'tasks');
 const ARTIFACTS_DIR = path.join(DATA_DIR, 'artifacts');
 const INBOX_DIR = path.join(DATA_DIR, 'inbox');
 const LOGS_DIR = path.join(DATA_DIR, 'logs');
+const WORKSPACES_DIR = path.join(DATA_DIR, 'workspaces');
 const MEMORY_DIR = path.join(ROOT_DIR, 'memory');
 const PORT = Number(process.env.PORT || 3100);
+const RUNTIME_TOKEN_HEADER = 'x-aiwff-runtime-token';
+// cookie 只綁 host、不分 port：名稱帶 port，同一台機器開多個 runtime 時才不會互相覆蓋。
+function runtimeTokenCookieName(port = PORT) {
+  return `aiwff_runtime_token_${port}`;
+}
+const RUNTIME_TOKEN_COOKIE = runtimeTokenCookieName();
+// 寫入授權用的 runtime token：只存在記憶體。
+// 有設 AIWFF_RUNTIME_TOKEN 就沿用（固定 token，給腳本 / curl 用）；沒設則啟動時自動產生（Jupyter 模式）。
+let runtimeToken = '';
 const DEFAULT_WORKER_TIMEOUT_SEC = 600;
 const MAX_WORKER_TIMEOUT_SEC = 3600;
 const MAX_MEMORY_BYTES = 256 * 1024;
 const MAX_LOG_BYTES = 128 * 1024;
+const DEFAULT_CLAUDE_DISALLOWED_TOOLS = 'Bash,PowerShell';
 let tgOffset = 0;
 const tgPendingNotify = {};
 
@@ -64,8 +75,7 @@ function installProcessGuards() {
   });
 }
 
-function loadDotEnv() {
-  const envPath = path.join(ROOT_DIR, '.env');
+function loadDotEnv(envPath = path.join(ROOT_DIR, '.env')) {
   if (!fs.existsSync(envPath)) {
     return;
   }
@@ -76,7 +86,8 @@ function loadDotEnv() {
       continue;
     }
     const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-    if (!match || process.env[match[1]] != null) {
+    // 空白值＝未設定：shell 裡留一個空的 X= 不該把 .env 的值蓋掉。
+    if (!match || String(process.env[match[1]] ?? '').trim() !== '') {
       continue;
     }
     process.env[match[1]] = match[2].replace(/^['"]|['"]$/g, '');
@@ -87,6 +98,7 @@ function ensureDirectories() {
   fs.mkdirSync(TASKS_DIR, { recursive: true });
   fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
   fs.mkdirSync(INBOX_DIR, { recursive: true });
+  fs.mkdirSync(WORKSPACES_DIR, { recursive: true });
 }
 
 function nowIso() {
@@ -364,6 +376,134 @@ function sendHtml(res, statusCode, html) {
     'content-length': Buffer.byteLength(html),
   });
   res.end(html);
+}
+
+function timingSafeStringEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left));
+  const rightBuffer = Buffer.from(String(right));
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function getRequestToken(req) {
+  const headerToken = req.headers[RUNTIME_TOKEN_HEADER];
+  if (Array.isArray(headerToken)) {
+    return headerToken[0] || '';
+  }
+  if (typeof headerToken === 'string' && headerToken) {
+    return headerToken;
+  }
+
+  const auth = req.headers.authorization || '';
+  const match = String(auth).match(/^Bearer\s+(.+)$/i);
+  if (match) {
+    return match[1];
+  }
+
+  // WebUI 用登入連結換到的 HttpOnly cookie（見 handleLoginLink）。
+  return readCookie(req, RUNTIME_TOKEN_COOKIE);
+}
+
+function readCookie(req, name) {
+  const header = req.headers.cookie;
+  if (!header) {
+    return '';
+  }
+  for (const part of String(header).split(';')) {
+    const index = part.indexOf('=');
+    if (index < 0 || part.slice(0, index).trim() !== name) {
+      continue;
+    }
+    try {
+      return decodeURIComponent(part.slice(index + 1).trim());
+    } catch (_) {
+      return '';
+    }
+  }
+  return '';
+}
+
+// 啟動時決定 runtime token；回傳 generated 讓啟動訊息說明 token 來源。
+function initRuntimeToken() {
+  const configuredToken = process.env.AIWFF_RUNTIME_TOKEN || '';
+  runtimeToken = configuredToken || crypto.randomBytes(24).toString('hex');
+  return { generated: !configuredToken };
+}
+
+function runtimeLoginUrl() {
+  return `http://127.0.0.1:${PORT}/?token=${encodeURIComponent(runtimeToken)}`;
+}
+
+function hasValidRuntimeToken(token) {
+  return Boolean(runtimeToken) && timingSafeStringEqual(token, runtimeToken);
+}
+
+// GET ?token=：正確 → 發 HttpOnly cookie 並 302 到去掉 token 的同一路徑；錯誤 → 401、不發 cookie。
+function handleLoginLink(req, res, url) {
+  const token = url.searchParams.get('token') || '';
+  if (!hasValidRuntimeToken(token)) {
+    sendHtml(
+      res,
+      401,
+      '<!doctype html><meta charset="utf-8"><title>登入連結無效</title>' +
+        '<p>登入連結無效。runtime 每次重啟（未設固定 AIWFF_RUNTIME_TOKEN 時）都會換新 token，' +
+        '請回到跑 <code>npm run web</code> 的終端機，點最新印出的登入連結。</p>',
+    );
+    return;
+  }
+  const next = new URLSearchParams(url.searchParams);
+  next.delete('token');
+  const query = next.toString();
+  res.writeHead(302, {
+    location: `${url.pathname}${query ? `?${query}` : ''}`,
+    'set-cookie': `${RUNTIME_TOKEN_COOKIE}=${encodeURIComponent(runtimeToken)}; HttpOnly; SameSite=Strict; Path=/`,
+    'cache-control': 'no-store',
+  });
+  res.end();
+}
+
+function sameOriginWriteRequest(req) {
+  const allowed = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]);
+  for (const name of ['origin', 'referer']) {
+    const value = req.headers[name];
+    if (!value) {
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = new URL(Array.isArray(value) ? value[0] : value);
+    } catch (_) {
+      return false;
+    }
+    if (!allowed.has(parsed.origin)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function verifyWriteAccess(req) {
+  const configuredToken = runtimeToken;
+  if (!configuredToken) {
+    return { ok: false, status: 401, error: 'AIWFF_RUNTIME_TOKEN is required for write requests' };
+  }
+  if (!timingSafeStringEqual(getRequestToken(req), configuredToken)) {
+    return { ok: false, status: 401, error: 'Missing or invalid runtime token' };
+  }
+  if (!sameOriginWriteRequest(req)) {
+    return { ok: false, status: 403, error: 'Cross-origin write request rejected' };
+  }
+  return { ok: true };
+}
+
+// 需要 token 的讀取（目前只有任務產出內容）：同 getRequestToken 三種來源；GET 不做 Origin 檢查。
+function verifyReadAccess(req) {
+  if (!hasValidRuntimeToken(getRequestToken(req))) {
+    return { ok: false, status: 401, error: 'Missing or invalid runtime token' };
+  }
+  return { ok: true };
 }
 
 function htmlEscape(value) {
@@ -779,6 +919,9 @@ function countTasksByStatus(tasks) {
 }
 
 function runtimeWorkerMode() {
+  if (shouldUseOpenAICompatibleWorker()) {
+    return 'openai_compatible';
+  }
   return shouldUseMockWorker() ? 'mock' : 'claude';
 }
 
@@ -834,7 +977,7 @@ function getSettingsSnapshot() {
     writable_data_dirs: ['data/tasks', 'data/artifacts', 'data/inbox'],
     endpoints: [
       { name: 'HUD', route: 'GET /api/hud + GET /api/health' },
-      { name: '對話 / 新任務', route: 'POST /api/tasks' },
+      { name: '對話 / 新任務', route: 'POST /api/tasks, GET /api/tasks/:id/result' },
       { name: '任務', route: 'GET /api/tasks, GET /api/tasks/:id' },
       { name: '進度 / 事件', route: 'GET /api/events, GET /api/tasks/:id/progress' },
       { name: '收件匣 / 卡住', route: 'GET /api/inbox, GET /api/tasks?status=blocked' },
@@ -882,7 +1025,7 @@ function spawnMockWorker(task) {
     safeWriteTaskFile(taskPath(taskId), task);
   });
 
-  child.on('close', () => {
+  child.on('close', (code, signal) => {
     clearTimeout(timer);
     if (timedOut) {
       return;
@@ -894,6 +1037,15 @@ function spawnMockWorker(task) {
     if (latestTask.status === 'done' || latestTask.status === 'blocked') {
       writeInboxEvent(latestTask, latestTask.status);
       notifyTelegramTaskDone(latestTask);
+      return;
+    }
+    // worker 沒寫完結狀態就退出（例如一啟動就掛）：當場具名標 failed，不讓任務停在 running 等逾時。
+    if (latestTask.status !== 'failed') {
+      const exitReason = code === null ? `signal ${signal || 'unknown'}` : `code ${code}`;
+      const failedTask = updateTaskStatus(latestTask, 'failed', {
+        error: `Mock worker exited with ${exitReason} before finishing (status was ${latestTask.status})`,
+      });
+      notifyTelegramTaskDone(failedTask);
     }
   });
 
@@ -906,6 +1058,87 @@ function artifactResultPath(taskId) {
 
 function artifactResultRef(taskId) {
   return path.relative(ROOT_DIR, artifactResultPath(taskId)).replaceAll(path.sep, '/');
+}
+
+// 讀取任務產出給 WebUI 對話分頁顯示。task id 必須是 UUID（createTask 用 crypto.randomUUID）；
+// 路徑只由程式組出 data/artifacts/<id>.result.md 或 .result.json，不接受使用者給的路徑。
+const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_RESULT_CONTENT_BYTES = 64 * 1024;
+
+function isUuidTaskId(taskId) {
+  return TASK_ID_PATTERN.test(String(taskId));
+}
+
+// 依 UTF-8 位元組截斷，切點退到字元開頭，避免切出半個中文字。
+function truncateUtf8(text, maxBytes) {
+  const buffer = Buffer.from(String(text), 'utf8');
+  if (buffer.length <= maxBytes) {
+    return { content: buffer.toString('utf8'), truncated: false };
+  }
+  let end = maxBytes;
+  while (end > 0 && (buffer[end] & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  return { content: buffer.subarray(0, end).toString('utf8'), truncated: true };
+}
+
+function readTaskResult(taskId) {
+  const artifactRoot = path.resolve(ARTIFACTS_DIR);
+  const candidates = [
+    { format: 'md', file: path.resolve(ARTIFACTS_DIR, `${taskId}.result.md`) },
+    { format: 'json', file: path.resolve(ARTIFACTS_DIR, `${taskId}.result.json`) },
+  ];
+  for (const candidate of candidates) {
+    // 防路徑穿越的第二道：組出來的檔案必須直接落在 data/artifacts 底下。
+    if (path.dirname(candidate.file) !== artifactRoot || !fs.existsSync(candidate.file)) {
+      continue;
+    }
+    const raw = fs.readFileSync(candidate.file, 'utf8');
+    if (candidate.format === 'md') {
+      return { format: 'md', ...truncateUtf8(raw, MAX_RESULT_CONTENT_BYTES) };
+    }
+    let text = raw;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.summary === 'string') {
+        text = parsed.summary;
+      }
+    } catch (_) {
+      // JSON 壞掉就回原文字串。
+    }
+    return { format: 'json', ...truncateUtf8(text, MAX_RESULT_CONTENT_BYTES) };
+  }
+  return null;
+}
+
+function handleTaskResult(req, res, rawId) {
+  const readAccess = verifyReadAccess(req);
+  if (!readAccess.ok) {
+    sendJson(res, readAccess.status, { ok: false, error: readAccess.error });
+    return;
+  }
+  if (!isUuidTaskId(rawId)) {
+    sendJson(res, 400, { ok: false, error: 'invalid task id' });
+    return;
+  }
+  const task = readTask(rawId);
+  if (!task) {
+    sendJson(res, 404, { ok: false, error: '找不到任務' });
+    return;
+  }
+  const result = task.status === 'done' ? readTaskResult(rawId) : null;
+  if (!result) {
+    sendJson(res, 404, { ok: false, error: 'result not ready' });
+    return;
+  }
+  sendJson(res, 200, {
+    ok: true,
+    task_id: task.id || rawId,
+    status: task.status,
+    format: result.format,
+    content: result.content,
+    truncated: result.truncated,
+  });
 }
 
 function appendProgressText(taskId, line) {
@@ -1100,7 +1333,7 @@ ${preferences}
 指令: ${task.instruction}
 任務ID: ${task.id}
 
-結果請寫到: ${artifactResultRef(task.id)}
+結果請寫到: ${artifactResultPath(task.id)}
 最後一行必須寫: DONE: <一句話說你完成了什麼>
 `;
 }
@@ -1128,16 +1361,38 @@ function quoteWindowsCommand(command) {
   return `"${value.replace(/"/g, '\\"')}"`;
 }
 
-function spawnClaudeProcess(claudeCmd, args) {
+function taskWorkspacePath(taskId) {
+  return path.join(WORKSPACES_DIR, taskId);
+}
+
+function shouldUseDangerousClaudeBypass() {
+  return envFlag('CLAUDE_BYPASS_APPROVALS') && envFlag('AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS');
+}
+
+function appendClaudeBoundaryArgs(args) {
+  args.push('--add-dir', ARTIFACTS_DIR);
+
+  const allowedTools = String(process.env.AIWFF_CLAUDE_ALLOWED_TOOLS || '').trim();
+  if (allowedTools) {
+    args.push('--allowedTools', allowedTools);
+  }
+
+  const disallowedTools = String(process.env.AIWFF_CLAUDE_DISALLOWED_TOOLS || DEFAULT_CLAUDE_DISALLOWED_TOOLS).trim();
+  if (disallowedTools) {
+    args.push('--disallowedTools', disallowedTools);
+  }
+}
+
+function spawnClaudeProcess(claudeCmd, args, optionsOverride = {}) {
   const options = {
-    cwd: ROOT_DIR,
+    cwd: optionsOverride.cwd || ROOT_DIR,
     stdio: ['pipe', 'pipe', 'pipe'],
   };
   if (process.platform !== 'win32') {
     return spawn(claudeCmd, args, options);
   }
 
-  const commandLine = [quoteWindowsCommand(claudeCmd), ...args].join(' ');
+  const commandLine = [quoteWindowsCommand(claudeCmd), ...args.map(quoteWindowsCommand)].join(' ');
   return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], {
     ...options,
     windowsVerbatimArguments: true,
@@ -1150,12 +1405,25 @@ function spawnClaudeWorker(task, attempt = 1) {
   const fullPrompt = buildClaudePrompt(task);
   const runningTask = updateTaskStatus(task, 'running');
   const timeoutMs = normalizeWorkerTimeoutSec(task) * 1000;
+  const workerCwd = taskWorkspacePath(task.id);
+  fs.mkdirSync(workerCwd, { recursive: true });
   const args = ['--print'];
-  if (envFlag('CLAUDE_BYPASS_APPROVALS')) {
+  appendClaudeBoundaryArgs(args);
+  if (shouldUseDangerousClaudeBypass()) {
     args.unshift('--dangerously-skip-permissions');
+    const warning =
+      'SECURITY WARNING: Claude worker is running with --dangerously-skip-permissions because both CLAUDE_BYPASS_APPROVALS and AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS are enabled.';
+    logStderr(warning, `task=${task.id}`);
+    appendProgressText(task.id, warning);
+  } else if (envFlag('CLAUDE_BYPASS_APPROVALS')) {
+    const warning =
+      'SECURITY WARNING: CLAUDE_BYPASS_APPROVALS ignored; set AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS=1 to explicitly opt in.';
+    logStderr(warning, `task=${task.id}`);
+    appendProgressText(task.id, warning);
   }
   const phaseTracker = createWorkerPhaseTracker('spawn');
-  const child = spawnClaudeProcess(claudeCmd, args);
+  appendProgressText(task.id, `Claude spawn args=${JSON.stringify(args)} cwd=${workerCwd}`);
+  const child = spawnClaudeProcess(claudeCmd, args, { cwd: workerCwd });
   let spawnError = null;
   let stderr = '';
   let stdout = '';
@@ -1249,7 +1517,110 @@ function shouldUseMockWorker() {
   return envFlag('MOCK_WORKER') || !envFlag('ENABLE_REAL_CLAUDE_WORKER');
 }
 
+// OpenAI 相容端點插槽（vLLM / ollama / LM Studio 等）：預設關閉，AIWFF_WORKER_PROVIDER=openai_compatible 才啟用。
+// 這條路徑沒有工具，只把任務當一次 chat completion 送出、由 runtime 把回覆寫成 artifact，
+// 適合分類／短摘要／封閉抽取這類純文字任務；要動檔案或跑工具的任務請維持 Claude worker。
+function shouldUseOpenAICompatibleWorker() {
+  return (
+    !envFlag('MOCK_WORKER') &&
+    String(process.env.AIWFF_WORKER_PROVIDER || '').trim().toLowerCase() === 'openai_compatible'
+  );
+}
+
+function openAICompatibleConfig() {
+  return {
+    baseUrl: String(process.env.AIWFF_OPENAI_BASE_URL || '').trim().replace(/\/+$/, ''),
+    model: String(process.env.AIWFF_OPENAI_MODEL || '').trim(),
+    apiKey: String(process.env.AIWFF_OPENAI_API_KEY || '').trim(),
+  };
+}
+
+function buildOpenAICompatibleMessages(task) {
+  const facts = readTextFileIfExists(path.join(MEMORY_DIR, 'facts.md'));
+  const preferences = readTextFileIfExists(path.join(MEMORY_DIR, 'preferences.md'));
+  return [
+    {
+      role: 'system',
+      content: `你是用戶的本地 AI 助理。這條路徑沒有工具可用，請直接輸出任務結果本身。\n\n## 記憶\n${facts}\n${preferences}`.trim(),
+    },
+    { role: 'user', content: `標題: ${task.title}\n指令: ${task.instruction}` },
+  ];
+}
+
+async function requestOpenAICompatibleCompletion(task, timeoutMs) {
+  const config = openAICompatibleConfig();
+  if (!config.baseUrl || !config.model) {
+    throw new Error('AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required when AIWFF_WORKER_PROVIDER=openai_compatible');
+  }
+  const headers = { 'content-type': 'application/json' };
+  if (config.apiKey) {
+    headers.authorization = `Bearer ${config.apiKey}`;
+  }
+  const response = await fetch(`${config.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ model: config.model, messages: buildOpenAICompatibleMessages(task) }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const raw = await response.text();
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${raw.slice(0, 500)}`);
+  }
+  const content = JSON.parse(raw)?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string' || !content.trim()) {
+    throw new Error('empty completion content');
+  }
+  return content;
+}
+
+function runOpenAICompatibleWorker(task, attempt = 1) {
+  ensureDirectories();
+  const runningTask = updateTaskStatus(task, 'running');
+  const { baseUrl, model } = openAICompatibleConfig();
+  appendProgressText(task.id, `OpenAI-compatible request base_url=${baseUrl} model=${model} attempt=${attempt}`);
+
+  requestOpenAICompatibleCompletion(task, normalizeWorkerTimeoutSec(task) * 1000)
+    .then((content) => {
+      fs.writeFileSync(artifactResultPath(task.id), `${content.trim()}\n`);
+      const doneTask = updateTaskStatus(readTask(task.id) || runningTask, 'done', {
+        artifact_path: artifactResultRef(task.id),
+      });
+      notifyTelegramTaskDone(doneTask);
+    })
+    .catch((error) => {
+      const currentTask = readTask(task.id) || runningTask;
+      if (error && error.name === 'TimeoutError') {
+        const blockedTask = markTaskBlockedByTimeout(task.id, currentTask);
+        if (blockedTask) {
+          notifyTelegramTaskDone(blockedTask);
+        }
+        return;
+      }
+      const failureReason = `OpenAI-compatible request failed: ${error && error.message}`;
+      if (attempt <= MAX_TASK_RETRIES) {
+        appendProgressText(
+          task.id,
+          `Worker attempt ${attempt} failed (${failureReason}); retrying (${attempt}/${MAX_TASK_RETRIES}) in ${RETRY_BACKOFF_MS}ms`,
+        );
+        updateTaskStatus(currentTask, 'running', { retry_count: attempt, last_error: failureReason });
+        setTimeout(() => {
+          runOpenAICompatibleWorker(readTask(task.id) || currentTask, attempt + 1);
+        }, RETRY_BACKOFF_MS);
+        return;
+      }
+      const failedTask = updateTaskStatus(currentTask, 'failed', {
+        error: failureReason,
+        retry_count: attempt - 1,
+      });
+      notifyTelegramTaskDone(failedTask);
+    });
+}
+
 function startTaskWorker(task) {
+  if (shouldUseOpenAICompatibleWorker()) {
+    runOpenAICompatibleWorker(task);
+    return;
+  }
   if (shouldUseMockWorker()) {
     spawnMockWorker(task);
     return;
@@ -1443,6 +1814,16 @@ function startTelegramPolling() {
 async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+  if (req.method === 'GET' && url.searchParams.has('token')) {
+    handleLoginLink(req, res, url);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/session') {
+    sendJson(res, 200, { ok: true, loggedIn: hasValidRuntimeToken(readCookie(req, RUNTIME_TOKEN_COOKIE)) });
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/') {
     sendHtml(res, 200, renderHome());
     return;
@@ -1540,7 +1921,19 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/tasks') {
+    const writeAccess = verifyWriteAccess(req);
+    if (!writeAccess.ok) {
+      sendJson(res, writeAccess.status, { ok: false, error: writeAccess.error });
+      return;
+    }
     await createTask(req, res);
+    return;
+  }
+
+  // 不 decode：合法 id 是 UUID，不會含編碼字元；%2F 之類原樣進格式驗證被擋成 400。
+  const resultMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/result$/);
+  if (req.method === 'GET' && resultMatch) {
+    handleTaskResult(req, res, resultMatch[1]);
     return;
   }
 
@@ -1583,24 +1976,41 @@ async function handleRequest(req, res) {
   sendJson(res, 404, { ok: false, error: '找不到路徑' });
 }
 
-function main() {
-  installProcessGuards();
-  ensureDirectories();
-  const server = http.createServer((req, res) => {
+function createRuntimeServer() {
+  return http.createServer((req, res) => {
     handleRequest(req, res).catch((error) => {
       sendJson(res, 500, { ok: false, error: error.message });
     });
   });
+}
+
+function main() {
+  installProcessGuards();
+  ensureDirectories();
+  const { generated } = initRuntimeToken();
+  const server = createRuntimeServer();
+
+  server.once('error', (err) => {
+    logStderr(
+      'server-listen',
+      `failed to bind http://127.0.0.1:${PORT}: ${err.code || err.message}. Set PORT to a free port and retry.`,
+    );
+    process.exit(1);
+  });
 
   server.listen(PORT, '127.0.0.1', () => {
     console.log(`AIWFF Runtime listening on http://127.0.0.1:${PORT}`);
-  });
+    console.log(`登入 WebUI：${runtimeLoginUrl()}`);
+    if (generated) {
+      console.log('（AIWFF_RUNTIME_TOKEN 未設：token 為本次啟動自動產生、只存在記憶體，重啟後會換新連結。）');
+    }
 
-  if (process.env.TG_BOT_TOKEN && !process.env.ADMIN_TG_CHAT_ID) {
-    console.error('Refusing Telegram polling: ADMIN_TG_CHAT_ID is required when TG_BOT_TOKEN is set.');
-  } else if (process.env.TG_BOT_TOKEN) {
-    startTelegramPolling();
-  }
+    if (process.env.TG_BOT_TOKEN && !process.env.ADMIN_TG_CHAT_ID) {
+      console.error('Refusing Telegram polling: ADMIN_TG_CHAT_ID is required when TG_BOT_TOKEN is set.');
+    } else if (process.env.TG_BOT_TOKEN) {
+      startTelegramPolling();
+    }
+  });
 }
 
 if (require.main === module) {
@@ -1611,6 +2021,7 @@ if (require.main === module) {
 module.exports = {
   readUtf8WithinLimit,
   readUtf8Tail,
+  loadDotEnv,
   safeWriteJsonFile,
   // 存檔當下驗 schema 這一包：violation 是純函式（好驗具名 cause），
   // safeWriteTaskFile 是實際的落檔口（好驗「拒絕時目標檔不被動到」）。
@@ -1643,6 +2054,12 @@ module.exports = {
   normalizeProgressLimit,
   INBOX_LIST_CAP,
   EVENT_LIST_CAP,
+  ensureDirectories,
+  initRuntimeToken,
+  runtimeLoginUrl,
+  createRuntimeServer,
+  RUNTIME_TOKEN_COOKIE,
+  runtimeTokenCookieName,
   MAX_TASK_RETRIES,
   RETRY_BACKOFF_MS,
   TG_API_BASE_URL,
