@@ -1248,6 +1248,7 @@ async function createTask(req, res) {
       ? payload.instruction.trim()
       : '執行 mock worker 生命週期。';
   const task = createTaskObject(title, instruction, { timeout_sec: payload.timeout_sec });
+  res.aiwffTaskId = task.id;
   sendJson(res, 201, task);
 }
 
@@ -1506,8 +1507,23 @@ async function handleRequest(req, res) {
   sendJson(res, 404, { ok: false, error: '找不到路徑' });
 }
 
+// 請求 log：一行一筆，帶 task_id（路徑或建立回應取得，取不到寫 -），
+// 查一筆任務能直接 grep 到它經過的所有請求。只記 pathname，不記 query（登入連結帶 token）。
+const TASK_ID_IN_PATH = /^\/api\/tasks\/([0-9a-f-]{36})(?:\/|$)/i;
+
+function logRequest(req, res, startedAt) {
+  const pathname = String(req.url || '').split('?')[0];
+  const pathMatch = pathname.match(TASK_ID_IN_PATH);
+  const taskId = res.aiwffTaskId || (pathMatch ? pathMatch[1] : '-');
+  process.stderr.write(
+    `[${nowIso()}] request: ${req.method} ${pathname} ${res.statusCode} ${Date.now() - startedAt}ms task_id=${taskId}\n`,
+  );
+}
+
 function createRuntimeServer() {
   return http.createServer((req, res) => {
+    const startedAt = Date.now();
+    res.on('finish', () => logRequest(req, res, startedAt));
     handleRequest(req, res).catch((error) => {
       sendJson(res, 500, { ok: false, error: error.message });
     });
