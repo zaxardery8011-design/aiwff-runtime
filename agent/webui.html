@@ -242,6 +242,7 @@
     .kv-row { grid-template-columns: 180px minmax(0, 1fr); }
     .event-row { grid-template-columns: 128px 110px minmax(0, 1fr); }
     .task-row { grid-template-columns: 96px minmax(0, 1fr) 160px; }
+    .task-filter-row { padding-bottom: 0; }
     .memory-row { grid-template-columns: minmax(0, 1fr) 96px 148px; }
     .check-row { grid-template-columns: 22px minmax(0, 1fr); }
     .metric {
@@ -1002,6 +1003,9 @@
       <section id="view-tasks" class="view">
         <section class="panel">
           <h2>任務</h2>
+          <div class="panel-body task-filter-row">
+            <input id="task-filter" type="search" placeholder="篩選任務名或 task_id，Enter 開第一筆" aria-label="篩選任務" autocomplete="off">
+          </div>
           <div id="tasks-list" class="panel-body"></div>
         </section>
       </section>
@@ -1558,9 +1562,22 @@
       }
     }
 
-    function renderTasks() {
+    // 文字篩選（借鏡 claude-code agents view 的 n:<text>）：比對任務名或 task_id，不分大小寫
+    function filteredTasks() {
+      var input = byId('task-filter');
+      var needle = input ? input.value.trim().toLowerCase() : '';
       var tasks = sortedTasks();
-      setHtml('tasks-list', tasks.length ? tasks.map(taskRow).join('') : empty('目前沒有任務'));
+      if (!needle) return tasks;
+      return tasks.filter(function(task) {
+        return String(task.title || '').toLowerCase().indexOf(needle) !== -1 ||
+          String(task.id || '').toLowerCase().indexOf(needle) !== -1;
+      });
+    }
+
+    function renderTasks() {
+      var tasks = filteredTasks();
+      var filtering = !!(byId('task-filter') && byId('task-filter').value.trim());
+      setHtml('tasks-list', tasks.length ? tasks.map(taskRow).join('') : empty(filtering ? '沒有符合的任務' : '目前沒有任務'));
     }
 
     function renderEvents() {
@@ -2242,6 +2259,23 @@
     }
     window.addEventListener('hashchange', applyHashTab);
     applyHashTab();
+
+    // 篩選框：輸入即時重畫；Enter 開第一筆的 trace（走既有 #trace/<taskId> 深連結）
+    var taskFilter = byId('task-filter');
+    if (taskFilter) {
+      taskFilter.addEventListener('input', renderTasks);
+      taskFilter.addEventListener('keydown', function(event) {
+        if (event.key !== 'Enter' || event.isComposing) return;
+        var first = filteredTasks()[0];
+        if (!first) return;
+        event.preventDefault();
+        state.traceTaskId = first.id;
+        state.traceStep = null;
+        location.hash = '#trace/' + encodeURIComponent(first.id);
+        renderTrace();
+        refreshTraceEntries().then(renderTrace);
+      });
+    }
 
     var traceSelect = byId('trace-task-select');
     if (traceSelect) {
