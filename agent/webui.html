@@ -2337,6 +2337,7 @@
         });
         rememberChatTask(created);
         appendChatMessage('assistant', taskStatusMessage(created, true), timeMeta('系統'));
+        chatDraft = text;
         if (input) {
           input.value = '';
           input.style.height = 'auto';
@@ -2356,15 +2357,22 @@
 
     var chatInput = byId('task-chat-text');
     var chatSend = byId('task-chat-send');
+    // 最後一份非空草稿：輸入框被清空後，空框按 ↑ 可還原，不必重打。
+    var chatDraft = '';
     if (chatSend) chatSend.addEventListener('click', sendChatTask);
     if (chatInput) {
       chatInput.addEventListener('keydown', function(event) {
         if (event.key === 'Enter' && !event.shiftKey) {
           event.preventDefault();
           sendChatTask();
+        } else if (event.key === 'ArrowUp' && !chatInput.value && chatDraft) {
+          event.preventDefault();
+          chatInput.value = chatDraft;
+          chatInput.dispatchEvent(new Event('input'));
         }
       });
       chatInput.addEventListener('input', function(event) {
+        if (event.target.value.trim()) chatDraft = event.target.value;
         event.target.style.height = 'auto';
         event.target.style.height = Math.min(event.target.scrollHeight, 180) + 'px';
       });
