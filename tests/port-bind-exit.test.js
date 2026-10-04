@@ -17,10 +17,10 @@ function close(server) {
   return new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 }
 
-function startRuntime(port) {
+function startRuntime(port, rootDir = ROOT_DIR) {
   return new Promise((resolve, reject) => {
-    const runtime = spawn(process.execPath, ['agent/index.js'], {
-      cwd: ROOT_DIR,
+    const runtime = spawn(process.execPath, [path.join('agent', 'index.js')], {
+      cwd: rootDir,
       env: {
         ...process.env,
         PORT: String(port),
@@ -68,7 +68,12 @@ test('runtime exits 1 and reports EADDRINUSE when its port is occupied', async (
 
 test('second runtime that fails to bind does not sweep the first instance\'s running tasks', async () => {
   const fs = require('node:fs');
-  const tasksDir = path.join(ROOT_DIR, 'data', 'tasks');
+  const os = require('node:os');
+  // runtime 以 agent/ 的上一層當根目錄：把 agent/ 複製到暫存資料夾再啟動，
+  // 種的假任務與 runtime 寫的檔都落在暫存資料夾，不碰 repo 自己的 data/。
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'aiwff-port-sweep-'));
+  fs.cpSync(path.join(ROOT_DIR, 'agent'), path.join(tmpRoot, 'agent'), { recursive: true });
+  const tasksDir = path.join(tmpRoot, 'data', 'tasks');
   const taskId = '00000000-0000-4000-8000-0000000000b1';
   const taskFile = path.join(tasksDir, `${taskId}.json`);
   fs.mkdirSync(tasksDir, { recursive: true });
@@ -82,14 +87,13 @@ test('second runtime that fails to bind does not sweep the first instance\'s run
   const { port } = holder.address();
 
   try {
-    const result = await startRuntime(port);
+    const result = await startRuntime(port, tmpRoot);
     assert.equal(result.code, 1);
     // 綁不上 port 代表另一個實例還活著；它正在跑的任務不能被標成中斷。
     assert.equal(JSON.parse(fs.readFileSync(taskFile, 'utf8')).status, 'running');
     assert.doesNotMatch(result.stderr, /startup-sweep/);
   } finally {
     await close(holder);
-    fs.rmSync(taskFile, { force: true });
-    fs.rmSync(path.join(ROOT_DIR, 'data', 'inbox', `${taskId}.blocked.json`), { force: true });
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 });
