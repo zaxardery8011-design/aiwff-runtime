@@ -365,6 +365,16 @@ These limitations are intentionally not softened.
 | Memory is text injection, not RAG | Large memory files consume context; keep `memory/facts.md` focused |
 | Not for long-running tasks | Tasks longer than about 10 minutes do not have checkpoint resume support; full AIWFF handles heavier workflows |
 
+## Known Gaps
+
+Behaviour we intend to have but this build does not have yet. Each row points at the code that shows the current state.
+
+| Expected behaviour | Current state | Evidence |
+|---|---|---|
+| After a restart, tasks left `running` by the previous process are closed out with a named reason | `main()` does not scan `data/tasks/` on startup; such tasks stay `running` until you edit or delete them | `agent/index.js`, `main()` |
+| The chat panel keeps your scroll position while you read older messages | The WebUI refreshes every 5 seconds, and each refresh re-renders the chat and scrolls it to the bottom | `agent/webui.html`, `setInterval(refresh, 5000)` -> `renderAll()` -> `renderChat()` |
+| A task is marked `done` only after its result is checked against the instruction | A Claude worker that exits 0 and leaves `data/artifacts/<id>.result.md` is marked `done`; the content is not reviewed | `agent/index.js`, Claude worker close handler (`artifactResultPath` check) |
+
 ## Roadmap
 
 | Phase | Status | Scope |
