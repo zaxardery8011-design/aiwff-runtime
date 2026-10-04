@@ -471,6 +471,32 @@ test('timeout marks task blocked and writes an inbox event', async () => {
   }
 });
 
+test('startup sweep: orphan running task from a previous process becomes blocked, not rerun', async () => {
+  resetDataDir();
+  const taskId = '00000000-0000-4000-8000-000000000001';
+  fs.mkdirSync(TASKS_DIR, { recursive: true });
+  const now = new Date().toISOString();
+  fs.writeFileSync(
+    path.join(TASKS_DIR, `${taskId}.json`),
+    JSON.stringify({ id: taskId, title: 'orphan', instruction: 'x', status: 'running', created_at: now, updated_at: now }),
+  );
+  const runtime = await startDaemon({ MOCK_WORKER: '1' });
+
+  try {
+    const { task } = await requestJson(runtime.port, 'GET', `/api/tasks/${taskId}`);
+    assert.equal(task.status, 'blocked');
+    assert.equal(task.blocked_reason, 'interrupted');
+    assert.match(task.last_error, /restarted/);
+    assert.ok(fs.existsSync(path.join(DATA_DIR, 'inbox', `${taskId}.blocked.json`)));
+    assert.match(runtime.logs.stderr, /startup-sweep: marked 1 interrupted running task/);
+    await sleep(500);
+    const again = await requestJson(runtime.port, 'GET', `/api/tasks/${taskId}`);
+    assert.equal(again.task.status, 'blocked');
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
 test('real worker success without artifact fails clearly', async () => {
   resetDataDir();
   const claudeCmd = writeFakeClaude('no-artifact-claude', NO_ARTIFACT_CLAUDE);

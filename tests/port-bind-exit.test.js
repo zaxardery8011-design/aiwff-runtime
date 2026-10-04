@@ -58,6 +58,9 @@ test('runtime exits 1 and reports EADDRINUSE when its port is occupied', async (
     assert.equal(result.code, 1);
     assert.equal(result.signal, null);
     assert.match(result.stderr, /EADDRINUSE/);
+    // 光說 EADDRINUSE 新手不知道下一步；兩種 shell 的換 port 指令都要印出來。
+    assert.match(result.stderr, /PowerShell: \$env:PORT=3200; npm run web/);
+    assert.match(result.stderr, /bash \/ macOS \/ Linux: PORT=3200 npm run web/);
   } finally {
     await close(holder);
   }
