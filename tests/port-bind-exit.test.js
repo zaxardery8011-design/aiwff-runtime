@@ -65,3 +65,31 @@ test('runtime exits 1 and reports EADDRINUSE when its port is occupied', async (
     await close(holder);
   }
 });
+
+test('second runtime that fails to bind does not sweep the first instance\'s running tasks', async () => {
+  const fs = require('node:fs');
+  const tasksDir = path.join(ROOT_DIR, 'data', 'tasks');
+  const taskId = '00000000-0000-4000-8000-0000000000b1';
+  const taskFile = path.join(tasksDir, `${taskId}.json`);
+  fs.mkdirSync(tasksDir, { recursive: true });
+  const now = new Date().toISOString();
+  fs.writeFileSync(
+    taskFile,
+    JSON.stringify({ id: taskId, title: 'live', instruction: 'x', status: 'running', created_at: now, updated_at: now }),
+  );
+  const holder = net.createServer();
+  await listen(holder);
+  const { port } = holder.address();
+
+  try {
+    const result = await startRuntime(port);
+    assert.equal(result.code, 1);
+    // 綁不上 port 代表另一個實例還活著；它正在跑的任務不能被標成中斷。
+    assert.equal(JSON.parse(fs.readFileSync(taskFile, 'utf8')).status, 'running');
+    assert.doesNotMatch(result.stderr, /startup-sweep/);
+  } finally {
+    await close(holder);
+    fs.rmSync(taskFile, { force: true });
+    fs.rmSync(path.join(ROOT_DIR, 'data', 'inbox', `${taskId}.blocked.json`), { force: true });
+  }
+});

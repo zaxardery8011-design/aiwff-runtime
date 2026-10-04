@@ -2007,7 +2007,6 @@ function sweepOrphanRunningTasks() {
 function main() {
   installProcessGuards();
   ensureDirectories();
-  sweepOrphanRunningTasks();
   const { generated } = initRuntimeToken();
   const server = createRuntimeServer();
 
@@ -2024,6 +2023,9 @@ function main() {
   });
 
   server.listen(PORT, '127.0.0.1', () => {
+    // 綁定成功才收殘留任務：同一資料夾誤開第二個 runtime 時，它會先撞 EADDRINUSE 結束，
+    // 不會把第一個實例正在跑的任務誤標成中斷。listening callback 在處理任何連線之前執行。
+    sweepOrphanRunningTasks();
     console.log(`AIWFF Runtime listening on http://127.0.0.1:${PORT}`);
     console.log(`登入 WebUI：${runtimeLoginUrl()}`);
     if (generated) {
