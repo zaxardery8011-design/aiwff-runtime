@@ -436,6 +436,24 @@ function runtimeLoginUrl() {
   return `http://127.0.0.1:${PORT}/?token=${encodeURIComponent(runtimeToken)}`;
 }
 
+const LOGIN_URL_FILE = path.join(DATA_DIR, 'webui_login_url.txt');
+
+function maskedRuntimeLoginUrl() {
+  return `http://127.0.0.1:${PORT}/?token=${encodeURIComponent(runtimeToken.slice(0, 4))}…`;
+}
+
+// 互動終端機照舊印完整登入連結；stdout 被導到檔案（daemon log）時只印遮罩版，
+// 完整連結改寫進 data/webui_login_url.txt，免得 token 留在 log 裡。
+function startupLoginLines(isTTY) {
+  if (isTTY) {
+    return [`登入 WebUI：${runtimeLoginUrl()}`];
+  }
+  return [
+    `登入 WebUI（token 已遮罩）：${maskedRuntimeLoginUrl()}`,
+    `完整登入連結在：${LOGIN_URL_FILE}`,
+  ];
+}
+
 function hasValidRuntimeToken(token) {
   return Boolean(runtimeToken) && timingSafeStringEqual(token, runtimeToken);
 }
@@ -1517,6 +1535,162 @@ function shouldUseMockWorker() {
   return envFlag('MOCK_WORKER') || !envFlag('ENABLE_REAL_CLAUDE_WORKER');
 }
 
+// Antigravity CLI（agy）插槽：預設關閉，AIWFF_WORKER_PROVIDER=agy 才啟用（ENABLE_AGY_WORKER=1 為舊名相容）。
+function shouldUseAgyWorker() {
+  if (envFlag('MOCK_WORKER')) {
+    return false;
+  }
+  const provider = String(process.env.AIWFF_WORKER_PROVIDER || '').trim().toLowerCase();
+  return provider === 'agy' || envFlag('ENABLE_AGY_WORKER');
+}
+
+const AGY_PROMPT_FILENAME = 'AGY_PROMPT.md';
+
+// 完整 prompt（CLAUDE.md＋記憶＋任務）可能超過 Windows 命令列 32767 字上限，
+// 所以整段寫進 workspace 的檔案，-p 只放一句「讀這個檔照做」。
+function buildAgyArgs(promptFilePath) {
+  const args = [];
+  if (envFlag('AGY_SKIP_PERMISSIONS')) {
+    args.push('--dangerously-skip-permissions');
+  }
+  const model = String(process.env.AGY_MODEL || '').trim();
+  if (model) {
+    args.push('--model', model);
+  }
+  args.push('--add-dir', ARTIFACTS_DIR);
+  args.push(
+    '-p',
+    `Read the file ${promptFilePath} and carry out the instructions in it exactly. Its contents are the full task.`,
+  );
+  return args;
+}
+
+function writeAgyPromptFile(task, workerCwd) {
+  const promptFilePath = path.join(workerCwd, AGY_PROMPT_FILENAME);
+  fs.writeFileSync(promptFilePath, buildClaudePrompt(task), 'utf8');
+  return promptFilePath;
+}
+
+// child.kill() 在 Windows 只殺最上層行程，agy 生出的子行程會變孤兒；逾時要殺整棵樹。
+function killProcessTree(child) {
+  if (!child || !child.pid) {
+    return;
+  }
+  if (process.platform === 'win32') {
+    const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    killer.on('error', () => child.kill());
+    return;
+  }
+  child.kill();
+}
+
+function spawnAgyWorker(task, attempt = 1) {
+  ensureDirectories();
+  const agyCmd = process.env.AGY_CMD || 'agy';
+  const runningTask = updateTaskStatus(task, 'running');
+  const timeoutMs = normalizeWorkerTimeoutSec(task) * 1000;
+  const workerCwd = taskWorkspacePath(task.id);
+  fs.mkdirSync(workerCwd, { recursive: true });
+  const args = buildAgyArgs(writeAgyPromptFile(task, workerCwd));
+  if (envFlag('AGY_SKIP_PERMISSIONS')) {
+    const warning = 'SECURITY WARNING: agy worker is running with --dangerously-skip-permissions (AGY_SKIP_PERMISSIONS=1).';
+    logStderr(warning, `task=${task.id}`);
+    appendProgressText(task.id, warning);
+  }
+
+  const phaseTracker = createWorkerPhaseTracker('spawn');
+  appendProgressText(task.id, `AGY spawn args=${JSON.stringify(args)} cwd=${workerCwd}`);
+
+  const child = spawn(agyCmd, args, {
+    cwd: workerCwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+
+  let spawnError = null;
+  let stderr = '';
+  let stdout = '';
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    const blockedTask = markTaskBlockedByTimeout(task.id, runningTask, phaseTracker);
+    if (blockedTask) {
+      notifyTelegramTaskDone(blockedTask);
+    }
+    killProcessTree(child);
+  }, timeoutMs);
+
+  pipeStdoutProgress(task.id, child.stdout);
+  child.stdout.on('data', (chunk) => {
+    phaseTracker.enter('streaming');
+    stdout += chunk;
+  });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => {
+    phaseTracker.enter('streaming');
+    stderr += chunk;
+  });
+
+  child.on('error', (error) => {
+    spawnError = error;
+  });
+
+  phaseTracker.enter('prompt_sent');
+
+  child.on('close', (code, signal) => {
+    clearTimeout(timer);
+    if (timedOut) {
+      return;
+    }
+    const currentTask = readTaskSafely(task.id, 'agy worker close') || runningTask;
+    const artifactPath = artifactResultPath(task.id);
+
+    // agy 有時只把答案印在 stdout、沒自己寫檔；exit 0 時用 stdout 補成 artifact。
+    if (!spawnError && code === 0 && !fs.existsSync(artifactPath) && stdout.trim()) {
+      try {
+        fs.writeFileSync(artifactPath, `${stdout.trim()}\n`, 'utf8');
+      } catch (err) {
+        logStderr('failed to write agy fallback artifact', err);
+      }
+    }
+
+    let failureReason = null;
+    if (spawnError) {
+      failureReason = spawnError.message;
+    } else if (code !== 0) {
+      const exitReason = code === null ? `signal ${signal || 'unknown'}` : `code ${code}`;
+      const tail = stderr.trim().slice(-1000) || stdout.trim().slice(-1000);
+      failureReason = `AGY exited with ${exitReason}: ${tail || 'no stderr or stdout output'}`;
+    } else if (!fs.existsSync(artifactPath)) {
+      failureReason = 'headless agy exited 0 with no output and no artifact';
+    }
+
+    if (!failureReason) {
+      const doneTask = updateTaskStatus(currentTask, 'done', { artifact_path: artifactResultRef(task.id) });
+      notifyTelegramTaskDone(doneTask);
+      return;
+    }
+
+    if (attempt <= MAX_TASK_RETRIES) {
+      appendProgressText(
+        task.id,
+        `Worker attempt ${attempt} failed (${failureReason}); retrying (${attempt}/${MAX_TASK_RETRIES}) in ${RETRY_BACKOFF_MS}ms`,
+      );
+      updateTaskStatus(currentTask, 'running', { retry_count: attempt, last_error: failureReason });
+      setTimeout(() => {
+        spawnAgyWorker(readTaskSafely(task.id, 'retry respawn') || currentTask, attempt + 1);
+      }, RETRY_BACKOFF_MS);
+      return;
+    }
+
+    const failedTask = updateTaskStatus(currentTask, 'failed', {
+      error: failureReason,
+      retry_count: attempt - 1,
+    });
+    notifyTelegramTaskDone(failedTask);
+  });
+}
+
 // OpenAI 相容端點插槽（vLLM / ollama / LM Studio 等）：預設關閉，AIWFF_WORKER_PROVIDER=openai_compatible 才啟用。
 // 這條路徑沒有工具，只把任務當一次 chat completion 送出、由 runtime 把回覆寫成 artifact，
 // 適合分類／短摘要／封閉抽取這類純文字任務；要動檔案或跑工具的任務請維持 Claude worker。
@@ -1619,6 +1793,10 @@ function runOpenAICompatibleWorker(task, attempt = 1) {
 function startTaskWorker(task) {
   if (shouldUseOpenAICompatibleWorker()) {
     runOpenAICompatibleWorker(task);
+    return;
+  }
+  if (shouldUseAgyWorker()) {
+    spawnAgyWorker(task);
     return;
   }
   if (shouldUseMockWorker()) {
@@ -2000,7 +2178,17 @@ function main() {
 
   server.listen(PORT, '127.0.0.1', () => {
     console.log(`AIWFF Runtime listening on http://127.0.0.1:${PORT}`);
-    console.log(`登入 WebUI：${runtimeLoginUrl()}`);
+    const isTTY = Boolean(process.stdout.isTTY);
+    if (!isTTY) {
+      try {
+        fs.writeFileSync(LOGIN_URL_FILE, `${runtimeLoginUrl()}\n`, { encoding: 'utf8', mode: 0o600 });
+      } catch (err) {
+        logStderr('failed to write login url file', err.message);
+      }
+    }
+    for (const line of startupLoginLines(isTTY)) {
+      console.log(line);
+    }
     if (generated) {
       console.log('（AIWFF_RUNTIME_TOKEN 未設：token 為本次啟動自動產生、只存在記憶體，重啟後會換新連結。）');
     }
@@ -2057,6 +2245,13 @@ module.exports = {
   ensureDirectories,
   initRuntimeToken,
   runtimeLoginUrl,
+  startupLoginLines,
+  LOGIN_URL_FILE,
+  // agy provider：args 組裝與 prompt 落檔都開出入口，才驗得到旗標開關與「長 prompt 不進命令列」。
+  shouldUseAgyWorker,
+  buildAgyArgs,
+  writeAgyPromptFile,
+  killProcessTree,
   createRuntimeServer,
   RUNTIME_TOKEN_COOKIE,
   runtimeTokenCookieName,

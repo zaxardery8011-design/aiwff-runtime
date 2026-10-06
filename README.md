@@ -337,6 +337,17 @@ AIWFF_OPENAI_MODEL=qwen3:32b
 
 `GET /api/settings` reports `worker_mode: "openai_compatible"` when it is active. Timeout and retry follow the same `timeout_sec` / `MAX_TASK_RETRIES` rules as the Claude worker.
 
+### Optional: Antigravity CLI (`agy`) worker (off by default)
+
+Set `AIWFF_WORKER_PROVIDER=agy` (legacy `ENABLE_AGY_WORKER=1` also works) and clear `MOCK_WORKER`. The full prompt (CLAUDE.md + memory + task) is written to `data/workspaces/<id>/AGY_PROMPT.md`; `agy -p` only receives a short "read this file" instruction, so long prompts never hit the Windows 32767-character command-line limit. On timeout the whole process tree is killed (`taskkill /T /F` on Windows). If agy prints its answer without writing the artifact, stdout is saved as the artifact.
+
+| Variable | Required? | Description |
+|---|---:|---|
+| `AIWFF_WORKER_PROVIDER` | To enable | Set to `agy` |
+| `AGY_CMD` | No | Path to the agy executable; defaults to `agy` on `PATH` |
+| `AGY_MODEL` | No | Adds `--model <value>` only when set (see `agy models`) |
+| `AGY_SKIP_PERMISSIONS` | No | `1` adds `--dangerously-skip-permissions`: agy runs every tool without asking. Only enable on an isolated machine whose task sources you trust |
+
 ## Vs Full AIWFF
 
 The rule of this repo: remove multi-node complexity, keep the single-machine agent loop understandable.

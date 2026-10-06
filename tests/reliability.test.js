@@ -299,9 +299,13 @@ test('POST /api/tasks without configured token uses an auto-generated token and 
     while (!/登入 WebUI：/.test(runtime.logs.stdout) && Date.now() < deadline) {
       await sleep(50);
     }
-    const match = runtime.logs.stdout.match(/登入 WebUI：(http:\/\/127\.0\.0\.1:(\d+)\/\?token=([0-9a-f]{48}))/);
-    assert.ok(match, `login link missing from stdout: ${runtime.logs.stdout}`);
+    // stdout 被導走（非 TTY）時，完整連結只寫進 data/webui_login_url.txt，log 裡只有遮罩版。
+    const loginUrlText = fs.readFileSync(path.join(DATA_DIR, 'webui_login_url.txt'), 'utf8');
+    const match = loginUrlText.match(/(http:\/\/127\.0\.0\.1:(\d+)\/\?token=([0-9a-f]{48}))/);
+    assert.ok(match, `login link missing from login url file: ${loginUrlText}`);
     assert.equal(Number(match[2]), runtime.port);
+    assert.ok(!runtime.logs.stdout.includes(match[3]), 'full token must not appear in startup stdout');
+    assert.match(runtime.logs.stdout, /token 已遮罩/);
 
     const created = await requestJson(
       runtime.port,
@@ -2300,4 +2304,90 @@ test('openai_compatible provider: missing base_url/model fails clearly without c
   } finally {
     await stopDaemon(runtime.daemon);
   }
+});
+
+function withEnv(overrides, fn) {
+  const saved = {};
+  for (const key of Object.keys(overrides)) {
+    saved[key] = process.env[key];
+    if (overrides[key] === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = overrides[key];
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    for (const key of Object.keys(saved)) {
+      if (saved[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = saved[key];
+      }
+    }
+  }
+}
+
+test('agy provider: only AIWFF_WORKER_PROVIDER=agy or ENABLE_AGY_WORKER turns it on; MOCK_WORKER wins', () => {
+  const base = { AIWFF_WORKER_PROVIDER: undefined, ENABLE_AGY_WORKER: undefined, MOCK_WORKER: undefined, AGY_CMD: undefined };
+  withEnv(base, () => assert.equal(agentModule.shouldUseAgyWorker(), false));
+  withEnv({ ...base, AGY_CMD: 'agy' }, () => assert.equal(agentModule.shouldUseAgyWorker(), false));
+  withEnv({ ...base, AIWFF_WORKER_PROVIDER: 'agy' }, () => assert.equal(agentModule.shouldUseAgyWorker(), true));
+  withEnv({ ...base, ENABLE_AGY_WORKER: '1' }, () => assert.equal(agentModule.shouldUseAgyWorker(), true));
+  withEnv({ ...base, AIWFF_WORKER_PROVIDER: 'agy', MOCK_WORKER: '1' }, () =>
+    assert.equal(agentModule.shouldUseAgyWorker(), false),
+  );
+});
+
+test('agy provider: AGY_MODEL set adds --model <value>; unset adds no --model', () => {
+  const promptFile = path.join(DATA_DIR, 'workspaces', 'x', 'AGY_PROMPT.md');
+  withEnv({ AGY_MODEL: 'gemini-test-model', AGY_SKIP_PERMISSIONS: undefined }, () => {
+    const args = agentModule.buildAgyArgs(promptFile);
+    const index = args.indexOf('--model');
+    assert.ok(index >= 0, `--model missing: ${JSON.stringify(args)}`);
+    assert.equal(args[index + 1], 'gemini-test-model');
+    assert.ok(!args.includes('--dangerously-skip-permissions'));
+  });
+  withEnv({ AGY_MODEL: undefined, AGY_SKIP_PERMISSIONS: undefined }, () => {
+    const args = agentModule.buildAgyArgs(promptFile);
+    assert.ok(!args.includes('--model'), `unexpected --model: ${JSON.stringify(args)}`);
+  });
+  withEnv({ AGY_MODEL: '   ', AGY_SKIP_PERMISSIONS: '1' }, () => {
+    const args = agentModule.buildAgyArgs(promptFile);
+    assert.ok(!args.includes('--model'));
+    assert.equal(args[0], '--dangerously-skip-permissions');
+  });
+});
+
+test('agy provider: long prompt goes to a workspace file, not the command line', () => {
+  ensureDirectoriesForAgyTest();
+  const workerCwd = path.join(DATA_DIR, 'workspaces', 'agy-long-prompt-test');
+  fs.mkdirSync(workerCwd, { recursive: true });
+  const longInstruction = 'x'.repeat(40000);
+  const task = { id: 'agy-long-prompt-test', title: 'long', instruction: longInstruction };
+  const promptFile = agentModule.writeAgyPromptFile(task, workerCwd);
+  assert.equal(path.dirname(promptFile), workerCwd);
+  assert.ok(fs.readFileSync(promptFile, 'utf8').includes(longInstruction));
+  const args = withEnv({ AGY_MODEL: undefined, AGY_SKIP_PERMISSIONS: undefined }, () => agentModule.buildAgyArgs(promptFile));
+  const commandLine = args.join(' ');
+  assert.ok(commandLine.length < 2000, `command line too long: ${commandLine.length}`);
+  assert.ok(!commandLine.includes(longInstruction.slice(0, 100)));
+  assert.ok(args[args.indexOf('-p') + 1].includes(promptFile));
+  fs.rmSync(workerCwd, { recursive: true, force: true });
+});
+
+function ensureDirectoriesForAgyTest() {
+  agentModule.ensureDirectories();
+}
+
+test('startup login lines: non-TTY output masks the token, TTY keeps the full link', () => {
+  agentModule.initRuntimeToken();
+  const fullUrl = agentModule.runtimeLoginUrl();
+  const token = new URL(fullUrl).searchParams.get('token');
+  const logLines = agentModule.startupLoginLines(false).join('\n');
+  assert.ok(!logLines.includes(token), `token leaked into non-TTY startup output: ${logLines}`);
+  assert.ok(logLines.includes(token.slice(0, 4)));
+  assert.ok(logLines.includes(agentModule.LOGIN_URL_FILE));
+  assert.ok(agentModule.startupLoginLines(true).join('\n').includes(fullUrl));
 });
