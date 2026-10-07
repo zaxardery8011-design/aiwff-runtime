@@ -2163,6 +2163,26 @@ function createRuntimeServer() {
   });
 }
 
+// 上一個 process 留下的 running 任務已沒有 worker 在跑：啟動時改成 blocked，不自動重跑。
+// 不收的話它會永遠掛在 running，帳上看起來像還有人在做。
+function sweepOrphanRunningTasks() {
+  const swept = [];
+  for (const task of listTasks()) {
+    if (task.status !== 'running' || !isSafeTaskId(task.id)) {
+      continue;
+    }
+    updateTaskStatus(task, 'blocked', {
+      blocked_reason: 'interrupted',
+      last_error: 'runtime restarted while task was running; not retried automatically',
+    });
+    swept.push(task.id);
+  }
+  if (swept.length) {
+    logStderr('startup-sweep', `marked ${swept.length} interrupted running task(s) as blocked: ${swept.join(', ')}`);
+  }
+  return swept;
+}
+
 function main() {
   installProcessGuards();
   ensureDirectories();
@@ -2174,10 +2194,17 @@ function main() {
       'server-listen',
       `failed to bind http://127.0.0.1:${PORT}: ${err.code || err.message}. Set PORT to a free port and retry.`,
     );
+    if (err.code === 'EADDRINUSE') {
+      process.stderr.write('  PowerShell: $env:PORT=3200; npm run web\n');
+      process.stderr.write('  bash / macOS / Linux: PORT=3200 npm run web\n');
+    }
     process.exit(1);
   });
 
   server.listen(PORT, '127.0.0.1', () => {
+    // 綁定成功才收殘留任務：同一資料夾誤開第二個 runtime 時，它會先撞 EADDRINUSE 結束，
+    // 不會把第一個實例正在跑的任務誤標成中斷。listening callback 在處理任何連線之前執行。
+    sweepOrphanRunningTasks();
     console.log(`AIWFF Runtime listening on http://127.0.0.1:${PORT}`);
     const isTTY = Boolean(process.stdout.isTTY);
     if (!isTTY) {

@@ -228,7 +228,7 @@ npm run web        # 等同 npm start，兩個指令都會起同一個 WebUI
 
 ![WebUI HUD 首頁](../images/webui-01-hud-dashboard.png)
 
-> **換 port**：3100 被占用時，`npm run web` 不會自動換 port（會直接報 `EADDRINUSE`）。這時 Windows PowerShell 用 `$env:PORT=3200; npm run web`，bash / macOS / Linux 用 `PORT=3200 npm run web`，再開 `http://127.0.0.1:3200`。
+> **換 port**：3100 被占用時，`npm run web` 不會自動換 port：它會印出 `failed to bind http://127.0.0.1:3100: EADDRINUSE` 和下面兩行換 port 的指令，然後結束（exit code 1）。這時 Windows PowerShell 用 `$env:PORT=3200; npm run web`，bash / macOS / Linux 用 `PORT=3200 npm run web`，再開 `http://127.0.0.1:3200`。
 
 裝到這裡，你已經有一個**完全免費、跑在自己電腦上**的 AI 任務助手骨架了。接下來怎麼用它建任務、看產出，見 [使用手冊 usage.md](usage.md)。
 
