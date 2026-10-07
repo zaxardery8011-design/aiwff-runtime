@@ -5,6 +5,28 @@
 > 這份是**安裝手冊**，教你怎麼把它裝起來、跑通第一次。學會裝好之後怎麼「用」它，見 [使用手冊 usage.md](usage.md)。
 > 英文完整規格 → [../../README.md](../../README.md)。
 
+> **Windows 一鍵安裝（試用版）**：不想照下面一步一步裝，可以用 repo 根目錄的 `install.ps1`。
+> Windows PowerShell 5.1 就能跑，不需要系統管理員權限。它會自動做這些事：
+> - 從官方來源下載免安裝版 Node、MinGit、pwsh，版本寫死，SHA256 對不上就中止；
+> - 抓 aiwff-runtime、soplint、execution-proofs 三個 repo，裝好依賴；
+> - 產生 `.env` 和登入 token（token 不會印在畫面上）；
+> - 跑一次 doctor。
+>
+> ```powershell
+> iwr -UseBasicParsing https://raw.githubusercontent.com/zaxardery8011-design/aiwff-runtime/master/install.ps1 -OutFile install.ps1
+> powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Name demo
+> ```
+>
+> 預設裝到 `C:\AIWFF-<Name>\`，安裝時會問要不要登入後自動啟動（直接按 Enter＝要）。
+> 常用開關：
+> - `-DryRun`：只列出計畫，什麼都不改；
+> - `-SkipAutostart`：不設自動啟動；
+> - `-Unattended`：不問問題；
+> - `-UseSystemTools`：用電腦上已經有的 node 和 git；
+> - `-Root <資料夾>`：改安裝位置。
+>
+> 結束碼：0＝完成、2＝非互動環境沒指定開關、4＝裝好了但健康檢查沒過。
+
 ---
 
 ## §0 開始之前（這份手冊給誰、你會得到什麼）
