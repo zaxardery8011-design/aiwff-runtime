@@ -1564,7 +1564,7 @@ function startFakeOpenAI() {
     });
     req.on('end', () => {
       const body = JSON.parse(raw || '{}');
-      requests.push({ url: req.url, authorization: req.headers.authorization, body });
+      requests.push({ url: req.url, authorization: req.headers.authorization, taskId: req.headers['x-aiwff-task-id'], body });
       const userText = (body.messages || []).map((m) => m.content).join('\n');
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
@@ -2274,6 +2274,7 @@ test('openai_compatible provider: task is answered by the configured endpoint an
     assert.equal(fake.requests.length, 1);
     assert.equal(fake.requests[0].url, '/v1/chat/completions');
     assert.equal(fake.requests[0].authorization, 'Bearer sk-test');
+    assert.equal(fake.requests[0].taskId, created.id);
     assert.equal(fake.requests[0].body.model, 'qwen3-32b-test');
     assert.match(fake.requests[0].body.messages[1].content, /我要退款/);
     const artifact = fs.readFileSync(path.join(ROOT_DIR, task.artifact_path), 'utf8');
