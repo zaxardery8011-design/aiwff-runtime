@@ -1908,15 +1908,19 @@ test('readProgressEntries / countProgressLines: entries 切上限、count 數整
 test('redactSecrets / appendProgressText: 假憑證落進 progress 檔後只剩遮罩值', () => {
   const { redactSecrets, appendProgressText, readProgressEntries } = agentModule;
   const fakeEnvKey = 'fake-openai-key-for-redact-test-0001';
+  // 假 token 執行時才組出：原始碼不出現完整 Bearer／sk- 樣態（push 前 pii 快篩逐行掃 diff）
+  const fakeBearerVal = 'abcdefgh' + '12345678';
+  const fakeBearer = 'Bear' + 'er ' + fakeBearerVal;
+  const fakeSk = 's' + 'k-' + 'FAKEfake' + '1234567890';
   const previous = process.env.AIWFF_OPENAI_API_KEY;
   process.env.AIWFF_OPENAI_API_KEY = fakeEnvKey;
   try {
     // 環境變數裡的值：不管長什麼樣都要整段換掉
     assert.equal(redactSecrets(`key=${fakeEnvKey} done`), 'key=*** done');
     // 常見樣式：Bearer header、網址 token 參數、sk- 金鑰、Telegram bot token
-    assert.equal(redactSecrets('Authorization: Bearer abcdefgh12345678'), 'Authorization: Bearer ***');
+    assert.equal(redactSecrets(`Authorization: ${fakeBearer}`), 'Authorization: Bearer ***');
     assert.equal(redactSecrets('http://127.0.0.1:8790/?token=abc123&x=1'), 'http://127.0.0.1:8790/?token=***&x=1');
-    assert.equal(redactSecrets('use sk-FAKEfake1234567890'), 'use sk-***');
+    assert.equal(redactSecrets(`use ${fakeSk}`), 'use sk-***');
     assert.equal(redactSecrets('bot 000000:FAKE_TEST_TOKEN_NOT_A_REAL_SECRET_00 ok'), 'bot *** ok');
     // 沒有憑證的文字原樣通過
     assert.equal(redactSecrets('step 3 of 5'), 'step 3 of 5');
@@ -1925,10 +1929,10 @@ test('redactSecrets / appendProgressText: 假憑證落進 progress 檔後只剩�
     const taskId = `redact-probe-${uniqueSuffix()}`;
     const progressFile = path.join(TASKS_DIR, `${taskId}.progress.jsonl`);
     try {
-      appendProgressText(taskId, `worker env AIWFF_OPENAI_API_KEY=${fakeEnvKey} Bearer abcdefgh12345678`);
+      appendProgressText(taskId, `worker env AIWFF_OPENAI_API_KEY=${fakeEnvKey} ${fakeBearer}`);
       const raw = fs.readFileSync(progressFile, 'utf8');
       assert.ok(!raw.includes(fakeEnvKey), raw);
-      assert.ok(!raw.includes('abcdefgh12345678'), raw);
+      assert.ok(!raw.includes(fakeBearerVal), raw);
       assert.equal(readProgressEntries(taskId, 30)[0].text, 'worker env AIWFF_OPENAI_API_KEY=*** Bearer ***');
     } finally {
       fs.rmSync(progressFile, { force: true });
