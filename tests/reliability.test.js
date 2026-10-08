@@ -1581,7 +1581,7 @@ function freePort() {
 }
 
 // --- (4) OpenAI 相容端點插槽 ---
-function startFakeOpenAI() {
+function startFakeOpenAI(failureStatus) {
   const requests = [];
   const server = http.createServer((req, res) => {
     let raw = '';
@@ -1591,6 +1591,11 @@ function startFakeOpenAI() {
     req.on('end', () => {
       const body = JSON.parse(raw || '{}');
       requests.push({ url: req.url, authorization: req.headers.authorization, taskId: req.headers['x-aiwff-task-id'], body });
+      if (failureStatus && requests.length === 1) {
+        res.writeHead(failureStatus, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'intentional test failure' }));
+        return;
+      }
       const userText = (body.messages || []).map((m) => m.content).join('\n');
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
@@ -2318,7 +2323,8 @@ test('openai_compatible provider: missing base_url/model fails clearly without c
     AIWFF_WORKER_PROVIDER: 'openai_compatible',
     AIWFF_OPENAI_BASE_URL: '',
     AIWFF_OPENAI_MODEL: '',
-    MAX_TASK_RETRIES: '0',
+    MAX_TASK_RETRIES: '2',
+    RETRY_BACKOFF_MS: '10',
   });
 
   try {
@@ -2327,6 +2333,7 @@ test('openai_compatible provider: missing base_url/model fails clearly without c
       instruction: 'should fail',
     }, AUTH_HEADERS);
     const task = await waitForTaskStatus(runtime.port, created.id, ['failed'], 10000);
+    assert.equal(task.retry_count, 0);
     assert.match(task.error, /AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required/);
   } finally {
     await stopDaemon(runtime.daemon);
@@ -2418,3 +2425,33 @@ test('startup login lines: non-TTY output masks the token, TTY keeps the full li
   assert.ok(logLines.includes(agentModule.LOGIN_URL_FILE));
   assert.ok(agentModule.startupLoginLines(true).join('\n').includes(fullUrl));
 });
+
+
+for (const status of [400, 401, 404, 408, 429, 503]) {
+  test(`openai_compatible provider: HTTP ${status} classifies retry by status`, async () => {
+    resetDataDir();
+    const fake = await startFakeOpenAI(status);
+    const runtime = await startDaemon({
+      MOCK_WORKER: '',
+      AIWFF_WORKER_PROVIDER: 'openai_compatible',
+      AIWFF_OPENAI_BASE_URL: `http://127.0.0.1:${fake.port}/v1`,
+      AIWFF_OPENAI_MODEL: 'test-model',
+      MAX_TASK_RETRIES: '2',
+      RETRY_BACKOFF_MS: '10',
+    });
+    try {
+      const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+        title: 'retry classification', instruction: 'respond',
+      }, AUTH_HEADERS);
+      const task = await waitForTaskStatus(runtime.port, created.id, ['done', 'failed'], 10000);
+      const retryable = [408, 429, 503].includes(status);
+      assert.equal(task.status, retryable ? 'done' : 'failed');
+      assert.equal(fake.requests.length, retryable ? 2 : 1);
+      assert.equal(task.retry_count, retryable ? 1 : 0);
+      assert.match(retryable ? task.last_error : task.error, new RegExp(`HTTP ${status}:`));
+    } finally {
+      await stopDaemon(runtime.daemon);
+      fake.server.close();
+    }
+  });
+}
