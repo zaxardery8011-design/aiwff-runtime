@@ -1724,7 +1724,7 @@ function buildOpenAICompatibleMessages(task) {
 async function requestOpenAICompatibleCompletion(task, timeoutMs) {
   const config = openAICompatibleConfig();
   if (!config.baseUrl || !config.model) {
-    throw new Error('AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required when AIWFF_WORKER_PROVIDER=openai_compatible');
+    throw Object.assign(new Error('AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required when AIWFF_WORKER_PROVIDER=openai_compatible'), { retryable: false });
   }
   // 帶上 task_id，讓 gateway／代理能把同一個任務的多次往返（含 retry）分成一組計算。
   const headers = { 'content-type': 'application/json', 'x-aiwff-task-id': String(task.id) };
@@ -1739,7 +1739,10 @@ async function requestOpenAICompatibleCompletion(task, timeoutMs) {
   });
   const raw = await response.text();
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${raw.slice(0, 500)}`);
+    throw Object.assign(new Error(`HTTP ${response.status}: ${raw.slice(0, 500)}`), {
+      status: response.status,
+      retryable: !(response.status >= 400 && response.status < 500) || response.status === 408 || response.status === 429,
+    });
   }
   const content = JSON.parse(raw)?.choices?.[0]?.message?.content;
   if (typeof content !== 'string' || !content.trim()) {
@@ -1772,7 +1775,7 @@ function runOpenAICompatibleWorker(task, attempt = 1) {
         return;
       }
       const failureReason = `OpenAI-compatible request failed: ${error && error.message}`;
-      if (attempt <= MAX_TASK_RETRIES) {
+      if (error?.retryable !== false && attempt <= MAX_TASK_RETRIES) {
         appendProgressText(
           task.id,
           `Worker attempt ${attempt} failed (${failureReason}); retrying (${attempt}/${MAX_TASK_RETRIES}) in ${RETRY_BACKOFF_MS}ms`,
