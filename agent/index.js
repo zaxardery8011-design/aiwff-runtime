@@ -1159,10 +1159,35 @@ function handleTaskResult(req, res, rawId) {
   });
 }
 
+// 子程序輸出、spawn 參數、失敗原因都會落進 progress／task 檔，再被 WebUI 與 Telegram 讀出去；
+// 落檔前先把已知憑證值與常見憑證樣式換成遮罩，免得 worker 一印環境就把 token 帶進產物。
+const SECRET_ENV_NAMES = ['AIWFF_RUNTIME_TOKEN', 'TG_BOT_TOKEN', 'AIWFF_OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY'];
+const SECRET_MIN_LENGTH = 8;
+const SECRET_PATTERNS = [
+  [/(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1***'],
+  [/([?&]token=)[^&\s"']+/gi, '$1***'],
+  [/\bsk-[A-Za-z0-9_-]{8,}/g, 'sk-***'],
+  [/\b\d{6,}:[A-Za-z0-9_-]{30,}\b/g, '***'],
+];
+
+function redactSecrets(text) {
+  let output = String(text);
+  const values = SECRET_ENV_NAMES.map((name) => process.env[name]).concat(runtimeToken);
+  for (const value of values) {
+    if (value && value.length >= SECRET_MIN_LENGTH) {
+      output = output.split(value).join('***');
+    }
+  }
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    output = output.replace(pattern, replacement);
+  }
+  return output;
+}
+
 function appendProgressText(taskId, line) {
   // 進度是 best-effort：寫失敗（如磁碟滿）只記 stderr，不炸掉 stdout 事件回呼。
   try {
-    fs.appendFileSync(progressPath(taskId), `${JSON.stringify({ ts: Date.now(), text: line })}\n`);
+    fs.appendFileSync(progressPath(taskId), `${JSON.stringify({ ts: Date.now(), text: redactSecrets(line) })}\n`);
   } catch (error) {
     logStderr(`progress append failed (${taskId})`, error);
   }
@@ -1497,7 +1522,7 @@ function spawnClaudeWorker(task, attempt = 1) {
       // stderr 空的時候，光一句 `exited with code 1` 不算具名；先退 stdout 尾巴，
       // 兩邊都空就明講「兩條管道都沒輸出」，別讓帳上只剩一個數字。
       const tail = stderr.trim().slice(-1000) || stdout.trim().slice(-1000);
-      failureReason = `Claude exited with ${exitReason}: ${tail || 'no stderr or stdout output'}`;
+      failureReason = `Claude exited with ${exitReason}: ${redactSecrets(tail) || 'no stderr or stdout output'}`;
     } else if (!fs.existsSync(artifactResultPath(task.id))) {
       failureReason = stdout.trim()
         ? 'no artifact produced'
@@ -1648,7 +1673,7 @@ function spawnAgyWorker(task, attempt = 1) {
     // agy 有時只把答案印在 stdout、沒自己寫檔；exit 0 時用 stdout 補成 artifact。
     if (!spawnError && code === 0 && !fs.existsSync(artifactPath) && stdout.trim()) {
       try {
-        fs.writeFileSync(artifactPath, `${stdout.trim()}\n`, 'utf8');
+        fs.writeFileSync(artifactPath, `${redactSecrets(stdout.trim())}\n`, 'utf8');
       } catch (err) {
         logStderr('failed to write agy fallback artifact', err);
       }
@@ -1660,7 +1685,7 @@ function spawnAgyWorker(task, attempt = 1) {
     } else if (code !== 0) {
       const exitReason = code === null ? `signal ${signal || 'unknown'}` : `code ${code}`;
       const tail = stderr.trim().slice(-1000) || stdout.trim().slice(-1000);
-      failureReason = `AGY exited with ${exitReason}: ${tail || 'no stderr or stdout output'}`;
+      failureReason = `AGY exited with ${exitReason}: ${redactSecrets(tail) || 'no stderr or stdout output'}`;
     } else if (!fs.existsSync(artifactPath)) {
       failureReason = 'headless agy exited 0 with no output and no artifact';
     }
@@ -2245,6 +2270,8 @@ module.exports = {
   safeWriteTaskFile,
   readTaskSafely,
   appendProgressText,
+  // 落 progress／task 檔前的憑證遮罩：開出入口才驗得到「假 token 落檔後只剩遮罩值」。
+  redactSecrets,
   listTasks,
   // 0 筆的具名理由是純函式，開出入口才驗得到「三種 0 分得開」。
   taskQueryZeroReason,
