@@ -314,7 +314,9 @@ if (-not $health) {
 }
 Step "completed: $($Done -join ' | ')"
 $tokLine = Get-Content $envFile -Encoding UTF8 | Where-Object { $_ -match '^AIWFF_RUNTIME_TOKEN=' } | Select-Object -First 1
+$loginUrl = "http://127.0.0.1:$PORT/"
 if ($tokLine -and ($tokLine -replace '^AIWFF_RUNTIME_TOKEN=', '').Trim()) {
+  $loginUrl += '?token=' + [Uri]::EscapeDataString(($tokLine -replace '^AIWFF_RUNTIME_TOKEN=', '').Trim())
   Step "token: in $envFile as AIWFF_RUNTIME_TOKEN (value not printed); WebUI login = http://127.0.0.1:$PORT/?token=<that value>"
 } else {
   Write-Warning "AIWFF_RUNTIME_TOKEN in $envFile is empty: the runtime will make a new token on every start. Set a fixed value there to keep one login link."
@@ -323,5 +325,7 @@ if ($health) {
   Write-Host "[FAILED ] installed, but the health check failed: $health" -ForegroundColor Red
   exit 4
 }
-if (-not $NoBrowser) { Start-Process "http://127.0.0.1:$PORT/" }
+if ($NoStart) { Step "open WebUI: run $launcher, then use the login link above (token value is in $envFile)" }
+elseif ($NoBrowser) { Step "open WebUI: use the login link above (token value is in $envFile)" }
+else { Start-Process $loginUrl }
 Ok "done. root=$Root"
