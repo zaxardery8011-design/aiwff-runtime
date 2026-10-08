@@ -831,6 +831,36 @@ test('task retry: real worker gives up as failed after retries are exhausted', a
   }
 });
 
+test('task retry: first launch failure stays on the task record and retries do not overwrite it', async () => {
+  resetDataDir();
+  // Windows 走 cmd.exe 轉一手，指不存在的 ComSpec 才會是 spawn 層失敗；其他平台直接指不存在的命令。
+  const missing = path.join(DATA_DIR, 'test-bin', 'no-such-launcher.exe');
+  const comSpecKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'comspec') || 'ComSpec';
+  const launchEnv = process.platform === 'win32' ? { [comSpecKey]: missing } : { CLAUDE_CMD: missing };
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    ENABLE_REAL_CLAUDE_WORKER: '1',
+    MAX_TASK_RETRIES: '1',
+    RETRY_BACKOFF_MS: '50',
+    ...launchEnv,
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'launch error kept',
+      instruction: 'worker binary is missing',
+      timeout_sec: 20,
+    }, AUTH_HEADERS);
+    const task = await waitForTaskStatus(runtime.port, created.id, ['failed'], 20000);
+    assert.equal(task.status, 'failed');
+    assert.equal(task.retry_count, 1);
+    // 第二輪也起不來，但留在帳上的必須還是第一輪那筆。
+    assert.match(task.launch_error, /^attempt 1: .*ENOENT/);
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
 // --- (3) Telegram 斷線重連 ---
 test('telegram reconnect: polling backs off then recovers after transient disconnects', async () => {
   resetDataDir();

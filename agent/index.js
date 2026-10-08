@@ -1401,6 +1401,15 @@ function appendClaudeBoundaryArgs(args) {
   }
 }
 
+// last_error 每輪重試都會被蓋掉：第一輪根本沒起來（spawn 失敗），第二輪換成別種失敗或成功，
+// 「當初為什麼起不來」就從帳上消失了。啟動失敗只記第一次，之後的重試不覆蓋。
+function launchErrorExtra(task, spawnError, attempt) {
+  if (!spawnError || (task && task.launch_error)) {
+    return {};
+  }
+  return { launch_error: `attempt ${attempt}: ${spawnError.message}` };
+}
+
 function spawnClaudeProcess(claudeCmd, args, optionsOverride = {}) {
   const options = {
     cwd: optionsOverride.cwd || ROOT_DIR,
@@ -1516,7 +1525,11 @@ function spawnClaudeWorker(task, attempt = 1) {
         task.id,
         `Worker attempt ${attempt} failed (${failureReason}); retrying (${attempt}/${MAX_TASK_RETRIES}) in ${RETRY_BACKOFF_MS}ms`,
       );
-      updateTaskStatus(currentTask, 'running', { retry_count: attempt, last_error: failureReason });
+      updateTaskStatus(currentTask, 'running', {
+        retry_count: attempt,
+        last_error: failureReason,
+        ...launchErrorExtra(currentTask, spawnError, attempt),
+      });
       setTimeout(() => {
         spawnClaudeWorker(readTaskSafely(task.id, 'retry respawn') || currentTask, attempt + 1);
       }, RETRY_BACKOFF_MS);
@@ -1526,6 +1539,7 @@ function spawnClaudeWorker(task, attempt = 1) {
     const failedTask = updateTaskStatus(currentTask, 'failed', {
       error: failureReason,
       retry_count: attempt - 1,
+      ...launchErrorExtra(currentTask, spawnError, attempt),
     });
     notifyTelegramTaskDone(failedTask);
   });
@@ -1676,7 +1690,11 @@ function spawnAgyWorker(task, attempt = 1) {
         task.id,
         `Worker attempt ${attempt} failed (${failureReason}); retrying (${attempt}/${MAX_TASK_RETRIES}) in ${RETRY_BACKOFF_MS}ms`,
       );
-      updateTaskStatus(currentTask, 'running', { retry_count: attempt, last_error: failureReason });
+      updateTaskStatus(currentTask, 'running', {
+        retry_count: attempt,
+        last_error: failureReason,
+        ...launchErrorExtra(currentTask, spawnError, attempt),
+      });
       setTimeout(() => {
         spawnAgyWorker(readTaskSafely(task.id, 'retry respawn') || currentTask, attempt + 1);
       }, RETRY_BACKOFF_MS);
@@ -1686,6 +1704,7 @@ function spawnAgyWorker(task, attempt = 1) {
     const failedTask = updateTaskStatus(currentTask, 'failed', {
       error: failureReason,
       retry_count: attempt - 1,
+      ...launchErrorExtra(currentTask, spawnError, attempt),
     });
     notifyTelegramTaskDone(failedTask);
   });
