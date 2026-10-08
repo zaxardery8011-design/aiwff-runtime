@@ -175,6 +175,18 @@ test('id 格式不符（含路徑穿越）→ 400', async () => {
   });
 });
 
+test('progress：id 字元不符、超長、%XX 壞掉 → 400', async () => {
+  await withServer(async () => {
+    for (const badId of ['..%2F..%2Fpackage', '%E0%A4%A', 'a'.repeat(129)]) {
+      const response = await request(port, 'GET', `/api/tasks/${badId}/progress`, { headers: authHeader });
+      assert.equal(response.status, 400, `${badId.slice(0, 20)} → ${response.status} ${response.raw}`);
+      assert.equal(response.json.ok, false);
+    }
+    const missing = await request(port, 'GET', `/api/tasks/${crypto.randomUUID()}/progress`, { headers: authHeader });
+    assert.equal(missing.status, 404);
+  });
+});
+
 test('不存在的 id → 404', async () => {
   await withServer(async () => {
     const response = await request(port, 'GET', `/api/tasks/${crypto.randomUUID()}/result`, { headers: authHeader });

@@ -117,8 +117,15 @@ function inboxPath(taskId, eventName) {
   return path.join(INBOX_DIR, `${taskId}.${eventName}.json`);
 }
 
+// 外部傳進來的 id 會直接拼進檔名；超長的 id 會讓檔案系統丟 ENAMETOOLONG，先擋在這裡。
+const TASK_ID_MAX_LENGTH = 128;
+
 function isSafeTaskId(taskId) {
-  return /^[A-Za-z0-9._-]+$/.test(taskId);
+  return (
+    typeof taskId === 'string' &&
+    taskId.length <= TASK_ID_MAX_LENGTH &&
+    /^[A-Za-z0-9._-]+$/.test(taskId)
+  );
 }
 
 function readJsonFile(filePath) {
@@ -1939,7 +1946,17 @@ async function handleRequest(req, res) {
 
   const progressMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/progress$/);
   if (req.method === 'GET' && progressMatch) {
-    const id = decodeURIComponent(progressMatch[1]);
+    // 先驗字元與長度再當路徑用；壞掉的 %XX 讓 decodeURIComponent 丟錯，也當格式不符回 400。
+    let id = null;
+    try {
+      id = decodeURIComponent(progressMatch[1]);
+    } catch (_) {
+      id = null;
+    }
+    if (!isSafeTaskId(id)) {
+      sendJson(res, 400, { ok: false, error: 'invalid task id' });
+      return;
+    }
     const limit = normalizeProgressLimit(url.searchParams.get('limit'));
     const lines = readProgressLines(id, limit);
     if (!lines) {
