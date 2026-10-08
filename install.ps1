@@ -19,8 +19,13 @@
   or -SkipAutostart there.
   Exit codes: 0 ok | 1 install error | 2 non-interactive without -Unattended/-SkipAutostart
               3 assess not implemented | 4 installed, but runtime/doctor health check failed
-  Token: generated into suite\aiwff-runtime\.env as AIWFF_RUNTIME_TOKEN (never printed);
-         WebUI login link = http://127.0.0.1:<PORT>/?token=<that value>.
+  Token: generated into suite\aiwff-runtime\.env as AIWFF_RUNTIME_TOKEN (never printed).
+  Login: the runtime started by this script has stdout redirected to logs\runtime.log, so it
+         prints only a masked link there and writes the full link to
+         suite\aiwff-runtime\data\webui_login_url.txt. This script reads that file (it never
+         builds ?token= itself), probes the link once, and opens it so the WebUI is already
+         logged in. The token is not one-time: opening or pre-fetching the link does not use
+         it up. With -NoStart, or if the link cannot be used, one line says how to open it.
 #>
 param(
   [ValidateSet('fresh','assess')][string]$Mode = 'fresh',
@@ -141,12 +146,12 @@ if ($DryRun) {
   Step 'would write suite\aiwff-runtime\.env from .env.example with a generated AIWFF_RUNTIME_TOKEN (an existing .env is kept)'
   Step "would write launcher $Root\start-runtime.cmd"
   if ($NoStart) {
-    Step 'would NOT register a task, NOT start the runtime, NOT open a browser (-NoStart); run doctor'
+    Step 'would NOT register a task, NOT start the runtime, NOT open a browser (-NoStart); run doctor; print one line saying how to start it and open the login link later'
   } else {
     if ($askAutostart) { Step "on Yes: register scheduled task AIWFF_Runtime_$safe (user logon, no admin, retry 3x/1min) and start it; on No: start the runtime in background for this session only" }
     elseif ($Autostart) { Step "would register scheduled task AIWFF_Runtime_$safe (user logon, no admin, retry 3x/1min) and start it" }
     else { Step 'would NOT register a task (-SkipAutostart); start the runtime in background for this session only' }
-    $tail = if ($NoBrowser) { 'no browser' } else { 'open WebUI http://127.0.0.1:<PORT>/' }
+    $tail = if ($NoBrowser) { 'no browser (print how to open the login link later)' } else { 'open WebUI with the login link the runtime writes to suite\aiwff-runtime\data\webui_login_url.txt (probed first, token not printed)' }
     Step "would wait up to 20s for /api/health, then run doctor; $tail"
   }
   exit 0
@@ -291,6 +296,40 @@ if ($NoStart) {
   Start-Process -FilePath 'cmd.exe' -ArgumentList "/c `"$launcher`"" -WindowStyle Hidden
 }
 
+# Login link. With stdout redirected (the launcher appends to logs\runtime.log) the runtime
+# prints only a masked link and writes the full one to data\webui_login_url.txt; this reads
+# that file and never builds ?token= itself. The token is not one-time: the runtime keeps
+# accepting it (until restart, or for good with a fixed AIWFF_RUNTIME_TOKEN), so a browser or
+# antivirus pre-fetch cannot use it up. The link is still probed before it is opened, because
+# the file can be stale (an older runtime wrote it, or a restart made a new token): a 302
+# means the runtime accepts it, a 401 means it does not. Returns the link or '' (reason in
+# $script:LoginWhy, which never contains the token). The link itself is never printed.
+$loginFile = Join-Path $rt 'data\webui_login_url.txt'
+$reopen = 'Start-Process (Get-Content -LiteralPath ''' + ($loginFile -replace "'", "''") + ''' -TotalCount 1)'
+function Get-LoginLink([string]$File, [int]$Port) {
+  $script:LoginWhy = ''
+  for ($try = 1; $try -le 4; $try++) {
+    if ($try -gt 1) { Start-Sleep -Milliseconds 500 }
+    if (-not (Test-Path -LiteralPath $File)) { $script:LoginWhy = 'the runtime has not written its login link file'; continue }
+    $url = ''
+    $first = Get-Content -LiteralPath $File -Encoding UTF8 -TotalCount 1
+    if ($first) { $url = "$first".Trim() }
+    if ($url -notmatch "^http://127\.0\.0\.1:$Port/\?token=[A-Za-z0-9%._~-]+$") { $script:LoginWhy = 'the login link file does not hold a link for this port'; continue }
+    $resp = $null
+    try {
+      $req = [Net.HttpWebRequest]::Create($url)
+      $req.AllowAutoRedirect = $false; $req.Timeout = 3000; $req.Proxy = $null
+      $resp = $req.GetResponse()
+    } catch [Net.WebException] { $resp = $_.Exception.Response } catch { $resp = $null }
+    if (-not $resp) { $script:LoginWhy = 'the runtime did not answer the login link'; continue }
+    $code = [int]$resp.StatusCode
+    $resp.Close()
+    if ($code -eq 302) { return $url }
+    $script:LoginWhy = "the runtime rejected the login link in the file (HTTP $code; stale file from an earlier start?)"
+  }
+  return ''
+}
+
 # 7. health: poll /api/health (no fixed sleep), doctor only once the runtime answers, WebUI
 $health = ''   # empty = healthy; otherwise the reason for exit 4
 if (-not $NoStart) {
@@ -315,13 +354,27 @@ if (-not $health) {
 Step "completed: $($Done -join ' | ')"
 $tokLine = Get-Content $envFile -Encoding UTF8 | Where-Object { $_ -match '^AIWFF_RUNTIME_TOKEN=' } | Select-Object -First 1
 if ($tokLine -and ($tokLine -replace '^AIWFF_RUNTIME_TOKEN=', '').Trim()) {
-  Step "token: in $envFile as AIWFF_RUNTIME_TOKEN (value not printed); WebUI login = http://127.0.0.1:$PORT/?token=<that value>"
+  Step "token: in $envFile as AIWFF_RUNTIME_TOKEN (value not printed); the runtime saves its ready-to-click login link in $loginFile"
 } else {
-  Write-Warning "AIWFF_RUNTIME_TOKEN in $envFile is empty: the runtime will make a new token on every start. Set a fixed value there to keep one login link."
+  Write-Warning "AIWFF_RUNTIME_TOKEN in $envFile is empty: the runtime will make a new token on every start and rewrite $loginFile each time. Set a fixed value in .env to keep one token."
 }
 if ($health) {
   Write-Host "[FAILED ] installed, but the health check failed: $health" -ForegroundColor Red
   exit 4
 }
-if (-not $NoBrowser) { Start-Process "http://127.0.0.1:$PORT/" }
+if ($NoStart) {
+  Step "nostart: the runtime is not running, so there is no login link yet; to use the WebUI run `"$launcher`", wait a few seconds, then in PowerShell: $reopen"
+} elseif ($NoBrowser) {
+  Step "browser not opened (-NoBrowser); to open the WebUI already logged in, in PowerShell: $reopen"
+} else {
+  $link = Get-LoginLink $loginFile $PORT
+  if ($link) {
+    Start-Process $link
+    Ok 'WebUI opened already logged in (login link not printed)'
+    Step "to open it again later (a closed browser forgets the login), in PowerShell: $reopen"
+  } else {
+    Write-Warning "no usable login link ($script:LoginWhy). Opening the WebUI without login (the chat tab cannot create tasks). To log in once the runtime is up, in PowerShell: $reopen"
+    Start-Process "http://127.0.0.1:$PORT/"
+  }
+}
 Ok "done. root=$Root"

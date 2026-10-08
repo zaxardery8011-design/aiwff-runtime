@@ -10,7 +10,8 @@
 > - 從官方來源下載免安裝版 Node、MinGit、pwsh，版本寫死，SHA256 對不上就中止；
 > - 抓 aiwff-runtime、soplint、execution-proofs 三個 repo，裝好依賴；
 > - 產生 `.env` 和登入 token（token 不會印在畫面上）；
-> - 跑一次 doctor。
+> - 跑一次 doctor；
+> - 啟動 runtime 後，自動用瀏覽器打開**已登入**的 WebUI，不用自己貼 token。登入連結是 runtime 自己寫在 `suite\aiwff-runtime\data\webui_login_url.txt` 的，安裝器讀那個檔、先確認連結能用才打開（token 不是一次性的，瀏覽器或防毒預抓連結不會讓它失效）。
 >
 > ```powershell
 > iwr -UseBasicParsing https://raw.githubusercontent.com/zaxardery8011-design/aiwff-runtime/master/install.ps1 -OutFile install.ps1
@@ -23,7 +24,11 @@
 > - `-SkipAutostart`：不設自動啟動；
 > - `-Unattended`：不問問題；
 > - `-UseSystemTools`：用電腦上已經有的 node 和 git；
-> - `-Root <資料夾>`：改安裝位置。
+> - `-Root <資料夾>`：改安裝位置；
+> - `-NoBrowser`：裝完不開瀏覽器；
+> - `-NoStart`：不啟動 runtime、不開瀏覽器（也不設自動啟動）。
+>
+> 用了 `-NoStart` / `-NoBrowser`，或登入連結當下不能用時，安裝器會印一行 PowerShell 指令，之後要開已登入的 WebUI 就貼那一行（`-NoStart` 要先執行 `<安裝位置>\start-runtime.cmd` 啟動 runtime）。瀏覽器關掉後登入會失效，同一行再跑一次即可。那個連結檔含登入 token，等同密碼，不要貼給別人。
 >
 > 結束碼：0＝完成、2＝非互動環境沒指定開關、4＝裝好了但健康檢查沒過。
 
