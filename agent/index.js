@@ -967,6 +967,36 @@ function checkPathReadable(id, dirPath) {
   }
 }
 
+// /api/health 的 ok 只代表「process 活著、HTTP 有回」（install.ps1 與 smoke test 都靠它等啟動），語意不動。
+// 元件沒就緒另外放 ready + components，逐一點名哪個元件、為什麼，不讓人只看到一個總狀態。
+function healthComponents(probes = [
+  { name: 'tasks_dir', dir: TASKS_DIR, mode: fs.constants.W_OK },
+  { name: 'artifacts_dir', dir: ARTIFACTS_DIR, mode: fs.constants.W_OK },
+  { name: 'inbox_dir', dir: INBOX_DIR, mode: fs.constants.W_OK },
+  { name: 'memory_dir', dir: MEMORY_DIR, mode: fs.constants.R_OK },
+]) {
+  return probes.map(({ name, dir, mode }) => {
+    try {
+      fs.accessSync(dir, mode);
+      return { name, ok: true, reason: null };
+    } catch (error) {
+      const need = mode === fs.constants.W_OK ? '不可寫' : '不可讀';
+      return { name, ok: false, reason: `${path.relative(ROOT_DIR, dir) || '.'} ${need}（${error.code || error.message}）` };
+    }
+  });
+}
+
+function getHealthSnapshot(probes) {
+  const components = healthComponents(probes);
+  return {
+    ok: true,
+    pid: process.pid,
+    uptime: process.uptime(),
+    ready: components.every((component) => component.ok),
+    components,
+  };
+}
+
 function getDoctorReport() {
   const nodeMajor = Number(process.versions.node.split('.')[0]);
   const checks = [
@@ -2012,7 +2042,7 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/health') {
-    sendJson(res, 200, { ok: true, pid: process.pid, uptime: process.uptime() });
+    sendJson(res, 200, getHealthSnapshot());
     return;
   }
 
@@ -2252,6 +2282,9 @@ module.exports = {
   // 0 筆的具名理由是純函式，開出入口才驗得到「三種 0 分得開」。
   taskQueryZeroReason,
   installProcessGuards,
+  // /api/health 點名沒就緒元件：probes 可注入，才驗得到「缺目錄 → 點名＋原因、ok 不變」。
+  healthComponents,
+  getHealthSnapshot,
   startTelegramPolling,
   tgRequest,
   envInt,
