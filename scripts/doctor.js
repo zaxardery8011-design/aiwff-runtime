@@ -140,19 +140,36 @@ function quoteCommandPart(value) {
   return `"${text.replace(/"/g, '\\"')}"`;
 }
 
-function commandVersion(command) {
+// 外部程式探測（npm／git／claude --version）原本沒有逾時：任一個卡住（例如 Windows 上
+// 等登入的 CLI wrapper），doctor 就整支掛住，連「哪一項卡住」都印不出來。
+// 所以每項探測有自己的逾時，所有探測共用一個總時長上限；逾時與預算用完分開具名。
+function envMs(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+const PROBE_TIMEOUT_MS = envMs('DOCTOR_PROBE_TIMEOUT_MS', 10000);
+const PROBE_TOTAL_BUDGET_MS = envMs('DOCTOR_PROBE_TOTAL_BUDGET_MS', 30000);
+
+function commandVersion(command, deadline = Date.now() + PROBE_TIMEOUT_MS) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    return {
+      ok: false,
+      detail: `probe_skipped_total_budget: ${command} --version not run; doctor probe budget ${PROBE_TOTAL_BUDGET_MS}ms used up`,
+    };
+  }
+  const timeout = Math.min(PROBE_TIMEOUT_MS, remaining);
+  const options = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout, windowsHide: true };
   let result;
   if (process.platform === 'win32') {
     const commandLine = [quoteCommandPart(command), '--version'].join(' ');
-    result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], options);
   } else {
-    result = spawnSync(command, ['--version'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    result = spawnSync(command, ['--version'], options);
+  }
+  if (result.error && result.error.code === 'ETIMEDOUT') {
+    return { ok: false, detail: `probe_timeout: ${command} --version did not exit within ${timeout}ms` };
   }
   const output = `${result.stdout || ''}${result.stderr || ''}`.trim().split(/\r?\n/)[0] || 'no version output';
   return {
@@ -345,10 +362,11 @@ function recordHealthRun({ mode, ok, coverage: coverageValue, failures }) {
 
 async function runJsonDoctor() {
   const parsedEnv = parseDotEnv();
-  const npm = commandVersion('npm');
-  const git = commandVersion('git');
+  const probeDeadline = Date.now() + PROBE_TOTAL_BUDGET_MS;
+  const npm = commandVersion('npm', probeDeadline);
+  const git = commandVersion('git', probeDeadline);
   const claudeCmd = envValue(parsedEnv, 'CLAUDE_CMD') || 'claude';
-  const claude = commandVersion(claudeCmd);
+  const claude = commandVersion(claudeCmd, probeDeadline);
   const port = await probePort(PORT);
   const nodeMajor = Number(process.versions.node.split('.')[0]);
 

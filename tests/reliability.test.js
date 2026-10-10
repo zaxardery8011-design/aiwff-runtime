@@ -1746,6 +1746,22 @@ test('mock worker: an authoritative status already on disk is never overwritten,
   }
 });
 
+// --- doctor 的外部程式探測要有逾時與總時長上限，卡住的那項要具名 ---
+test('doctor probes: a used-up probe budget names timeout/skip per check instead of hanging', () => {
+  // 總預算 1ms：第一項（npm）只拿得到 ≤1ms 的逾時，後面的探測拿不到預算，應具名跳過。
+  const run = runDoctor(['--json'], { DOCTOR_PROBE_TOTAL_BUDGET_MS: '1', PORT: '0' });
+  const report = JSON.parse(run.stdout);
+  const byId = Object.fromEntries(report.checks.map((check) => [check.id, check]));
+  assert.match(byId.npm_available.detail, /^probe_(timeout|skipped_total_budget): npm --version/, run.out);
+  assert.equal(byId.npm_available.ok, false);
+  assert.match(byId.git_available.detail, /^probe_skipped_total_budget: git --version not run/, run.out);
+  assert.equal(byId.git_available.ok, false);
+  // claude 仍是 optional：跳過不翻紅，但原因要看得到。
+  assert.equal(byId.claude_cli_optional.ok, true);
+  assert.match(byId.claude_cli_optional.detail, /probe_skipped_total_budget/, run.out);
+  assert.equal(run.code, 1, run.out);
+});
+
 // --- (10) 健康紅燈要落存失敗原因與時戳，不是只翻一個 exit code ---
 const HEALTH_RECORD_PATH = path.join(DATA_DIR, 'health', 'last-run.json');
 
