@@ -958,6 +958,20 @@ function getHudSnapshot() {
   };
 }
 
+// health 只回「活著」時，failed 的任務沉在底下沒人看見。這裡數出還停在 failed
+// 的任務數與最舊一筆的時間；不參與 ok 判定（ok 仍是 liveness 語意）。
+function failedTaskBacklog(tasks) {
+  const failed = tasks.filter((task) => task.status === 'failed');
+  let oldestAt = null;
+  for (const task of failed) {
+    const at = String(task.updated_at || task.created_at || '');
+    if (at && (oldestAt === null || at < oldestAt)) {
+      oldestAt = at;
+    }
+  }
+  return { count: failed.length, oldest_at: oldestAt };
+}
+
 function checkPathReadable(id, dirPath) {
   try {
     fs.accessSync(dirPath, fs.constants.R_OK);
@@ -2012,7 +2026,14 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/health') {
-    sendJson(res, 200, { ok: true, pid: process.pid, uptime: process.uptime() });
+    // 積壓數讀不到（任務目錄壞掉）也不能讓 health 失敗：回 null 加原因，ok 不變。
+    let failedBacklog;
+    try {
+      failedBacklog = failedTaskBacklog(listTasks());
+    } catch (error) {
+      failedBacklog = { count: null, oldest_at: null, error: error.message };
+    }
+    sendJson(res, 200, { ok: true, pid: process.pid, uptime: process.uptime(), failed_backlog: failedBacklog });
     return;
   }
 
@@ -2249,6 +2270,7 @@ module.exports = {
   readTaskSafely,
   appendProgressText,
   listTasks,
+  failedTaskBacklog,
   // 0 筆的具名理由是純函式，開出入口才驗得到「三種 0 分得開」。
   taskQueryZeroReason,
   installProcessGuards,

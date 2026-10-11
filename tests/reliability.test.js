@@ -886,6 +886,37 @@ test('telegram reconnect: polling backs off then recovers after transient discon
   }
 });
 
+// --- health 回報 failed 積壓數與最舊時間，ok 語意不變 ---
+test('health: failed_backlog counts failed tasks and names the oldest, ok stays true', async () => {
+  assert.deepEqual(agentModule.failedTaskBacklog([]), { count: 0, oldest_at: null });
+  assert.deepEqual(agentModule.failedTaskBacklog([
+    { status: 'done', updated_at: '2026-10-01T00:00:00.000Z' },
+    { status: 'failed', updated_at: '2026-10-05T00:00:00.000Z' },
+    { status: 'failed', updated_at: '2026-10-03T00:00:00.000Z' },
+  ]), { count: 2, oldest_at: '2026-10-03T00:00:00.000Z' });
+
+  resetDataDir();
+  fs.mkdirSync(TASKS_DIR, { recursive: true });
+  for (const [id, status, at] of [
+    ['backlog-done', 'done', '2026-10-01T00:00:00.000Z'],
+    ['backlog-old', 'failed', '2026-10-02T00:00:00.000Z'],
+    ['backlog-new', 'failed', '2026-10-04T00:00:00.000Z'],
+  ]) {
+    fs.writeFileSync(path.join(TASKS_DIR, `${id}.json`), JSON.stringify({
+      id, status, title: id, instruction: 'x', created_at: at, updated_at: at,
+    }));
+  }
+  const runtime = await startDaemon();
+  try {
+    const health = await requestJson(runtime.port, 'GET', '/api/health');
+    assert.equal(health.ok, true);
+    assert.deepEqual(health.failed_backlog, { count: 2, oldest_at: '2026-10-02T00:00:00.000Z' });
+  } finally {
+    await stopDaemon(runtime.daemon);
+    resetDataDir();
+  }
+});
+
 // --- (4) 讀取端遇未知 row type 跳筆、不整條凍結 ---
 test('ledger reader: a task row that parses but is not an object does not freeze the whole list', () => {
   fs.mkdirSync(TASKS_DIR, { recursive: true });
