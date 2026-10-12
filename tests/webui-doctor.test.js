@@ -192,6 +192,35 @@ test('doctor 全部通過 → 診斷區塊不出現「未通過」', async () =>
   assert.doesNotMatch(ui.html('doctor-list'), /未通過/);
 });
 
+test('先載入成功再讀取失敗 → 任務清單保留、出現失敗行；恢復後失敗行收起', async () => {
+  let failing = false;
+  const TASKS = { ok: true, tasks: [{ id: 'keep-me', status: 'done', title: 'kept task' }] };
+  const ui = loadWebui(proxyFetch({
+    '/api/tasks': () => (failing
+      ? jsonResponse(500, { ok: false, error: 'tasks exploded' })
+      : jsonResponse(200, TASKS)),
+  }));
+  const failLine = ui.context.document.getElementById('load-fail');
+
+  await ui.context.refresh();
+  assert.equal(ui.context.state.online, true);
+  assert.equal(failLine.hidden, true);
+
+  failing = true;
+  await ui.context.refresh();
+  assert.equal(ui.context.state.online, false);
+  assert.deepEqual(ui.context.state.tasks.map((task) => task.id), ['keep-me'], '失敗時不該清空任務清單');
+  assert.equal(failLine.hidden, false);
+  assert.match(failLine.textContent, /讀取失敗/);
+  assert.match(failLine.textContent, /tasks exploded/);
+
+  failing = false;
+  await ui.context.refresh();
+  assert.equal(ui.context.state.online, true);
+  assert.equal(failLine.hidden, true);
+  assert.equal(failLine.textContent, '');
+});
+
 test('全部 API 連不上 → 仍判為斷線，顯示「連線中斷」', async () => {
   const ui = loadWebui(async () => {
     throw new TypeError('Failed to fetch');

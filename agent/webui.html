@@ -98,6 +98,14 @@
       gap: 14px;
       flex-shrink: 0;
     }
+    .load-fail {
+      padding: 6px 18px;
+      border-bottom: 1px solid var(--border-soft);
+      color: var(--red);
+      font-size: 12px;
+      flex-shrink: 0;
+    }
+    .load-fail[hidden] { display: none; }
     .topbar h1 {
       font-size: 14px;
       font-weight: 700;
@@ -925,6 +933,8 @@
       </select>
       <button class="top-btn" id="refresh-button" type="button">重新整理</button>
     </header>
+    <!-- 讀取失敗行：保留上次成功的資料，這裡寫明哪次失敗、為什麼；下一次成功就收起來 -->
+    <div class="load-fail" id="load-fail" role="alert" hidden></div>
 
     <nav class="tabs" role="tablist" aria-label="Runtime 控制台分頁">
       <button class="tab active" role="tab" aria-selected="true" data-tab="hud" data-tab-label="HUD 儀表">HUD 儀表</button>
@@ -1126,6 +1136,8 @@
       coreState: 'BOOT',
       lastSyncMs: 0,
       online: false,
+      // 最近一次 refresh 失敗 { ms, message }；null = 上一次成功
+      loadError: null,
       chatBusy: false,
       // null = 還沒查過 /api/session；false = 沒有登入 cookie，對話分頁停用送出。
       loggedIn: null,
@@ -2116,8 +2128,9 @@
           next[task.id] = data.lines || [];
           nextTrunc[task.id] = data.truncation || null;
         } catch (_) {
-          next[task.id] = [];
-          nextTrunc[task.id] = null;
+          // 讀不到就沿用上次成功的內容，不清空
+          next[task.id] = state.progress[task.id] || [];
+          nextTrunc[task.id] = state.truncation.progress[task.id] || null;
         }
       }));
       state.progress = next;
@@ -2137,8 +2150,8 @@
           : (data.lines || []).map(function(text) { return { ts: null, text: text }; });
         state.truncation.trace[taskId] = data.truncation || null;
       } catch (_) {
-        state.traceEntries[taskId] = [];
-        state.truncation.trace[taskId] = null;
+        // 讀不到就沿用上次成功的時間軸，不清空
+        if (!state.traceEntries[taskId]) state.traceEntries[taskId] = [];
       }
     }
 
@@ -2184,13 +2197,16 @@
         syncChatTasks();
         state.lastSyncMs = Date.now();
         state.online = true;
+        state.loadError = null;
       } catch (error) {
+        // 其他清單保留上次成功的資料；原因交給失敗行顯示（renderHeader 會蓋掉 health-text）
         state.health = null;
         state.online = false;
-        setText('health-text', error.message);
+        state.loadError = { ms: Date.now(), message: error.message };
       }
       renderAll();
       updateSyncChip();
+      renderLoadFail();
       await refreshSession();
     }
 
@@ -2204,6 +2220,20 @@
       }
       setText('last-sync', fmtAgo(state.lastSyncMs));
       if (chip) chip.className = 'stat' + (Date.now() - state.lastSyncMs > 15000 ? ' alert' : '');
+    }
+
+    function renderLoadFail() {
+      var line = byId('load-fail');
+      if (!line) return;
+      if (!state.loadError) {
+        line.hidden = true;
+        line.textContent = '';
+        return;
+      }
+      var at = new Date(state.loadError.ms).toLocaleTimeString('zh-TW', { hour12: false });
+      line.textContent = '讀取失敗 ' + at + '：' + (state.loadError.message || '未知原因') +
+        (state.lastSyncMs ? '（畫面保留上次成功的資料：' + fmtAgo(state.lastSyncMs) + '）' : '');
+      line.hidden = false;
     }
 
     function activateTab(name) {
