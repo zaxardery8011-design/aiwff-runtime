@@ -1139,6 +1139,8 @@
       settings: null,
       selectedMemory: null,
       progress: {},
+      // 進度讀取失敗的具名原因（taskId → 文字）；有值時畫失敗行，不畫成空白進度
+      progressErrors: {},
       // 各清單的截斷資訊（後端 truncation 欄位原樣存放），null = 後端未提供
       truncation: { events: null, inbox: null, progress: {}, trace: {} },
       traceTaskId: null,
@@ -1460,6 +1462,13 @@
       return data;
     }
 
+    // 讀取失敗給具名原因：fetch 本身丟 TypeError＝連不上；JSON 解析失敗＝回應格式不對；其餘用後端給的錯誤字串。
+    function fetchErrorText(error) {
+      if (error && error.name === 'TypeError') return '網路問題（連不到伺服器）';
+      if (error && error.name === 'SyntaxError') return '伺服器回應格式錯誤';
+      return (error && error.message) || '未知錯誤';
+    }
+
     function renderHeader() {
       var ok = !!(state.health && state.health.ok);
       var blocked = state.tasks.filter(function(task) { return task.status === 'blocked'; }).length;
@@ -1615,9 +1624,11 @@
 
       var progressRows = Object.keys(state.progress).map(function(taskId) {
         var lines = state.progress[taskId] || [];
+        var error = state.progressErrors[taskId];
         return '<div class="log-block"><b class="mono">' + escapeHtml(taskId) + '</b>' +
           truncationRow(state.truncation.progress[taskId]) +
-          '<pre>' + escapeHtml(lines.join('\n')) + '</pre></div>';
+          (error ? '<div class="fail">進度讀取失敗：' + escapeHtml(error) + '</div>' : '') +
+          (lines.length || !error ? '<pre>' + escapeHtml(lines.join('\n')) + '</pre>' : '') + '</div>';
       });
       setHtml('progress-list', progressRows.join('') || empty('尚無進度紀錄'));
     }
@@ -2154,19 +2165,22 @@
       }).slice(0, 8);
       var next = {};
       var nextTrunc = {};
+      var nextErrors = {};
       await Promise.all(visible.map(async function(task) {
         try {
           var data = await fetchJson('/api/tasks/' + encodeURIComponent(task.id) + '/progress');
           next[task.id] = data.lines || [];
           nextTrunc[task.id] = data.truncation || null;
-        } catch (_) {
-          // 讀不到就沿用上次成功的內容，不清空
+        } catch (error) {
+          // 讀不到就沿用上次成功的內容，不清空，另外標出具名錯誤
           next[task.id] = state.progress[task.id] || [];
           nextTrunc[task.id] = state.truncation.progress[task.id] || null;
+          nextErrors[task.id] = fetchErrorText(error);
         }
       }));
       state.progress = next;
       state.truncation.progress = nextTrunc;
+      state.progressErrors = nextErrors;
     }
 
     // trace 分頁要看完整時間軸，不能只吃 refreshProgress 的 30 行 tail，
