@@ -33,6 +33,10 @@
     "artifact_path": {
       "type": "string"
     },
+    "worker_title": {
+      "type": "string",
+      "minLength": 1
+    },
     "error": {
       "type": "string"
     },

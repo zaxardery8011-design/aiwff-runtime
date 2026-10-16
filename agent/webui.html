@@ -1530,10 +1530,15 @@
       renderHudLog();
     }
 
+    // 卡片標題先用 worker 自己寫的標題（worker_title），沒有才退回工單 title / id。
+    function taskCardTitle(task) {
+      return task.worker_title || task.title || task.id;
+    }
+
     function taskRow(task) {
       return '<div class="task-row">' +
         '<div>' + statusLabel(task.status) + '</div>' +
-        '<div><div class="task-title">' + escapeHtml(task.title || task.id) + '</div><div class="muted mono">' + escapeHtml(task.id || '') + '</div><div class="soft">' + escapeHtml(taskSummary(task)) + '</div></div>' +
+        '<div><div class="task-title">' + escapeHtml(taskCardTitle(task)) + '</div><div class="muted mono">' + escapeHtml(task.id || '') + '</div><div class="soft">' + escapeHtml(taskSummary(task)) + '</div></div>' +
         '<div class="muted">' + escapeHtml(fmtDate(task.updated_at || task.created_at)) + '<div>' + taskElapsedHtml(task) + '</div></div>' +
       '</div>';
     }

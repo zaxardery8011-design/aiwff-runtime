@@ -1356,6 +1356,30 @@ ${preferences}
 `;
 }
 
+// worker 卡片標題用 worker 自己在產出檔開頭寫的 `# 標題`（借鏡 amux：卡片顯示工作階段自己的標題）。
+// 只在轉 done 那一刻讀一次，存成 worker_title；讀不到就回 null，畫面退回工單 title / id。
+const WORKER_TITLE_SCAN_BYTES = 4096;
+const WORKER_TITLE_MAX_CHARS = 80;
+
+function readWorkerTitle(taskId) {
+  let text;
+  try {
+    text = readUtf8WithinLimit(artifactResultPath(taskId), WORKER_TITLE_SCAN_BYTES).text;
+  } catch (_) {
+    return null;
+  }
+  const line = text.replace(/^﻿/, '').split(/\r?\n/).find((row) => row.trim());
+  const match = line && line.match(/^#\s+(.+?)\s*#*\s*$/);
+  if (!match) {
+    return null;
+  }
+  const title = match[1].replace(/\s+/g, ' ').trim();
+  if (!title) {
+    return null;
+  }
+  return title.length > WORKER_TITLE_MAX_CHARS ? `${title.slice(0, WORKER_TITLE_MAX_CHARS - 3)}...` : title;
+}
+
 function updateTaskStatus(task, status, extra = {}) {
   const previousStatus = task.status;
   const nextTask = {
@@ -1364,6 +1388,12 @@ function updateTaskStatus(task, status, extra = {}) {
     status,
     updated_at: nowIso(),
   };
+  if (status === 'done' && previousStatus !== status && !nextTask.worker_title) {
+    const workerTitle = readWorkerTitle(task.id);
+    if (workerTitle) {
+      nextTask.worker_title = workerTitle;
+    }
+  }
   safeWriteTaskFile(taskPath(task.id), nextTask);
   if ((status === 'done' || status === 'blocked') && previousStatus !== status) {
     writeInboxEvent(nextTask, status);
@@ -2251,6 +2281,7 @@ module.exports = {
   listTasks,
   // 0 筆的具名理由是純函式，開出入口才驗得到「三種 0 分得開」。
   taskQueryZeroReason,
+  readWorkerTitle,
   installProcessGuards,
   startTelegramPolling,
   tgRequest,
