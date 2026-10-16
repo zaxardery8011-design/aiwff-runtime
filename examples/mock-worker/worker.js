@@ -207,7 +207,7 @@ main()
     if (taskId) {
       try {
         const task = readJsonFile(taskPath(taskId));
-        updateTaskStatus(task, 'failed', { error: error.message });
+        updateTaskStatus(task, 'failed', { error: error.message, error_origin: 'worker' });
       } catch (statusError) {
         // Nothing else can be written safely if the task file is missing or
         // invalid — say why instead of dropping the reason on the floor.

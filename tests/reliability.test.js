@@ -852,6 +852,7 @@ test('task retry: real worker gives up as failed after retries are exhausted', a
     assert.equal(task.status, 'failed');
     assert.equal(task.retry_count, 1);
     assert.match(task.error, /exited with code 1/);
+    assert.equal(task.error_origin, 'worker');
   } finally {
     await stopDaemon(runtime.daemon);
   }
@@ -2366,6 +2367,7 @@ test('openai_compatible provider: missing base_url/model fails clearly without c
     const task = await waitForTaskStatus(runtime.port, created.id, ['failed'], 10000);
     assert.equal(task.retry_count, 0);
     assert.match(task.error, /AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required/);
+    assert.equal(task.error_origin, 'runtime');
   } finally {
     await stopDaemon(runtime.daemon);
   }
@@ -2480,6 +2482,7 @@ for (const status of [400, 401, 404, 408, 429, 503]) {
       assert.equal(fake.requests.length, retryable ? 2 : 1);
       assert.equal(task.retry_count, retryable ? 1 : 0);
       assert.match(retryable ? task.last_error : task.error, new RegExp(`HTTP ${status}:`));
+      assert.equal(task.error_origin, retryable ? undefined : 'provider');
     } finally {
       await stopDaemon(runtime.daemon);
       fake.server.close();

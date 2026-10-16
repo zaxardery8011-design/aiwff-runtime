@@ -20,6 +20,7 @@ This document answers both for the blocks this runtime actually produces today. 
 | `artifact_path` | **two producers, selected by worker mode** — see below | No |
 | `retry_count`, `last_error` | the daemon, real-Claude path only (`agent/index.js:884`, `:893`) | No |
 | `error` | the daemon on `failed` (`agent/index.js:891-894`); the mock worker on its own failure path (`examples/mock-worker/worker.js:90`) | No |
+| `error_origin` | set alongside `error` on `failed`: `runtime` (worker could not be spawned, provider config missing), `worker` (non-zero exit / no artifact; the mock worker's own failure path), `provider` (OpenAI-compatible endpoint HTTP error, empty reply, unreachable) | No — absent on tasks that never failed and on records older than this field |
 | `blocked_reason` | the daemon only, on timeout (`agent/index.js:716`) | No |
 
 ### Why `id` is the stable one

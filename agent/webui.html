@@ -1389,9 +1389,16 @@
       } else if (task.status === 'blocked') {
         lines.push('卡住原因：' + (task.blocked_reason || '未提供'));
       } else if (task.status === 'failed') {
-        lines.push('失敗原因：' + (task.error || '未提供'));
+        lines.push('失敗原因' + errorOriginSuffix(task) + '：' + (task.error || '未提供'));
       }
       return lines.join('\n');
+    }
+
+    // 標出失敗出在哪一層，讓人先知道該查 runtime 設定、worker 本身，還是外部 provider；舊任務沒這欄就不標。
+    var ERROR_ORIGIN_TEXT = { runtime: 'runtime', worker: 'worker', provider: '外部 provider' };
+    function errorOriginSuffix(task) {
+      var label = task && ERROR_ORIGIN_TEXT[task.error_origin];
+      return label ? '（來源：' + label + '）' : '';
     }
 
     function rememberChatTask(task) {
@@ -1742,7 +1749,7 @@
         events.push({ phase: 'artifact', ts: lastTs, exact: false, text: '產出 artifact：' + task.artifact_path });
       }
       if (['done', 'blocked', 'failed'].indexOf(task.status) >= 0) {
-        var tail = task.blocked_reason || task.error || taskSummary(task) || '';
+        var tail = task.blocked_reason || (task.error ? errorOriginSuffix(task) + task.error : '') || taskSummary(task) || '';
         events.push({
           phase: 'settled',
           ts: updatedMs,
@@ -1772,6 +1779,7 @@
       if (event.phase === 'settled') {
         if (task.blocked_reason) snap.blocked_reason = task.blocked_reason;
         if (task.error) snap.error = task.error;
+        if (task.error_origin) snap.error_origin = task.error_origin;
       }
       return snap;
     }

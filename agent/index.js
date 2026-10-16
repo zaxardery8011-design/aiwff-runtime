@@ -1053,6 +1053,7 @@ function spawnMockWorker(task) {
     }
     task.status = 'failed';
     task.error = error.message;
+    task.error_origin = 'runtime';
     task.updated_at = nowIso();
     safeWriteTaskFile(taskPath(taskId), task);
   });
@@ -1076,6 +1077,7 @@ function spawnMockWorker(task) {
       const exitReason = code === null ? `signal ${signal || 'unknown'}` : `code ${code}`;
       const failedTask = updateTaskStatus(latestTask, 'failed', {
         error: `Mock worker exited with ${exitReason} before finishing (status was ${latestTask.status})`,
+        error_origin: 'worker',
       });
       notifyTelegramTaskDone(failedTask);
     }
@@ -1539,6 +1541,8 @@ function spawnClaudeWorker(task, attempt = 1) {
 
     const failedTask = updateTaskStatus(currentTask, 'failed', {
       error: failureReason,
+      // 來源層：spawn 失敗＝runtime 起不了 worker；其餘（非 0 退出、沒產出）＝worker 自己。
+      error_origin: spawnError ? 'runtime' : 'worker',
       retry_count: attempt - 1,
     });
     notifyTelegramTaskDone(failedTask);
@@ -1699,6 +1703,7 @@ function spawnAgyWorker(task, attempt = 1) {
 
     const failedTask = updateTaskStatus(currentTask, 'failed', {
       error: failureReason,
+      error_origin: spawnError ? 'runtime' : 'worker',
       retry_count: attempt - 1,
     });
     notifyTelegramTaskDone(failedTask);
@@ -1738,7 +1743,7 @@ function buildOpenAICompatibleMessages(task) {
 async function requestOpenAICompatibleCompletion(task, timeoutMs) {
   const config = openAICompatibleConfig();
   if (!config.baseUrl || !config.model) {
-    throw Object.assign(new Error('AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required when AIWFF_WORKER_PROVIDER=openai_compatible'), { retryable: false });
+    throw Object.assign(new Error('AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required when AIWFF_WORKER_PROVIDER=openai_compatible'), { retryable: false, origin: 'runtime' });
   }
   // 帶上 task_id，讓 gateway／代理能把同一個任務的多次往返（含 retry）分成一組計算。
   const headers = { 'content-type': 'application/json', 'x-aiwff-task-id': String(task.id) };
@@ -1802,6 +1807,8 @@ function runOpenAICompatibleWorker(task, attempt = 1) {
       }
       const failedTask = updateTaskStatus(currentTask, 'failed', {
         error: failureReason,
+        // 設定缺漏是 runtime 這端的事；HTTP 錯誤、空回覆、連不上端點都歸 provider（原因已原樣保留在 error）。
+        error_origin: (error && error.origin) || 'provider',
         retry_count: attempt - 1,
       });
       notifyTelegramTaskDone(failedTask);
