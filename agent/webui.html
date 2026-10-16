@@ -267,6 +267,17 @@
     .fail { color: var(--red); }
     .mono, code, pre { font-family: "Cascadia Code", "Cascadia Mono", "Consolas", monospace; }
     .task-title { font-weight: 700; overflow-wrap: anywhere; }
+    .task-question-card {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border: 1px solid var(--yellow);
+      border-left-width: 4px;
+      border-radius: 6px;
+      background: rgba(255,214,102,.06);
+    }
+    .task-question-card .q-head { font-size: 11px; color: var(--yellow); font-weight: 700; }
+    .task-question-card .q-text { margin-top: 4px; color: var(--fg-0); white-space: pre-wrap; overflow-wrap: anywhere; }
+    .task-question-card .q-meta { margin-top: 4px; font-size: 11px; color: var(--fg-2); }
     .status {
       display: inline-flex;
       min-height: 22px;
@@ -1542,10 +1553,31 @@
       renderHudLog();
     }
 
+    // worker 回報 `BLOCKED:` 時那行只躺在進度 log 裡；這裡把它抬成一張唯讀卡片
+    // （借鏡 ai-maestro「工具問的問題變成卡片」）。只讀已抓到的進度 tail，不改 worker 輸出、不提供回答。
+    function workerQuestion(task) {
+      var lines = state.progress[task.id] || [];
+      for (var i = 0; i < lines.length; i++) {
+        var text = String(lines[i] || '').trim();
+        if (text.indexOf('BLOCKED:') === 0) return text;
+      }
+      return '';
+    }
+
+    function questionCardHtml(task) {
+      var question = workerQuestion(task);
+      if (!question) return '';
+      return '<div class="task-question-card" role="note" aria-label="worker 提問（唯讀）">' +
+        '<div class="q-head">worker 需要決定 · 唯讀</div>' +
+        '<div class="q-text">' + escapeHtml(question) + '</div>' +
+        '<div class="q-meta mono">' + escapeHtml(task.id || '') + ' · ' + escapeHtml(fmtDate(task.updated_at || task.created_at)) + '</div>' +
+      '</div>';
+    }
+
     function taskRow(task) {
       return '<div class="task-row">' +
         '<div>' + statusLabel(task.status) + '</div>' +
-        '<div><div class="task-title">' + escapeHtml(task.title || task.id) + '</div><div class="muted mono">' + escapeHtml(task.id || '') + '</div><div class="soft">' + escapeHtml(taskSummary(task)) + '</div></div>' +
+        '<div><div class="task-title">' + escapeHtml(task.title || task.id) + '</div><div class="muted mono">' + escapeHtml(task.id || '') + '</div><div class="soft">' + escapeHtml(taskSummary(task)) + '</div>' + questionCardHtml(task) + '</div>' +
         '<div class="muted">' + escapeHtml(fmtDate(task.updated_at || task.created_at)) + '<div>' + taskElapsedHtml(task) + '</div></div>' +
       '</div>';
     }
