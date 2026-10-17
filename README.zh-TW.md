@@ -306,6 +306,7 @@ Use tools and execute the task until it is complete.
 | `MOCK_WORKER` | 否 | `1` | `agent/index.js` | 對外安全預設：使用 mock worker，不呼叫 Claude CLI |
 | `ENABLE_REAL_CLAUDE_WORKER` | 真 Claude worker 必填 | 空 | `agent/index.js` | 只有你真的要讓 Claude CLI 執行任務時才設成 `1` |
 | `CLAUDE_BYPASS_APPROVALS` | 危險模式選填 | 空 | `agent/index.js` | 只有你明確想讓 `claude --print` 加上 `--dangerously-skip-permissions` 時才設成 `1` |
+| `AIWFF_MODE` | 否 | `both` | `agent/index.js` | Telegram 訊息、`POST /api/chat`、WebUI 對話框怎麼分流。`both`：一般訊息直接聊天回答，`/task …` 開頭（或「幫我…」這類明確要做事、又不是問句的訊息）才建任務，`/chat …` 強制聊天。`chat`：只聊天、不建任務。`task`：每則訊息都建任務（舊行為）。留空或值不認得就用 `both`，`/api/doctor` 會顯示目前模式。聊天呼叫唯讀、無工具、單輪（`claude --print --tools ""`，逾時 30 秒），不寫 `data/tasks`；`MOCK_WORKER=1` 時回固定字串 |
 
 真 Claude 模式下，daemon 會把任務 prompt 從 stdin 送給 Claude，而不是塞進 argv。stdin 是標準輸入；這樣比較不容易踩到長 prompt 或引號轉義問題，同時保留 stdout 串流進度。stdout 是標準輸出，也就是 CLI 往外印進度的地方。
 
