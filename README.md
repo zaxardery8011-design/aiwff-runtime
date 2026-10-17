@@ -287,7 +287,7 @@ Prebuilt personas live in [templates/claude/](templates/claude/): dev partner, r
 
 ## Configuration
 
-Copy `.env.example` to `.env`. The current `.env.example` exposes these fields:
+Copy `.env.example` to `.env`. The current `.env.example` exposes these fields (except `AIWFF_MODE` and `AIWFF_CHAT_TIMEOUT_SEC`, which are not in `.env.example` yet; add them to `.env` yourself if you need them):
 
 | Variable | Required? | Default / empty value | Used by | Description |
 |---|---:|---|---|---|
@@ -298,7 +298,8 @@ Copy `.env.example` to `.env`. The current `.env.example` exposes these fields:
 | `MOCK_WORKER` | No | `1` | `agent/index.js` | Public-safe default: use the mock worker instead of Claude CLI |
 | `ENABLE_REAL_CLAUDE_WORKER` | Required for real Claude worker | empty | `agent/index.js` | Set to `1` only when you intentionally want Claude CLI execution |
 | `CLAUDE_BYPASS_APPROVALS` | Optional unsafe mode | empty | `agent/index.js` | Set to `1` only if you intentionally want `--dangerously-skip-permissions` on `claude --print` |
-| `AIWFF_MODE` | No | `both` | `agent/index.js` | How Telegram messages, `POST /api/chat` and the WebUI chat box are routed. `both`: plain messages get a direct chat answer, `/task …` (or a clear action request such as "幫我…" that is not a question) creates a task, `/chat …` forces chat. `chat`: never create tasks. `task`: every message creates a task (previous behavior). Empty or unknown values fall back to `both`; `/api/doctor` shows the active mode. Chat calls are read-only, tool-less and single-turn (`claude --print --tools ""`, 30 s timeout) and never write `data/tasks`; with `MOCK_WORKER=1` they return a fixed string |
+| `AIWFF_MODE` | No | `both` | `agent/index.js` | How Telegram messages, `POST /api/chat` and the WebUI chat box are routed. `both`: plain messages get a direct chat answer, `/task …` (or a clear action request such as "幫我…" that is not a question) creates a task, `/chat …` forces chat (`/task` and `/chat` are case-insensitive and accept an `@bot` suffix). `chat`: never create tasks. `task`: every message creates a task (previous behavior). Empty or unknown values fall back to `both`, except with `AIWFF_WORKER_PROVIDER=agy`, which has no chat path and falls back to `task`; `/api/doctor` shows the active mode. Chat calls are read-only, tool-less and single-turn (`claude --print --tools ""`, timeout set by `AIWFF_CHAT_TIMEOUT_SEC`) and never write `data/tasks`; with `MOCK_WORKER=1` they return a fixed string |
+| `AIWFF_CHAT_TIMEOUT_SEC` | No | `30` | `agent/index.js` | Maximum seconds to wait for one chat reply (1–300); on timeout the reply is a "chat reply failed" message and no task is created |
 
 In real Claude mode, the daemon sends the generated task prompt through stdin instead of placing it in argv. This avoids long prompt and quoting issues while preserving streamed stdout progress.
 

@@ -156,6 +156,7 @@ const ENV_KEYS = [
   'MOCK_WORKER',
   'ENABLE_REAL_CLAUDE_WORKER',
   'AIWFF_WORKER_PROVIDER',
+  'AGY_CMD',
   'CLAUDE_CMD',
   'CLAUDE_BYPASS_APPROVALS',
   'AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS',
@@ -209,6 +210,7 @@ test.beforeEach(() => {
   process.env.MOCK_WORKER = '1';
   process.env.ENABLE_REAL_CLAUDE_WORKER = '';
   process.env.AIWFF_WORKER_PROVIDER = '';
+  process.env.AGY_CMD = '';
   process.env.CLAUDE_CMD = '';
   process.env.CLAUDE_BYPASS_APPROVALS = '';
   process.env.AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS = '';
@@ -242,6 +244,30 @@ test('router: PoC 路由表（含兩條驗收的路由部分與負向對照）',
     ['running late today', 'both', 'chat'],
     ['/help', 'task', 'command'],
     ['  你好  ', 'CHAT', 'chat', '你好'],
+    // 審查 F1：沒有受詞的動作詞、複合詞、問句，預設模式下都要是聊天（寧可少判成任務）。
+    ['跑步好累', undefined, 'chat'],
+    ['跑車多少錢', undefined, 'chat'],
+    ['執行長是誰', undefined, 'chat'],
+    ['建立關係很重要', undefined, 'chat'],
+    ['整理房間好累喔', undefined, 'chat'],
+    ['make sense', undefined, 'chat'],
+    ['fix 是什麼意思', undefined, 'chat'],
+    ['Run time error 是什麼意思', undefined, 'chat'],
+    ['幫我解釋一下 closure 是什麼', undefined, 'chat'],
+    ['幫我看看這樣對嗎？謝謝', undefined, 'chat'],
+    ['請問現在幾點', undefined, 'chat'],
+    ['/taskforce go', 'both', 'chat'],
+    // 審查 F1 反方向：/task 不分大小寫、可省略空格、可帶 @bot；明講請託或動作詞＋受詞要判成任務。
+    ['/task寫一個 hello.txt', undefined, 'task', '寫一個 hello.txt'],
+    ['/TASK 寫一個 hello.txt', undefined, 'task', '寫一個 hello.txt'],
+    ['/task@MyBot 寫一個 hello.txt', undefined, 'task', '寫一個 hello.txt'],
+    ['/chat@MyBot 寫一個 hello.txt', undefined, 'chat', '寫一個 hello.txt'],
+    ['/tasks@MyBot', undefined, 'command', '/tasks'],
+    ['/Start', undefined, 'command', '/start'],
+    ['請寫一個 hello.txt', undefined, 'task'],
+    ['please write hello.txt', undefined, 'task'],
+    ['寫一個 hello.txt', undefined, 'task'],
+    ['請整理今天的筆記', undefined, 'task'],
   ];
   for (const [text, mode, kind, instruction] of cases) {
     const result = route(text, mode);
@@ -360,7 +386,16 @@ test('Claude 聊天參數：無工具、單輪、不吃 bypass，cwd 不在 repo
   assert.match(captured.input, /## 訊息\n你好/);
   assert.match(captured.input, /沒有工具/);
   assert.deepEqual(taskFileNames(), before);
-  assert.deepEqual(agent.buildClaudeChatArgs(), captured.argv);
+  // 審查 F6：拿寫死的預期陣列比，不拿函式自己的輸出比；少了 dontAsk 或 --no-session-persistence 要失敗。
+  assert.deepEqual(captured.argv, [
+    '--print',
+    '--tools',
+    '',
+    '--permission-mode',
+    'dontAsk',
+    '--strict-mcp-config',
+    '--no-session-persistence',
+  ]);
 });
 
 test('Claude 聊天失敗：回 502 與具名原因，不建任務（假 CLI exit 3）', async () => {
@@ -384,6 +419,73 @@ test('Claude 聊天逾時：到時間就回 chat_timeout，不會一直掛著（
   assert.equal(res.status, 502, res.raw);
   assert.equal(res.json.code, 'chat_timeout');
   assert.ok(elapsedMs < 8000, `took ${elapsedMs}ms`);
+});
+
+test('審查 F2：agy provider 沒設 AIWFF_MODE 時退回 task（一般訊息建任務、不回錯誤）；明講 both 時 doctor 標 ok:false', async () => {
+  process.env.MOCK_WORKER = '';
+  process.env.AIWFF_WORKER_PROVIDER = 'agy';
+  // 不叫真 agy：指向不存在的執行檔，spawn 回 ENOENT，任務跑到 failed 就好。
+  process.env.AGY_CMD = path.join(BIN_DIR, 'no-such-agy.exe');
+  assert.equal(agent.runtimeChatMode(), 'task');
+  const before = taskFileNames().length;
+  const res = await request(port, 'POST', '/api/chat', { headers: AUTH, payload: { text: '你好' } });
+  assert.equal(res.status, 201, res.raw);
+  assert.equal(res.json.kind, 'task');
+  assert.equal(res.json.mode, 'task');
+  assert.equal(taskFileNames().length, before + 1);
+  await waitForTaskStatus(res.json.task.id, ['done', 'failed', 'blocked']);
+  const doctor = await request(port, 'GET', '/api/doctor');
+  const check = doctor.json.checks.find((item) => item.id === 'chat_mode');
+  assert.equal(check.ok, true, JSON.stringify(check));
+  assert.match(check.detail, /^task（AIWFF_MODE 未設；這個 worker provider 沒有聊天路徑，退回 task）/);
+
+  process.env.AIWFF_MODE = 'both';
+  const doctorBoth = await request(port, 'GET', '/api/doctor');
+  const checkBoth = doctorBoth.json.checks.find((item) => item.id === 'chat_mode');
+  assert.equal(checkBoth.ok, false, JSON.stringify(checkBoth));
+  assert.match(checkBoth.detail, /不支援聊天/);
+  assert.equal(doctorBoth.json.ok, false);
+});
+
+test('審查 F3：8000 字上限只管聊天；/task 長指令照樣建任務', async () => {
+  const before = taskFileNames().length;
+  const longTask = await request(port, 'POST', '/api/chat', {
+    headers: AUTH,
+    payload: { text: `/task ${'整理'.repeat(4500)}` },
+  });
+  assert.equal(longTask.status, 201, longTask.raw.slice(0, 300));
+  assert.equal(longTask.json.kind, 'task');
+  assert.equal(taskFileNames().length, before + 1);
+  await waitForTaskStatus(longTask.json.task.id, ['done', 'failed', 'blocked']);
+  const longChat = await request(port, 'POST', '/api/chat', { headers: AUTH, payload: { text: '你好'.repeat(4001) } });
+  assert.equal(longChat.status, 413, longChat.raw);
+  assert.equal(taskFileNames().length, before + 1);
+});
+
+test('審查 F5：TG 聊天回覆不擋輪詢迴圈，後面的 /tasks 先回（假 CLI 不回）', async () => {
+  process.env.TG_BOT_TOKEN = 'fake-test-token';
+  process.env.ADMIN_TG_CHAT_ID = ADMIN_CHAT_ID;
+  process.env.MOCK_WORKER = '';
+  process.env.ENABLE_REAL_CLAUDE_WORKER = '1';
+  process.env.CLAUDE_CMD = writeFakeClaude('hanging-tg-chat-claude', HANGING_CLAUDE);
+  fakeTg.sent.length = 0;
+  fakeTg.queue.push('你好', '/tasks');
+  const stop = agent.startTelegramPolling();
+  try {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline && !fakeTg.sent.some((m) => /聊天回覆失敗/.test(m.text))) {
+      await sleep(50);
+    }
+    const texts = fakeTg.sent.map((m) => m.text);
+    const chatAt = texts.findIndex((t) => /聊天回覆失敗/.test(t));
+    const tasksAt = texts.findIndex((t) => !/聊天回覆失敗/.test(t));
+    assert.ok(chatAt >= 0, `chat timeout reply missing: ${JSON.stringify(texts)}`);
+    assert.ok(tasksAt >= 0 && tasksAt < chatAt, `/tasks 要比聊天逾時先回：${JSON.stringify(texts)}`);
+  } finally {
+    stop();
+    process.env.TG_BOT_TOKEN = '';
+    process.env.ADMIN_TG_CHAT_ID = '';
+  }
 });
 
 test('TG：both 模式「你好」直接回答不建任務；/task 建任務並收到完成通知；task 模式「你好」建任務', async () => {

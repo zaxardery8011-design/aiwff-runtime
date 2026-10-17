@@ -61,6 +61,9 @@ const TG_REQUEST_TIMEOUT_MS = envInt('TG_REQUEST_TIMEOUT_MS', 20000, { min: 1000
 const TG_POLL_BASE_MS = envInt('TG_POLL_BASE_MS', 2000, { min: 200, max: 60000 });
 const TG_POLL_MAX_BACKOFF_MS = envInt('TG_POLL_MAX_BACKOFF_MS', 60000, { min: TG_POLL_BASE_MS, max: 600000 });
 const TG_MAX_MESSAGE_CHARS = 4000;
+// TG 聊天回覆不擋輪詢迴圈；同時在跑的聊天模型呼叫最多幾則，超過就請用戶稍後再傳。
+const TG_MAX_CONCURRENT_CHATS = 2;
+let tgChatsInFlight = 0;
 
 // 聊天模式（AIWFF_MODE）：聊天呼叫唯讀、無工具、單輪，逾時預設 30 秒。
 const CHAT_TIMEOUT_MS = envInt('AIWFF_CHAT_TIMEOUT_SEC', 30, { min: 1, max: 300 }) * 1000;
@@ -999,7 +1002,7 @@ function getDoctorReport() {
     checkPathReadable('inbox_dir', INBOX_DIR),
     checkPathReadable('memory_dir', MEMORY_DIR),
     { id: 'worker_mode', ok: true, detail: runtimeWorkerMode() },
-    { id: 'chat_mode', ok: true, detail: chatModeDetail() },
+    { id: 'chat_mode', ...chatModeCheck() },
     { id: 'port', ok: true, detail: String(PORT) },
   ];
   return {
@@ -1890,21 +1893,45 @@ async function createTask(req, res) {
 
 // ── 聊天模式 ──────────────────────────────────────────────
 // AIWFF_MODE：both（預設）＝一般訊息直接回答、明確要做事或 /task 才建任務；
-// chat＝只聊天；task＝每則訊息都建任務（舊行為）。未設或值不認得一律當 both。
+// chat＝只聊天；task＝每則訊息都建任務（舊行為）。未設或值不認得一律當 both，
+// 但 worker provider 沒有聊天路徑（agy）時退回 task。
+
+// AIWFF_MODE 有沒有明講 both / chat / task（未設或不認得＝沒明講）。
+function chatModeExplicit() {
+  const raw = String(process.env.AIWFF_MODE || '').trim().toLowerCase();
+  return raw === 'both' || raw === 'chat' || raw === 'task';
+}
+
+// provider 沒有聊天路徑又沒明講模式時退回 task：跟升級前一樣每則訊息建任務，一般訊息不會變成錯誤。
 function runtimeChatMode() {
+  if (!chatModeExplicit() && chatBackend() === 'unsupported') {
+    return 'task';
+  }
   return normalizeChatMode(process.env.AIWFF_MODE);
 }
 
-function chatModeDetail() {
+// doctor 的 chat_mode：provider 不支援聊天、又明講要聊天時標 ok:false。
+function chatModeCheck() {
   const mode = runtimeChatMode();
   const raw = String(process.env.AIWFF_MODE || '').trim();
+  const unsupported = chatBackend() === 'unsupported';
+  if (unsupported && !chatModeExplicit()) {
+    const why = raw ? `AIWFF_MODE=${raw.slice(0, 40)} 不認得` : 'AIWFF_MODE 未設';
+    return { ok: true, detail: `${mode}（${why}；這個 worker provider 沒有聊天路徑，退回 task）` };
+  }
+  if (unsupported && mode !== 'task') {
+    return {
+      ok: false,
+      detail: `${mode}（這個 worker provider 不支援聊天，一般訊息會回錯誤；改設 AIWFF_MODE=task 或換 provider）`,
+    };
+  }
   if (!raw) {
-    return `${mode}（AIWFF_MODE 未設，用預設）`;
+    return { ok: true, detail: `${mode}（AIWFF_MODE 未設，用預設）` };
   }
   if (raw.toLowerCase() !== mode) {
-    return `${mode}（AIWFF_MODE=${raw.slice(0, 40)} 不認得，用預設）`;
+    return { ok: true, detail: `${mode}（AIWFF_MODE=${raw.slice(0, 40)} 不認得，用預設）` };
   }
-  return mode;
+  return { ok: true, detail: mode };
 }
 
 // 聊天用哪一條模型路徑：順序跟 startTaskWorker 一致。agy 在 v0 沒有聊天路徑，具名回報。
@@ -2109,7 +2136,8 @@ async function handleChatRequest(req, res) {
     sendJson(res, 400, { ok: false, error: 'text is required' });
     return;
   }
-  if (text.length > MAX_CHAT_INPUT_CHARS) {
+  // 8000 字上限只管會送進聊天模型的訊息；判成任務的沿用 POST /api/tasks 的上限（readBody 1MB）。
+  if (text.length > MAX_CHAT_INPUT_CHARS && routeConversationMessage(text, runtimeChatMode()).kind === 'chat') {
     sendJson(res, 413, { ok: false, error: `text is longer than ${MAX_CHAT_INPUT_CHARS} characters` });
     return;
   }
@@ -2189,24 +2217,44 @@ async function pollTelegram() {
     }
 
     // 路由依 AIWFF_MODE：指令照舊、/task 或明確要做事才建任務、其他直接聊天回答。
-    let result;
-    try {
-      result = await handleConversationMessage(msg.text);
-    } catch (error) {
-      logStderr('telegram-chat', error);
-      await tgRequest(token, 'sendMessage', {
-        chat_id: msg.chat.id,
-        text: `⚠️ 聊天回覆失敗：${String(error.message).slice(0, 500)}\n要我動手做事，請用 /task 開頭。`,
-      });
+    // 會叫模型的聊天回覆不 await：輪詢迴圈不被聊天卡住，後面的 /tasks、/task 馬上處理；同時最多 TG_MAX_CONCURRENT_CHATS 則。
+    const routed = routeConversationMessage(String(msg.text).trim(), runtimeChatMode());
+    const callsModel = routed.kind === 'chat' && !routed.notice && Boolean(routed.instruction);
+    if (!callsModel) {
+      await replyTelegramConversation(token, msg.chat.id, msg.text);
       continue;
     }
-    if (result.kind === 'task') {
-      tgPendingNotify[result.task.id] = msg.chat.id;
+    if (tgChatsInFlight >= TG_MAX_CONCURRENT_CHATS) {
+      await tgRequest(token, 'sendMessage', { chat_id: msg.chat.id, text: '前面的訊息還在回答中，請稍後再傳。' });
+      continue;
     }
-    const replyText =
-      result.reply.length > TG_MAX_MESSAGE_CHARS ? `${result.reply.slice(0, TG_MAX_MESSAGE_CHARS)}\n…（已截斷）` : result.reply;
-    await tgRequest(token, 'sendMessage', { chat_id: msg.chat.id, text: replyText });
+    tgChatsInFlight += 1;
+    replyTelegramConversation(token, msg.chat.id, msg.text)
+      .catch((error) => logStderr('telegram-chat-send', error))
+      .finally(() => {
+        tgChatsInFlight -= 1;
+      });
   }
+}
+
+async function replyTelegramConversation(token, chatId, text) {
+  let result;
+  try {
+    result = await handleConversationMessage(text);
+  } catch (error) {
+    logStderr('telegram-chat', error);
+    await tgRequest(token, 'sendMessage', {
+      chat_id: chatId,
+      text: `⚠️ 聊天回覆失敗：${String(error.message).slice(0, 500)}\n要我動手做事，請用 /task 開頭。`,
+    });
+    return;
+  }
+  if (result.kind === 'task') {
+    tgPendingNotify[result.task.id] = chatId;
+  }
+  const replyText =
+    result.reply.length > TG_MAX_MESSAGE_CHARS ? `${result.reply.slice(0, TG_MAX_MESSAGE_CHARS)}\n…（已截斷）` : result.reply;
+  await tgRequest(token, 'sendMessage', { chat_id: chatId, text: replyText });
 }
 
 // Telegram 斷線重連迴圈：以 setTimeout 自排程（不重疊請求），
