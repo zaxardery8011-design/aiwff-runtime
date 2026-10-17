@@ -1037,11 +1037,14 @@ function spawnMockWorker(task) {
     detached: true,
     stdio: 'ignore',
   });
+  trackWorker(taskId, child);
   // stdio 是 ignore，沒有輸出可以再細分；只能誠實說「已 detach、之後看不見」。
   phaseTracker.enter('detached_no_stdio');
   const timer = setTimeout(() => {
     timedOut = true;
     markTaskBlockedByTimeout(taskId, task, phaseTracker);
+    // mock worker 是直接 spawn 的 node、自己不再開子行程，child.kill() 就是整棵樹；
+    // 不走 taskkill 是為了讓它當場結束，續跑時不必等外部指令收尾。
     child.kill();
   }, timeoutMs);
 
@@ -1293,14 +1296,13 @@ function markTaskBlockedByTimeout(taskId, fallbackTask, phaseTracker) {
   const idleDetail = kind === 'unknown' ? '' : `, idle ${idleSec}s`;
   const timeline = formatPhaseSpans(phaseSpans);
   const timelineDetail = timeline ? `, timeline ${timeline}` : '';
-  appendProgressText(
-    taskId,
-    `Worker timed out after ${timeoutSec} seconds (kind=${kind}, phase=${phase}${stuckDetail}${idleDetail}${timelineDetail})`,
-  );
+  const timeoutText = `Worker timed out after ${timeoutSec} seconds (kind=${kind}, phase=${phase}${stuckDetail}${idleDetail}${timelineDetail})`;
+  appendProgressText(taskId, timeoutText);
   // blocked_reason 維持 'timeout'（收件匣摘要與既有契約照舊），phase / kind 走新欄位另外具名。
   // stuck 秒數量不到時整個欄位不寫：task.schema.json 的 integer 欄位不收 null，
   // 硬塞會讓落檔驗不過、連 blocked 收據都寫不進去。idle 秒同理。
-  const patch = { blocked_reason: 'timeout', timeout_phase: phase, timeout_kind: kind };
+  // last_error 換成這一次逾時的說明：不寫的話，續跑過的任務帳上還會掛著上一棒的原因。
+  const patch = { blocked_reason: 'timeout', timeout_phase: phase, timeout_kind: kind, last_error: timeoutText };
   if (stuckSec != null) {
     patch.timeout_phase_stuck_sec = stuckSec;
   }
@@ -1412,31 +1414,73 @@ function checkpointPath(taskId) {
   return path.join(taskWorkspacePath(taskId), CHECKPOINT_FILENAME);
 }
 
-// 回傳已完成的步驟（去重、保留先後）；檔不在或讀不動就回空陣列，等於從頭做。
-function readCheckpointSteps(taskId) {
+// 讀 checkpoint：回傳 { steps, rejected, partial }。
+// - steps：已完成的步驟（去重、保留先後）；檔不在就是空陣列，等於從頭做。
+// - 只採用「以換行結尾」的行：最後一行沒換行，代表上一棒寫到一半被砍，那一步不算做完（partial 記下它）。
+// - 檔裡有 NUL 或 UTF-16 BOM（PS5.1 的 >>、Out-File 預設就會寫成這樣）時整份不採用，rejected 寫具名原因；
+//   硬讀會讀出夾 \u0000 的亂碼，被當成「已完成步驟」交給下一棒。UTF-8 BOM 照常去掉。
+function readCheckpoint(taskId) {
+  const empty = { steps: [], rejected: null, partial: null };
   if (!isSafeTaskId(taskId)) {
-    return [];
+    return empty;
   }
-  let raw;
+  let buffer;
   try {
-    raw = fs.readFileSync(checkpointPath(taskId), 'utf8');
+    buffer = fs.readFileSync(checkpointPath(taskId));
   } catch (_) {
-    return [];
+    return empty;
   }
+  if (buffer.length >= 2 && ((buffer[0] === 0xff && buffer[1] === 0xfe) || (buffer[0] === 0xfe && buffer[1] === 0xff))) {
+    return { ...empty, rejected: 'utf16_encoding' };
+  }
+  if (buffer.includes(0)) {
+    return { ...empty, rejected: 'nul_bytes' };
+  }
+  const lines = buffer.toString('utf8').replace(/^﻿/, '').split(/\r?\n/);
+  const tail = lines.pop().trim();
   const steps = [];
-  for (const rawLine of raw.split(/\r?\n/)) {
+  for (const rawLine of lines) {
     const line = rawLine.trim();
     if (line && !line.startsWith('#') && !steps.includes(line)) {
       steps.push(line);
     }
   }
-  return steps;
+  return { steps, rejected: null, partial: tail || null };
+}
+
+function readCheckpointSteps(taskId) {
+  return readCheckpoint(taskId).steps;
+}
+
+// 續跑時把上一棒留下的產出改名放旁邊：done 的判定只看結果檔在不在，
+// 舊的半成品留在原位的話，下一棒什麼都沒做、exit 0 也會被當成完成。
+const PREVIOUS_ARTIFACT_SUFFIXES = [
+  ['.result.md', '.result.prev.md'],
+  ['.result.json', '.result.prev.json'],
+];
+
+function previousArtifactPath(taskId, prevSuffix = '.result.prev.md') {
+  return path.join(ARTIFACTS_DIR, `${taskId}${prevSuffix}`);
+}
+
+function setAsidePreviousArtifacts(taskId) {
+  const moved = [];
+  for (const [suffix, prevSuffix] of PREVIOUS_ARTIFACT_SUFFIXES) {
+    const current = path.join(ARTIFACTS_DIR, `${taskId}${suffix}`);
+    if (!fs.existsSync(current)) {
+      continue;
+    }
+    const previous = previousArtifactPath(taskId, prevSuffix);
+    fs.renameSync(current, previous);
+    moved.push(previous);
+  }
+  return moved;
 }
 
 function buildCheckpointPromptSection(task) {
   const lines = [
     '## 斷點續傳',
-    `每做完一個步驟，就在 ${checkpointPath(task.id)} 追加一行，寫那個步驟的名稱（一行一步，不要改舊的行）。`,
+    `每做完一個步驟，就在 ${checkpointPath(task.id)} 追加一行，寫那個步驟的名稱（一行一步，每行結尾要換行，不要改舊的行）。`,
   ];
   const steps = readCheckpointSteps(task.id);
   if (steps.length) {
@@ -1445,6 +1489,10 @@ function buildCheckpointPromptSection(task) {
       lines.push(`- ${step}`);
     }
   }
+  const previous = previousArtifactPath(task.id);
+  if (fs.existsSync(previous)) {
+    lines.push(`上一棒留下的結果檔（可能沒寫完）已改名為 ${previous}，可以參考；這一棒要把完整結果重新寫到下面的結果路徑。`);
+  }
   return lines.join('\n');
 }
 
@@ -1452,62 +1500,124 @@ function buildCheckpointPromptSection(task) {
 // 這幾種重跑同一棒也不會好（網路除外），而且要人去修的是機器，不是任務本身；
 // 跟任務自己做錯混在 failed 裡，看帳的人會去改任務內容，白忙一場。
 // 只看 worker 非 0 退出（或根本起不來）時的輸出；exit 0 沒產出那條不判，那是任務層的事。
+//
+// 規則一律錨在「行首」的錯誤形狀（CLI／系統自己印的錯誤開頭），不做整段字串的任意比對：
+// worker 的輸出裡常有任務本身的內容（agy 的 stdout 就是模型的回答），
+// 「the deploy script fails with 'permission denied'」這種句子不能被當成機器的權限問題。
+// 判定時逐行看，第一個「像錯誤的行」說了算：先出現的是一般程式錯誤（TypeError、RangeError…），
+// 就不是環境問題，照一般失敗流程走；見 classifyEnvFailure。
 const ENV_FAILURE_RULES = [
   {
     cause: 'missing_tool',
     retryable: false,
     hint: '找不到 worker 程式：確認 CLI 已安裝、在 PATH 上，或把 CLAUDE_CMD／AGY_CMD 設成完整路徑',
-    pattern: /is not recognized as an internal or external command|不是內部或外部命令|: command not found|not found in PATH/i,
+    pattern: /^'[^']+' is not recognized as an internal or external command|^'[^']+' 不是內部或外部命令|: command not found$|^The system cannot find the path specified\.?$|not found in PATH\.?$/i,
   },
   {
     cause: 'auth',
     retryable: false,
     hint: '登入過期或金鑰無效：重新登入 worker CLI（例如在終端機跑 claude 再 /login）或更新金鑰，再續跑這個任務',
-    pattern: /Failed to authenticate|authentication_error|invalid[ _-]?(x-)?api[ _-]?key|OAuth token (has )?expired|token has expired|not logged in|please run \/login|please log ?in/i,
+    pattern: /^(?:Error: )?Failed to authenticate\b|^API Error: 401\b|^API Error: .*authentication_error|^(?:Error: )?Invalid[ _-]?(?:x-)?api[ _-]?key\b|^(?:Error: )?(?:OAuth token (?:has )?expired|token has expired)|^(?:Error: )?not logged in\b/i,
   },
   {
     cause: 'permission',
     retryable: false,
     hint: '權限不足：worker 讀寫檔案或執行時被系統擋下，檢查資料夾權限或防毒／安全軟體設定',
-    pattern: /\bEACCES\b|\bEPERM\b|permission denied|access is denied|operation not permitted|存取被拒/i,
+    pattern: /^(?:Error: )?(?:EACCES|EPERM)\b|^(?:Error: )?(?:spawn \S+ )?(?:EACCES|EPERM)$|^Access is denied\.?$|: permission denied$|^存取被拒/i,
   },
   {
     cause: 'network',
     retryable: true,
     hint: '網路不通：worker 連不到服務端，檢查網路、代理或防火牆設定',
-    pattern: /\bECONNREFUSED\b|\bECONNRESET\b|\bETIMEDOUT\b|\bENOTFOUND\b|\bEAI_AGAIN\b|getaddrinfo|socket hang up|Connection error|fetch failed|network is unreachable|Could not resolve host/i,
+    pattern: /^(?:\w*Error: )?(?:connect |read |write |getaddrinfo )?(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)\b|^API Error: Connection error\b|^(?:TypeError: )?fetch failed$|^(?:Error: )?socket hang up$|^(?:Error: )?network is unreachable\b|^curl: \(\d+\) Could not resolve host\b/i,
   },
 ];
+
+// 「像錯誤的行」：Node／JS 的錯誤標頭（TypeError: …、Error: …、xxxException）與常見 CLI 的 fatal／error 開頭。
+// 第一個出現的錯誤行若不是環境規則認得的，整次失敗就不算環境問題。
+const ERROR_HEADER_PATTERN = /^(?:[A-Z][A-Za-z]*)?(?:Error|Exception)\b|^API Error:|^(?:fatal|panic|error)\b[:\s]/;
+// stdout 只看最後這幾行：CLI 自己的錯誤訊息在最後，前面多半是任務內容。
+const ENV_STDOUT_TAIL_LINES = 20;
 
 function escapeRegExp(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function envFailureOf(cause) {
+  const rule = ENV_FAILURE_RULES.find((entry) => entry.cause === cause);
+  return { cause: rule.cause, retryable: rule.retryable, hint: rule.hint };
+}
+
 // 回傳 { cause, retryable, hint } 或 null（null＝不是環境問題，照原本的失敗流程走）。
+// output 可以是字串（整段當 stderr 看），或 { stderr, stdout }：stderr 整段看、stdout 只看最後幾行，
+// 而且 stderr 的行排在前面——worker 自己的崩潰訊息優先於它印出來的任務內容。
 function classifyEnvFailure(output, { spawnError = null, command = '' } = {}) {
-  const byCause = (cause) => {
-    const rule = ENV_FAILURE_RULES.find((entry) => entry.cause === cause);
-    return { cause: rule.cause, retryable: rule.retryable, hint: rule.hint };
-  };
   const errorCode = spawnError && spawnError.code;
   if (errorCode === 'ENOENT') {
-    return byCause('missing_tool');
+    return envFailureOf('missing_tool');
   }
   if (errorCode === 'EACCES' || errorCode === 'EPERM') {
-    return byCause('permission');
+    return envFailureOf('permission');
   }
-  const text = `${spawnError ? spawnError.message : ''}\n${output || ''}`;
+  const streams = output && typeof output === 'object' ? output : { stderr: output, stdout: '' };
+  const stdoutTail = String(streams.stdout || '').split(/\r?\n/).filter((line) => line.trim()).slice(-ENV_STDOUT_TAIL_LINES);
+  const lines = [
+    ...(spawnError ? String(spawnError.message).split(/\r?\n/) : []),
+    ...String(streams.stderr || '').split(/\r?\n/),
+    ...stdoutTail,
+  ]
+    .map((line) => line.trim())
+    .filter(Boolean);
   // Windows 的 cmd 找不到指令時，訊息跟著系統語系走（中文版在管道裡還會是亂碼），
   // 但開頭一定是用單引號包起來的指令名稱，這個形狀不受語系影響。
-  if (command && new RegExp(`^'${escapeRegExp(String(command).replace(/^"|"$/g, ''))}' `, 'm').test(text)) {
-    return byCause('missing_tool');
-  }
-  for (const rule of ENV_FAILURE_RULES) {
-    if (rule.pattern.test(text)) {
-      return byCause(rule.cause);
+  const commandShape = command ? new RegExp(`^'${escapeRegExp(String(command).replace(/^"|"$/g, ''))}' `) : null;
+  for (const line of lines) {
+    if (commandShape && commandShape.test(line)) {
+      return envFailureOf('missing_tool');
+    }
+    const rule = ENV_FAILURE_RULES.find((entry) => entry.pattern.test(line));
+    if (rule) {
+      return envFailureOf(rule.cause);
+    }
+    if (ERROR_HEADER_PATTERN.test(line)) {
+      return null;
     }
   }
   return null;
+}
+
+// spawn 前先確認 worker 指令找得到。CLAUDE_CMD 設成打錯的完整路徑時，Windows 的 cmd.exe
+// 回的是跟著語系走的錯誤字（中文版在管道裡是亂碼、含空白的路徑還會被切斷），靠錯誤字判不出來；
+// 所以含路徑分隔符的就直接看檔案在不在，裸指令名就照 cmd／shell 的規則在 PATH（Windows 再加 PATHEXT 與 cwd）上找。
+// 只回答「找不找得到」；找得到但跑不起來的，照舊交給 spawn 的錯誤與 classifyEnvFailure。
+function workerCommandExists(command, cwd = ROOT_DIR) {
+  const name = String(command || '').trim().replace(/^"(.*)"$/, '$1');
+  if (!name) {
+    return false;
+  }
+  const isWindows = process.platform === 'win32';
+  const extensions = isWindows
+    ? ['', ...String(process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)]
+    : [''];
+  const isFile = (candidate) => {
+    try {
+      return fs.statSync(candidate).isFile();
+    } catch (_) {
+      return false;
+    }
+  };
+  const existsWithExtensions = (base) => extensions.some((ext) => isFile(`${base}${ext}`));
+  if (/[\\/]/.test(name) || path.isAbsolute(name)) {
+    return existsWithExtensions(path.resolve(cwd, name));
+  }
+  const dirs = String(process.env.PATH || '')
+    .split(path.delimiter)
+    .map((dir) => dir.trim().replace(/^"(.*)"$/, '$1'))
+    .filter(Boolean);
+  if (isWindows) {
+    dirs.unshift(cwd);
+  }
+  return dirs.some((dir) => existsWithExtensions(path.join(dir, name)));
 }
 
 // 環境問題的收尾：能重試的（網路）先交回一般 retry；其餘直接停成 blocked，
@@ -1584,9 +1694,14 @@ function spawnClaudeWorker(task, attempt = 1) {
     logStderr(warning, `task=${task.id}`);
     appendProgressText(task.id, warning);
   }
+  if (!workerCommandExists(claudeCmd, workerCwd)) {
+    settleEnvFailure(runningTask, `worker command not found: ${claudeCmd}`, envFailureOf('missing_tool'), attempt);
+    return;
+  }
   const phaseTracker = createWorkerPhaseTracker('spawn');
   appendProgressText(task.id, `Claude spawn args=${JSON.stringify(args)} cwd=${workerCwd}`);
   const child = spawnClaudeProcess(claudeCmd, args, { cwd: workerCwd });
+  trackWorker(task.id, child);
   let spawnError = null;
   let stderr = '';
   let stdout = '';
@@ -1597,7 +1712,8 @@ function spawnClaudeWorker(task, attempt = 1) {
     if (blockedTask) {
       notifyTelegramTaskDone(blockedTask);
     }
-    child.kill();
+    // Windows 上 child 是包在外面的 cmd.exe，只殺它的話真正的 worker 會留下來繼續寫同一個 workspace。
+    killProcessTree(child);
   }, timeoutMs);
 
   pipeStdoutProgress(task.id, child.stdout);
@@ -1658,7 +1774,7 @@ function spawnClaudeWorker(task, attempt = 1) {
     // 環境問題（登入、找不到程式、權限、網路）先分出來：不算任務失敗，停成 blocked 讓人去修機器。
     const envFailure =
       spawnError || code !== 0
-        ? classifyEnvFailure(`${stderr.slice(-4000)}\n${stdout.slice(-4000)}`, { spawnError, command: claudeCmd })
+        ? classifyEnvFailure({ stderr: stderr.slice(-4000), stdout: stdout.slice(-4000) }, { spawnError, command: claudeCmd })
         : null;
     if (settleEnvFailure(currentTask, failureReason, envFailure, attempt)) {
       return;
@@ -1725,6 +1841,69 @@ function writeAgyPromptFile(task, workerCwd) {
   return promptFilePath;
 }
 
+// 每個任務目前還活著的 worker 行程。逾時只是把帳標成 blocked，行程本身要等 close（stdio 全關）才算真的結束；
+// 續跑前看這張表和 workspace 裡的 WORKER.pid，上一棒還沒結束就不放下一棒，
+// 免得兩棒在同一個 workspace 並行、把已記進 CHECKPOINT 的步驟再做一次。
+// WORKER.pid 是給「runtime 重啟過、記憶體裡的表已經沒了」那種情況用的：舊 runtime 的 worker 可能還活著。
+const liveWorkers = new Map();
+const WORKER_PID_FILENAME = 'WORKER.pid';
+
+function workerPidPath(taskId) {
+  return path.join(taskWorkspacePath(taskId), WORKER_PID_FILENAME);
+}
+
+function trackWorker(taskId, child) {
+  if (!child || !child.pid) {
+    return;
+  }
+  liveWorkers.set(taskId, child);
+  try {
+    fs.mkdirSync(taskWorkspacePath(taskId), { recursive: true });
+    fs.writeFileSync(workerPidPath(taskId), `${child.pid}\n`);
+  } catch (error) {
+    logStderr(`worker pid file write failed (${taskId})`, error);
+  }
+  child.once('close', () => {
+    if (liveWorkers.get(taskId) !== child) {
+      return;
+    }
+    liveWorkers.delete(taskId);
+    try {
+      fs.rmSync(workerPidPath(taskId), { force: true });
+    } catch (error) {
+      logStderr(`worker pid file remove failed (${taskId})`, error);
+    }
+  });
+}
+
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+// 回傳上一棒還活著的 pid；沒有就回 null。
+function liveWorkerPid(taskId) {
+  const child = liveWorkers.get(taskId);
+  if (child) {
+    return child.pid;
+  }
+  let raw;
+  try {
+    raw = fs.readFileSync(workerPidPath(taskId), 'utf8');
+  } catch (_) {
+    return null;
+  }
+  const pid = Number.parseInt(raw, 10);
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+    return null;
+  }
+  return isPidAlive(pid) ? pid : null;
+}
+
 // child.kill() 在 Windows 只殺最上層行程，agy 生出的子行程會變孤兒；逾時要殺整棵樹。
 function killProcessTree(child) {
   if (!child || !child.pid) {
@@ -1752,6 +1931,11 @@ function spawnAgyWorker(task, attempt = 1) {
     appendProgressText(task.id, warning);
   }
 
+  if (!workerCommandExists(agyCmd, workerCwd)) {
+    settleEnvFailure(runningTask, `worker command not found: ${agyCmd}`, envFailureOf('missing_tool'), attempt);
+    return;
+  }
+
   const phaseTracker = createWorkerPhaseTracker('spawn');
   appendProgressText(task.id, `AGY spawn args=${JSON.stringify(args)} cwd=${workerCwd}`);
 
@@ -1760,6 +1944,7 @@ function spawnAgyWorker(task, attempt = 1) {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
+  trackWorker(task.id, child);
 
   let spawnError = null;
   let stderr = '';
@@ -1827,7 +2012,7 @@ function spawnAgyWorker(task, attempt = 1) {
 
     const envFailure =
       spawnError || code !== 0
-        ? classifyEnvFailure(`${stderr.slice(-4000)}\n${stdout.slice(-4000)}`, { spawnError, command: agyCmd })
+        ? classifyEnvFailure({ stderr: stderr.slice(-4000), stdout: stdout.slice(-4000) }, { spawnError, command: agyCmd })
         : null;
     if (settleEnvFailure(currentTask, failureReason, envFailure, attempt)) {
       return;
@@ -2039,13 +2224,27 @@ const RUN_RECEIPT_FIELDS = [
   'retry_count',
   'env_cause',
   'env_hint',
+  'error_origin',
 ];
+// last_error 只留最近一次的原因（第幾次續跑看 resume_count），而且限長，不會一棒一棒越包越長。
+const MAX_RESUME_REASON_CHARS = 500;
+
+function resumeRefusal(statusCode, cause, error, extra = {}) {
+  return { statusCode, payload: { ok: false, cause, error, ...extra } };
+}
 
 function resumeTask(taskId) {
   if (!isUuidTaskId(taskId)) {
     return { statusCode: 400, payload: { ok: false, error: 'invalid task id' } };
   }
-  const task = readTaskSafely(taskId, 'resume');
+  let task;
+  try {
+    task = readTask(taskId);
+  } catch (error) {
+    // 檔在但讀不動：清單上會顯示成「任務檔無法讀取」，這裡不能回「找不到任務」。
+    logStderr(`resume refused, task file unreadable (${taskId})`, error);
+    return resumeRefusal(409, 'task_file_unreadable', `任務檔讀不動，不能續跑：${error.message}`);
+  }
   if (!task) {
     return { statusCode: 404, payload: { ok: false, error: '找不到任務' } };
   }
@@ -2055,21 +2254,63 @@ function resumeTask(taskId) {
       payload: { ok: false, error: `status=${task.status} 不能續跑；只有 blocked 或 failed 的任務可以續跑`, status: task.status },
     };
   }
-  const previousReason = task.blocked_reason
-    ? `blocked: ${task.blocked_reason}${task.last_error ? ` (${task.last_error})` : ''}`
-    : `failed: ${task.error || task.last_error || 'unknown'}`;
+  // 上一棒（逾時被砍中、或舊 runtime 留下的）還沒真的結束就不放下一棒：兩棒會在同一個 workspace 並行。
+  const alivePid = liveWorkerPid(taskId);
+  if (alivePid) {
+    return resumeRefusal(
+      409,
+      'previous_worker_alive',
+      `上一棒 worker（pid ${alivePid}）還沒結束，等它結束再續跑；確定那個 pid 已經不是這個任務的 worker，可以刪掉 ${workerPidPath(taskId)}`,
+      { pid: alivePid },
+    );
+  }
+  const lastError = typeof task.last_error === 'string' && !task.last_error.startsWith('resumed after ') ? task.last_error : '';
+  const previousReason = (
+    task.blocked_reason
+      ? `blocked: ${task.blocked_reason}${lastError ? ` (${lastError})` : ''}`
+      : `failed: ${task.error || lastError || 'unknown'}`
+  ).slice(0, MAX_RESUME_REASON_CHARS);
   const next = { ...task };
   for (const field of RUN_RECEIPT_FIELDS) {
     delete next[field];
   }
   next.last_error = `resumed after ${previousReason}`;
   next.resume_count = (Number.isInteger(task.resume_count) ? task.resume_count : 0) + 1;
-  const steps = readCheckpointSteps(taskId);
-  const pendingTask = updateTaskStatus(next, 'pending');
+  const pendingTask = { ...next, status: 'pending', updated_at: nowIso() };
+  // 先確認寫得回去才放 worker：寫不成的話磁碟上還是 blocked／failed，worker 的結果也寫不回來，
+  // 而且 409 防重入失效（連發兩次就是兩棒並行）。做法跟 createTaskObject 一樣，寫不成就不放。
+  const violation = taskSchemaViolation(pendingTask);
+  if (violation) {
+    logStderr(`resume refused, task file rejected by schema (${taskId})`, violation);
+    return resumeRefusal(409, 'task_file_rejected', `任務檔有這一版不認得或不合規的內容（${violation}），寫不回去，不能續跑`, {
+      detail: violation,
+    });
+  }
+  let movedArtifacts;
+  try {
+    movedArtifacts = setAsidePreviousArtifacts(taskId);
+  } catch (error) {
+    logStderr(`resume refused, previous artifact could not be set aside (${taskId})`, error);
+    return resumeRefusal(500, 'artifact_set_aside_failed', `上一棒的結果檔改名失敗，不能續跑：${error.message}`);
+  }
+  if (!safeWriteJsonFile(taskPath(taskId), pendingTask)) {
+    return resumeRefusal(500, 'task_write_failed', '任務狀態寫不進去，不能續跑');
+  }
+  const checkpoint = readCheckpoint(taskId);
+  const steps = checkpoint.steps;
   appendProgressText(
     taskId,
     `Resume #${pendingTask.resume_count}: ${steps.length} checkpoint step(s) carried over${steps.length ? ` (${steps.join(', ')})` : ''}`,
   );
+  if (checkpoint.rejected) {
+    appendProgressText(taskId, `Checkpoint ignored (${checkpoint.rejected}): ${checkpointPath(taskId)} is not plain UTF-8 text; this run starts from the first step`);
+  }
+  if (checkpoint.partial) {
+    appendProgressText(taskId, `Checkpoint last line has no line ending, treated as unfinished: ${checkpoint.partial}`);
+  }
+  for (const moved of movedArtifacts) {
+    appendProgressText(taskId, `Previous run's artifact set aside: ${moved}`);
+  }
   startTaskWorker(pendingTask);
   return { statusCode: 202, payload: { ok: true, task: pendingTask, checkpoint_steps: steps } };
 }
@@ -2521,10 +2762,12 @@ module.exports = {
   runtimeTokenCookieName,
   // 斷點續傳：checkpoint 讀取與 prompt 段落開出入口，才驗得到「已完成的步驟被帶進下一棒」。
   readCheckpointSteps,
+  readCheckpoint,
   checkpointPath,
   buildClaudePrompt,
   // worker 失敗的環境判定是純函式：四類環境原因加「不是環境問題」都要驗得到。
   classifyEnvFailure,
+  workerCommandExists,
   taskEventSummary,
   MAX_TASK_RETRIES,
   RETRY_BACKOFF_MS,

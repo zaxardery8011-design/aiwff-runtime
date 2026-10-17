@@ -371,8 +371,8 @@ AIWFF_OPENAI_MODEL=qwen3:32b
 | 沒有多節點 fleet | 這個 runtime 跑在一台機器上，不協調一整組機器 |
 | Windows PATH 設定 | Windows 上需要讓 `claude.cmd` 可以從 PATH 找到 |
 | Memory 是文字注入，不是 RAG | RAG 是先檢索資料再餵給模型的做法；這裡先把 Markdown 記憶直接放進 context，大檔會吃上下文，所以 `memory/facts.md` 要保持精簡 |
-| 環境問題靠錯誤文字辨認 | Claude 或 agy worker 因為登入、找不到 CLI、檔案權限或網路而失敗時，任務會停成 `blocked`，帶 `env_cause` 和一句看得懂的 `env_hint`，不記成 `failed`。判斷方式是比對 worker 的錯誤輸出，措辭不一樣的訊息會被當成一般失敗。OpenAI 相容 worker 不在範圍內 |
-| 斷點續傳要手動、以步驟為單位 | worker 每做完一步就記在 `data/workspaces/<id>/CHECKPOINT.txt`。卡住或失敗的任務可以用 `POST /api/tasks/<id>/resume` 續跑，下一棒會被告知哪些步驟不要重做。重啟後不會自動續跑，做到一半被砍的那一步會重做，OpenAI 相容 worker 沒有斷點。更重的工作流由完整 AIWFF 處理 |
+| 環境問題靠錯誤文字辨認 | Claude 或 agy worker 因為登入、找不到 CLI、檔案權限或網路而失敗時，任務會停成 `blocked`，帶 `env_cause` 和一句看得懂的 `env_hint`，不記成 `failed`。判斷方式是比對 worker 輸出裡錯誤行的開頭（以第一個錯誤行為準），另外在啟動前先確認 `CLAUDE_CMD`／`AGY_CMD` 找得到；措辭不一樣的訊息會被當成一般失敗。OpenAI 相容 worker 不在範圍內 |
+| 斷點續傳要手動、以步驟為單位 | worker 每做完一步就記在 `data/workspaces/<id>/CHECKPOINT.txt`。卡住或失敗的任務可以用 `POST /api/tasks/<id>/resume` 續跑，下一棒會被告知哪些步驟不要重做。上一棒的 worker 還沒結束時續跑會被拒（409）；上一棒留下的結果檔會改名成 `.result.prev.md`，新的一棒要自己寫出結果。重啟後不會自動續跑，做到一半被砍的那一步會重做，OpenAI 相容 worker 沒有斷點。這一版寫出的任務檔（帶 `resume_count`、`env_cause`、`env_hint`）舊版 runtime 寫不進去，`data/tasks` 裡有這種任務時不要降版。更重的工作流由完整 AIWFF 處理 |
 
 ## Roadmap
 

@@ -301,3 +301,66 @@ test('real worker: a worker CLI that is not installed stops as blocked missing_t
     await stopDaemon(runtime.daemon);
   }
 });
+
+// ---- 審查回補（F3/F4）----
+
+test('classify: task text in the output is not an environment problem; the first error line decides (F4)', () => {
+  const crashes = [
+    "Error: Unexpected end of JSON input\n    at JSON.parse (<anonymous>)\nNote: the deploy script fails with 'permission denied'",
+    'TypeError: x is not a function\nThe page says: please log in to continue',
+    'RangeError: Maximum call stack size exceeded\n    at f (worker.js:1:1)\nTypeError: fetch failed',
+    "Error: Unexpected end of JSON input ... the deploy script fails with 'permission denied'",
+  ];
+  for (const output of crashes) {
+    assert.equal(classifyEnvFailure(output), null, output);
+    assert.equal(classifyEnvFailure({ stderr: '', stdout: output }), null, output);
+  }
+  // 模型回答裡提到登入、權限的句子（不在行首的錯誤形狀）不算。
+  assert.equal(classifyEnvFailure({ stderr: '', stdout: 'Step 2: if the user is not logged in, show the login page.\nPermission denied pages return 403.' }), null);
+  // worker 自己的崩潰在 stderr，stdout 裡的任務內容不能蓋過它。
+  assert.equal(classifyEnvFailure({ stderr: "TypeError: Cannot read properties of undefined (reading 'x')", stdout: 'Invalid API key · Please run /login' }), null);
+  // CLI 自己的錯誤訊息在 stdout 最後幾行時照樣認得（Claude --print 把 API 錯誤印在 stdout）。
+  assert.equal(classifyEnvFailure({ stderr: '', stdout: `some earlier answer text\n${AUTH_OUTPUT}` }).cause, 'auth');
+  // stdout 只看最後幾行：很前面出現的錯誤形狀不算。
+  const longAnswer = ['Error: EACCES: permission denied, open /quoted/in/answer', ...Array.from({ length: 30 }, (_, i) => `line ${i}`)].join('\n');
+  assert.equal(classifyEnvFailure({ stderr: '', stdout: longAnswer }), null);
+  // 英文版 cmd 找不到路徑也算找不到 worker。
+  assert.equal(classifyEnvFailure('The system cannot find the path specified.').cause, 'missing_tool');
+});
+
+test('worker command lookup: full paths are checked on disk, bare names on PATH (F3)', () => {
+  const { workerCommandExists } = agentModule;
+  assert.equal(workerCommandExists(process.execPath), true);
+  assert.equal(workerCommandExists(`"${process.execPath}"`), true);
+  assert.equal(workerCommandExists(path.join(DATA_DIR, 'aiwff no such dir', 'claude.cmd')), false);
+  assert.equal(workerCommandExists(path.join(DATA_DIR, 'aiwff-no-such-dir', 'claude.cmd')), false);
+  assert.equal(workerCommandExists('aiwff-no-such-worker-cli'), false);
+  assert.equal(workerCommandExists(''), false);
+  // 測試本身就是用 PATH 上的 node 跑起來的：裸指令名要找得到（Windows 靠 PATHEXT 補 .exe）。
+  assert.equal(workerCommandExists('node'), true);
+});
+
+test('real worker: CLAUDE_CMD set to a full path that does not exist stops as blocked missing_tool, with or without spaces (F3)', async () => {
+  fs.rmSync(DATA_DIR, { recursive: true, force: true });
+  const missing = [
+    path.join(DATA_DIR, 'aiwff no such dir', 'claude.cmd'),
+    path.join(DATA_DIR, 'aiwff-no-such-dir', 'claude.cmd'),
+  ];
+  for (const claudeCmd of missing) {
+    const runtime = await startDaemon({ CLAUDE_CMD: claudeCmd, MAX_TASK_RETRIES: '2' });
+    try {
+      const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+        title: 'bad full path',
+        instruction: 'worker path is wrong',
+        timeout_sec: 20,
+      }, AUTH_HEADERS);
+      const task = await waitForTaskStatus(runtime.port, created.id, ['blocked', 'failed']);
+      assert.equal(task.status, 'blocked', claudeCmd);
+      assert.equal(task.env_cause, 'missing_tool', claudeCmd);
+      assert.equal(task.retry_count, 0, claudeCmd);
+      assert.ok(task.last_error.includes(claudeCmd), task.last_error);
+    } finally {
+      await stopDaemon(runtime.daemon);
+    }
+  }
+});
