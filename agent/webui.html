@@ -1387,7 +1387,7 @@
       } else if (task.status === 'done') {
         lines.push('完成，產出：' + (task.artifact_path || taskSummary(task) || '已完成'));
       } else if (task.status === 'blocked') {
-        lines.push('卡住原因：' + (task.blocked_reason || '未提供'));
+        lines.push('卡住原因：' + (task.env_hint ? '環境問題，' + task.env_hint : task.blocked_reason || '未提供'));
       } else if (task.status === 'failed') {
         lines.push('失敗原因：' + (task.error || '未提供'));
       }
@@ -1742,7 +1742,7 @@
         events.push({ phase: 'artifact', ts: lastTs, exact: false, text: '產出 artifact：' + task.artifact_path });
       }
       if (['done', 'blocked', 'failed'].indexOf(task.status) >= 0) {
-        var tail = task.blocked_reason || task.error || taskSummary(task) || '';
+        var tail = task.env_hint || task.blocked_reason || task.error || taskSummary(task) || '';
         events.push({
           phase: 'settled',
           ts: updatedMs,

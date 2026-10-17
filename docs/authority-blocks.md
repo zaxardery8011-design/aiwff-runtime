@@ -21,6 +21,10 @@ This document answers both for the blocks this runtime actually produces today. 
 | `retry_count`, `last_error` | the daemon, real-Claude path only (`agent/index.js:884`, `:893`) | No |
 | `error` | the daemon on `failed` (`agent/index.js:891-894`); the mock worker on its own failure path (`examples/mock-worker/worker.js:90`) | No |
 | `blocked_reason` | the daemon only, on timeout (`agent/index.js:716`) | No |
+| `env_cause`, `env_hint` | the daemon only, real-Claude and agy paths, `settleEnvFailure()`: when the worker exits non-zero (or cannot be spawned) and `classifyEnvFailure()` matches its output, the task becomes `blocked` with `blocked_reason: environment`, `env_cause` one of `auth` / `missing_tool` / `permission` / `network`, and `env_hint` a plain-language fix. The worker's own text stays in `last_error`. `network` goes through the normal retries first; the other three stop at once | No — absent when the failure was not an environment problem; cleared on resume |
+| `resume_count` | the daemon only, `resumeTask()` on `POST /api/tasks/<id>/resume`; each resume adds 1 and clears the previous run's `error` / `error_origin` / `blocked_reason` / `timeout_*` / `retry_count` / `env_*`, keeping only the latest reason in `last_error` (capped, never nested) | No — absent on tasks that were never resumed |
+
+The step checkpoint is **not** a field of this record. It lives in the task's workspace, `data/workspaces/<id>/CHECKPOINT.txt`, one finished step per line, appended by the worker (the prompt tells a real worker where it is; the mock worker writes `step-1`..`step-3`). The daemon only reads it, in `readCheckpoint()`, to list the finished steps in the next run's prompt. Only lines that end with a line break count (an unterminated last line is treated as unfinished), and a file with NUL bytes or a UTF-16 BOM is ignored with a named progress line.
 
 ### Why `id` is the stable one
 
