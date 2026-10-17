@@ -231,8 +231,11 @@ test('router: PoC 路由表（含兩條驗收的路由部分與負向對照）',
     ['你好', 'both', 'chat', '你好'],
     ['/task 寫一個 hello.txt', 'both', 'task', '寫一個 hello.txt'],
     ['你好', 'task', 'task', '你好'],
-    ['你好', undefined, 'chat'],
-    ['你好', 'bogus', 'chat'],
+    // F4：沒設、空字串、值不認得都當 task（跟加聊天模式前一樣，每則訊息建任務）；要聊天得自己設 both。
+    ['你好', undefined, 'task', '你好'],
+    ['你好', '', 'task', '你好'],
+    ['你好', 'bogus', 'task', '你好'],
+    ['幫我看這樣對嗎？', undefined, 'task'],
     ['幫我整理今天的筆記', 'both', 'task'],
     ['可以幫我整理筆記嗎', 'both', 'chat'],
     ['幫我看這樣對嗎？', 'both', 'chat'],
@@ -244,30 +247,30 @@ test('router: PoC 路由表（含兩條驗收的路由部分與負向對照）',
     ['running late today', 'both', 'chat'],
     ['/help', 'task', 'command'],
     ['  你好  ', 'CHAT', 'chat', '你好'],
-    // 審查 F1：沒有受詞的動作詞、複合詞、問句，預設模式下都要是聊天（寧可少判成任務）。
-    ['跑步好累', undefined, 'chat'],
-    ['跑車多少錢', undefined, 'chat'],
-    ['執行長是誰', undefined, 'chat'],
-    ['建立關係很重要', undefined, 'chat'],
-    ['整理房間好累喔', undefined, 'chat'],
-    ['make sense', undefined, 'chat'],
-    ['fix 是什麼意思', undefined, 'chat'],
-    ['Run time error 是什麼意思', undefined, 'chat'],
-    ['幫我解釋一下 closure 是什麼', undefined, 'chat'],
-    ['幫我看看這樣對嗎？謝謝', undefined, 'chat'],
-    ['請問現在幾點', undefined, 'chat'],
+    // 審查 F1：沒有受詞的動作詞、複合詞、問句，both 模式下都要是聊天（寧可少判成任務）。
+    ['跑步好累', 'both', 'chat'],
+    ['跑車多少錢', 'both', 'chat'],
+    ['執行長是誰', 'both', 'chat'],
+    ['建立關係很重要', 'both', 'chat'],
+    ['整理房間好累喔', 'both', 'chat'],
+    ['make sense', 'both', 'chat'],
+    ['fix 是什麼意思', 'both', 'chat'],
+    ['Run time error 是什麼意思', 'both', 'chat'],
+    ['幫我解釋一下 closure 是什麼', 'both', 'chat'],
+    ['幫我看看這樣對嗎？謝謝', 'both', 'chat'],
+    ['請問現在幾點', 'both', 'chat'],
     ['/taskforce go', 'both', 'chat'],
     // 審查 F1 反方向：/task 不分大小寫、可省略空格、可帶 @bot；明講請託或動作詞＋受詞要判成任務。
-    ['/task寫一個 hello.txt', undefined, 'task', '寫一個 hello.txt'],
-    ['/TASK 寫一個 hello.txt', undefined, 'task', '寫一個 hello.txt'],
-    ['/task@MyBot 寫一個 hello.txt', undefined, 'task', '寫一個 hello.txt'],
-    ['/chat@MyBot 寫一個 hello.txt', undefined, 'chat', '寫一個 hello.txt'],
+    ['/task寫一個 hello.txt', 'both', 'task', '寫一個 hello.txt'],
+    ['/TASK 寫一個 hello.txt', 'both', 'task', '寫一個 hello.txt'],
+    ['/task@MyBot 寫一個 hello.txt', 'both', 'task', '寫一個 hello.txt'],
+    ['/chat@MyBot 寫一個 hello.txt', 'both', 'chat', '寫一個 hello.txt'],
     ['/tasks@MyBot', undefined, 'command', '/tasks'],
     ['/Start', undefined, 'command', '/start'],
-    ['請寫一個 hello.txt', undefined, 'task'],
-    ['please write hello.txt', undefined, 'task'],
-    ['寫一個 hello.txt', undefined, 'task'],
-    ['請整理今天的筆記', undefined, 'task'],
+    ['請寫一個 hello.txt', 'both', 'task'],
+    ['please write hello.txt', 'both', 'task'],
+    ['寫一個 hello.txt', 'both', 'task'],
+    ['請整理今天的筆記', 'both', 'task'],
   ];
   for (const [text, mode, kind, instruction] of cases) {
     const result = route(text, mode);
@@ -279,7 +282,56 @@ test('router: PoC 路由表（含兩條驗收的路由部分與負向對照）',
   assert.equal(route('/task 寫一個 hello.txt', 'chat').notice, 'task_disabled');
 });
 
+test('F4：沒設 AIWFF_MODE 時預設 task（跟舊版一樣）：「你好」建任務；設 both 才直接聊天', async () => {
+  assert.equal(agent.runtimeChatMode(), 'task');
+  const before = taskFileNames().length;
+  const res = await request(port, 'POST', '/api/chat', { headers: AUTH, payload: { text: '你好' } });
+  assert.equal(res.status, 201, res.raw);
+  assert.equal(res.json.kind, 'task');
+  assert.equal(res.json.mode, 'task');
+  assert.equal(res.json.task.instruction, '你好');
+  assert.equal(res.json.auto_detected, false);
+  assert.equal(taskFileNames().length, before + 1);
+  await waitForTaskStatus(res.json.task.id, ['done', 'failed', 'blocked']);
+  const doctor = await request(port, 'GET', '/api/doctor');
+  const check = doctor.json.checks.find((item) => item.id === 'chat_mode');
+  assert.equal(check.ok, true, JSON.stringify(check));
+  assert.match(check.detail, /^task（AIWFF_MODE 未設，用預設）/);
+  const settings = await request(port, 'GET', '/api/settings');
+  assert.equal(settings.json.chat_mode, 'task');
+
+  process.env.AIWFF_MODE = 'both';
+  const chat = await request(port, 'POST', '/api/chat', { headers: AUTH, payload: { text: '你好' } });
+  assert.equal(chat.status, 200, chat.raw);
+  assert.equal(chat.json.kind, 'chat');
+  assert.equal(chat.json.mode, 'both');
+  assert.equal(taskFileNames().length, before + 1, '設 both 後「你好」不建任務');
+});
+
+test('F4：TG 沒設 AIWFF_MODE 時「你好」建任務（跟舊版一樣）', async () => {
+  process.env.TG_BOT_TOKEN = 'fake-test-token';
+  process.env.ADMIN_TG_CHAT_ID = ADMIN_CHAT_ID;
+  const before = taskFileNames().length;
+  fakeTg.sent.length = 0;
+  fakeTg.queue.push('你好');
+  const stop = agent.startTelegramPolling();
+  try {
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline && !fakeTg.sent.some((m) => /任務完成/.test(m.text))) {
+      await sleep(100);
+    }
+    assert.ok(fakeTg.sent.some((m) => /任務建立：你好/.test(m.text)), JSON.stringify(fakeTg.sent));
+    assert.ok(fakeTg.sent.some((m) => /任務完成/.test(m.text)), JSON.stringify(fakeTg.sent));
+    assert.equal(taskFileNames().length, before + 1);
+  } finally {
+    stop();
+    process.env.TG_BOT_TOKEN = '';
+    process.env.ADMIN_TG_CHAT_ID = '';
+  }
+});
+
 test('POST /api/chat「你好」：10 秒內有回答，而且不建任務（mock）', async () => {
+  process.env.AIWFF_MODE = 'both';
   const before = taskFileNames();
   const startedAt = Date.now();
   const res = await request(port, 'POST', '/api/chat', { headers: AUTH, payload: { text: '你好' } });
@@ -294,6 +346,7 @@ test('POST /api/chat「你好」：10 秒內有回答，而且不建任務（moc
 });
 
 test('POST /api/chat「/task 寫一個 hello.txt」：建任務、回覆含「任務建立」與 ID，跑完 done', async () => {
+  process.env.AIWFF_MODE = 'both';
   const before = taskFileNames().length;
   const res = await request(port, 'POST', '/api/chat', { headers: AUTH, payload: { text: '/task 寫一個 hello.txt' } });
   assert.equal(res.status, 201, res.raw);
@@ -308,6 +361,7 @@ test('POST /api/chat「/task 寫一個 hello.txt」：建任務、回覆含「�
 });
 
 test('POST /api/chat：關鍵詞自動判成任務時，回覆多一行 /chat 提示', async () => {
+  process.env.AIWFF_MODE = 'both';
   const res = await request(port, 'POST', '/api/chat', { headers: AUTH, payload: { text: '幫我整理今天的筆記' } });
   assert.equal(res.status, 201, res.raw);
   assert.equal(res.json.auto_detected, true);
@@ -338,6 +392,7 @@ test('AIWFF_MODE=chat：/task 回「只開聊天模式」，不建任務也不�
 });
 
 test('POST /api/chat：/start 依模式改文字，/help 說明 /task；沒 token 401、空字串 400', async () => {
+  process.env.AIWFF_MODE = 'both';
   const start = await request(port, 'POST', '/api/chat', { headers: AUTH, payload: { text: '/start' } });
   assert.equal(start.json.kind, 'command');
   assert.match(start.json.reply, /\/task 開頭/);
@@ -356,7 +411,7 @@ test('/api/doctor 與 /api/settings 顯示目前聊天模式；值不認得時�
   const doctor = await request(port, 'GET', '/api/doctor');
   const check = doctor.json.checks.find((item) => item.id === 'chat_mode');
   assert.ok(check, 'doctor 要有 chat_mode');
-  assert.match(check.detail, /^both（AIWFF_MODE=weird 不認得/);
+  assert.match(check.detail, /^task（AIWFF_MODE=weird 不認得/);
   process.env.AIWFF_MODE = 'chat';
   const settings = await request(port, 'GET', '/api/settings');
   assert.equal(settings.json.chat_mode, 'chat');
@@ -364,6 +419,7 @@ test('/api/doctor 與 /api/settings 顯示目前聊天模式；值不認得時�
 
 test('Claude 聊天參數：無工具、單輪、不吃 bypass，cwd 不在 repo 裡，也不建任務（假 CLI）', async () => {
   const captureFile = path.join(BIN_DIR, 'capture.json');
+  process.env.AIWFF_MODE = 'both';
   process.env.MOCK_WORKER = '';
   process.env.ENABLE_REAL_CLAUDE_WORKER = '1';
   process.env.CLAUDE_BYPASS_APPROVALS = '1';
@@ -399,6 +455,7 @@ test('Claude 聊天參數：無工具、單輪、不吃 bypass，cwd 不在 repo
 });
 
 test('Claude 聊天失敗：回 502 與具名原因，不建任務（假 CLI exit 3）', async () => {
+  process.env.AIWFF_MODE = 'both';
   process.env.MOCK_WORKER = '';
   process.env.ENABLE_REAL_CLAUDE_WORKER = '1';
   process.env.CLAUDE_CMD = writeFakeClaude('failing-chat-claude', FAILING_CLAUDE);
@@ -410,6 +467,7 @@ test('Claude 聊天失敗：回 502 與具名原因，不建任務（假 CLI exi
 });
 
 test('Claude 聊天逾時：到時間就回 chat_timeout，不會一直掛著（假 CLI 不回）', async () => {
+  process.env.AIWFF_MODE = 'both';
   process.env.MOCK_WORKER = '';
   process.env.ENABLE_REAL_CLAUDE_WORKER = '1';
   process.env.CLAUDE_CMD = writeFakeClaude('hanging-chat-claude', HANGING_CLAUDE);
@@ -421,7 +479,7 @@ test('Claude 聊天逾時：到時間就回 chat_timeout，不會一直掛著（
   assert.ok(elapsedMs < 8000, `took ${elapsedMs}ms`);
 });
 
-test('審查 F2：agy provider 沒設 AIWFF_MODE 時退回 task（一般訊息建任務、不回錯誤）；明講 both 時 doctor 標 ok:false', async () => {
+test('審查 F2：agy provider 沒設 AIWFF_MODE 時是 task（一般訊息建任務、不回錯誤）；明講 both 時 doctor 標 ok:false', async () => {
   process.env.MOCK_WORKER = '';
   process.env.AIWFF_WORKER_PROVIDER = 'agy';
   // 不叫真 agy：指向不存在的執行檔，spawn 回 ENOENT，任務跑到 failed 就好。
@@ -437,7 +495,7 @@ test('審查 F2：agy provider 沒設 AIWFF_MODE 時退回 task（一般訊息�
   const doctor = await request(port, 'GET', '/api/doctor');
   const check = doctor.json.checks.find((item) => item.id === 'chat_mode');
   assert.equal(check.ok, true, JSON.stringify(check));
-  assert.match(check.detail, /^task（AIWFF_MODE 未設；這個 worker provider 沒有聊天路徑，退回 task）/);
+  assert.match(check.detail, /^task（AIWFF_MODE 未設，用預設）/);
 
   process.env.AIWFF_MODE = 'both';
   const doctorBoth = await request(port, 'GET', '/api/doctor');
@@ -448,6 +506,7 @@ test('審查 F2：agy provider 沒設 AIWFF_MODE 時退回 task（一般訊息�
 });
 
 test('審查 F3：8000 字上限只管聊天；/task 長指令照樣建任務', async () => {
+  process.env.AIWFF_MODE = 'both';
   const before = taskFileNames().length;
   const longTask = await request(port, 'POST', '/api/chat', {
     headers: AUTH,
@@ -463,6 +522,7 @@ test('審查 F3：8000 字上限只管聊天；/task 長指令照樣建任務', 
 });
 
 test('審查 F5：TG 聊天回覆不擋輪詢迴圈，後面的 /tasks 先回（假 CLI 不回）', async () => {
+  process.env.AIWFF_MODE = 'both';
   process.env.TG_BOT_TOKEN = 'fake-test-token';
   process.env.ADMIN_TG_CHAT_ID = ADMIN_CHAT_ID;
   process.env.MOCK_WORKER = '';
@@ -489,6 +549,7 @@ test('審查 F5：TG 聊天回覆不擋輪詢迴圈，後面的 /tasks 先回（
 });
 
 test('TG：both 模式「你好」直接回答不建任務；/task 建任務並收到完成通知；task 模式「你好」建任務', async () => {
+  process.env.AIWFF_MODE = 'both';
   process.env.TG_BOT_TOKEN = 'fake-test-token';
   process.env.ADMIN_TG_CHAT_ID = ADMIN_CHAT_ID;
   const before = taskFileNames().length;
@@ -609,6 +670,7 @@ function loadWebui(calls) {
 }
 
 test('webui 對話框：送 POST /api/chat；「你好」顯示回答不建任務，「/task …」顯示任務已建立', async () => {
+  process.env.AIWFF_MODE = 'both';
   const calls = [];
   const ui = loadWebui(calls);
   const input = ui.document.getElementById('task-chat-text');

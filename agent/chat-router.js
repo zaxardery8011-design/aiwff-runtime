@@ -28,9 +28,10 @@ const EN_ACTION_RE =
 const QUESTION_RE = /(\?|？|嗎|呢|什麼|甚麼|怎麼|怎樣|為什麼|為何|是誰|多少|如何|哪裡|哪個|哪些|能不能|可不可以|要不要|是不是)/;
 const EN_QUESTION_START = /^(?:what|why|how|who|when|where|which|is|are|does|do|can|could|should|would)\b/i;
 
+// 沒設或值不認得一律當 task（跟加聊天模式前一樣，每則訊息建任務）；聊天要使用者自己設 both 或 chat。
 function normalizeMode(mode) {
   const value = String(mode || '').trim().toLowerCase();
-  return value === 'chat' || value === 'task' ? value : 'both';
+  return value === 'chat' || value === 'both' ? value : 'task';
 }
 
 function looksLikeAction(text) {

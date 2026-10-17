@@ -1892,33 +1892,18 @@ async function createTask(req, res) {
 }
 
 // ── 聊天模式 ──────────────────────────────────────────────
-// AIWFF_MODE：both（預設）＝一般訊息直接回答、明確要做事或 /task 才建任務；
-// chat＝只聊天；task＝每則訊息都建任務（舊行為）。未設或值不認得一律當 both，
-// 但 worker provider 沒有聊天路徑（agy）時退回 task。
-
-// AIWFF_MODE 有沒有明講 both / chat / task（未設或不認得＝沒明講）。
-function chatModeExplicit() {
-  const raw = String(process.env.AIWFF_MODE || '').trim().toLowerCase();
-  return raw === 'both' || raw === 'chat' || raw === 'task';
-}
-
-// provider 沒有聊天路徑又沒明講模式時退回 task：跟升級前一樣每則訊息建任務，一般訊息不會變成錯誤。
+// AIWFF_MODE：task（預設）＝每則訊息都建任務，跟加聊天模式前一樣；
+// both＝一般訊息直接回答、明確要做事或 /task 才建任務；chat＝只聊天。
+// 未設或值不認得一律當 task，聊天要使用者自己設 both 或 chat。
 function runtimeChatMode() {
-  if (!chatModeExplicit() && chatBackend() === 'unsupported') {
-    return 'task';
-  }
   return normalizeChatMode(process.env.AIWFF_MODE);
 }
 
-// doctor 的 chat_mode：provider 不支援聊天、又明講要聊天時標 ok:false。
+// doctor 的 chat_mode：provider 不支援聊天（agy）、又設了 both 或 chat 時標 ok:false。
 function chatModeCheck() {
   const mode = runtimeChatMode();
   const raw = String(process.env.AIWFF_MODE || '').trim();
   const unsupported = chatBackend() === 'unsupported';
-  if (unsupported && !chatModeExplicit()) {
-    const why = raw ? `AIWFF_MODE=${raw.slice(0, 40)} 不認得` : 'AIWFF_MODE 未設';
-    return { ok: true, detail: `${mode}（${why}；這個 worker provider 沒有聊天路徑，退回 task）` };
-  }
   if (unsupported && mode !== 'task') {
     return {
       ok: false,
@@ -2216,7 +2201,7 @@ async function pollTelegram() {
       continue;
     }
 
-    // 路由依 AIWFF_MODE：指令照舊、/task 或明確要做事才建任務、其他直接聊天回答。
+    // 路由依 AIWFF_MODE：指令照舊；task（預設）每則建任務；both 時 /task 或明確要做事才建任務、其他直接聊天回答。
     // 會叫模型的聊天回覆不 await：輪詢迴圈不被聊天卡住，後面的 /tasks、/task 馬上處理；同時最多 TG_MAX_CONCURRENT_CHATS 則。
     const routed = routeConversationMessage(String(msg.text).trim(), runtimeChatMode());
     const callsModel = routed.kind === 'chat' && !routed.notice && Boolean(routed.instruction);

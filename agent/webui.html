@@ -1012,7 +1012,7 @@
           </div>
           <div class="chat-input" id="task-chat-input-box">
             <div class="chat-input-row">
-              <textarea id="task-chat-text" rows="1" placeholder="輸入訊息… /task 開頭建任務 · Enter 送出 / Shift+Enter 換行"></textarea>
+              <textarea id="task-chat-text" rows="1" placeholder="輸入訊息… Enter 送出 / Shift+Enter 換行"></textarea>
               <button class="chat-submit" id="task-chat-send" type="button" title="送出" aria-label="送出">▶</button>
               <span class="chat-state-badge" id="task-chat-status">IDLE · 待機</span>
             </div>
@@ -1158,7 +1158,7 @@
       chatMessages: [
         {
           role: 'assistant',
-          text: '直接輸入就能聊天；要我動手做事，用 /task 開頭（「幫我…」「寫一個…」這類明確指令也會建任務）。建了任務會在這裡回報進度。',
+          text: '輸入一句話送出，預設每則訊息都會建成任務，並在這裡回報進度。設了 AIWFF_MODE=both 時，一般訊息直接回答，/task 開頭（或「幫我…」「寫一個…」這類明確指令）才建任務。',
           meta: '系統 · 待機'
         }
       ]
