@@ -70,6 +70,10 @@
     },
     "last_error": {
       "type": "string"
+    },
+    "resume_count": {
+      "type": "integer",
+      "minimum": 0
     }
   }
 }

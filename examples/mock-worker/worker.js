@@ -22,6 +22,24 @@ function progressPath(id) {
   return path.join(TASKS_DIR, `${id}.progress.jsonl`);
 }
 
+function checkpointPath(id) {
+  return path.join(ROOT_DIR, 'data', 'workspaces', id, 'CHECKPOINT.txt');
+}
+
+function readCheckpointSteps(filePath) {
+  try {
+    return new Set(
+      fs
+        .readFileSync(filePath, 'utf8')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith('#')),
+    );
+  } catch (_) {
+    return new Set();
+  }
+}
+
 function artifactPath(id) {
   return path.join(ARTIFACTS_DIR, `${id}.result.json`);
 }
@@ -174,7 +192,20 @@ async function main() {
   let task = readJsonFile(taskPath(taskId));
   task = claimStatusOrThrow(task, 'running');
 
+  // 斷點續傳：上一棒做完的步驟記在 workspace 的 CHECKPOINT.txt（一行一步），這一棒跳過它們。
+  const checkpointFile = checkpointPath(task.id);
+  fs.mkdirSync(path.dirname(checkpointFile), { recursive: true });
+  const completedSteps = readCheckpointSteps(checkpointFile);
+
   for (let index = 1; index <= 3; index += 1) {
+    const stepName = `step-${index}`;
+    if (completedSteps.has(stepName)) {
+      appendObservationLine(
+        progressPath(task.id),
+        `${JSON.stringify({ task_id: task.id, step: index, total_steps: 3, message: `Mock worker skipped ${index}/3 (already in checkpoint)`, at: nowIso() })}\n`,
+      );
+      continue;
+    }
     const progress = {
       task_id: task.id,
       step: index,
@@ -184,6 +215,8 @@ async function main() {
     };
     appendObservationLine(progressPath(task.id), `${JSON.stringify(progress)}\n`);
     await sleep(1000);
+    // 步驟做完才記：被砍在 sleep 中途的那一步不會被當成已完成。
+    appendObservationLine(checkpointFile, `${stepName}\n`);
   }
 
   const artifact = {

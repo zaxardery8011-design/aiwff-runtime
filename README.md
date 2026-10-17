@@ -374,7 +374,7 @@ These limitations are intentionally not softened.
 | No multi-node fleet | This runtime runs on one machine and does not coordinate a fleet |
 | Windows PATH setup | Claude CLI on Windows needs `claude.cmd` available on PATH |
 | Memory is text injection, not RAG | Large memory files consume context; keep `memory/facts.md` focused |
-| Not for long-running tasks | Tasks longer than about 10 minutes do not have checkpoint resume support; full AIWFF handles heavier workflows |
+| Resume is manual and step-based | A worker appends each finished step to `data/workspaces/<id>/CHECKPOINT.txt`. A blocked or failed task can be resumed with `POST /api/tasks/<id>/resume`, and the next run is told which steps not to redo. Nothing resumes automatically after a restart, a step that was cut off halfway runs again, and the OpenAI-compatible worker has no checkpoints. Full AIWFF handles heavier workflows |
 
 ## Roadmap
 

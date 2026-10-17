@@ -1365,6 +1365,8 @@ ${preferences}
 指令: ${task.instruction}
 任務ID: ${task.id}
 
+${buildCheckpointPromptSection(task)}
+
 結果請寫到: ${artifactResultPath(task.id)}
 最後一行必須寫: DONE: <一句話說你完成了什麼>
 `;
@@ -1395,6 +1397,52 @@ function quoteWindowsCommand(command) {
 
 function taskWorkspacePath(taskId) {
   return path.join(WORKSPACES_DIR, taskId);
+}
+
+// 斷點續傳：worker 每做完一步，就在自己 workspace 的 CHECKPOINT.txt 追加一行步驟名稱。
+// 放在 workspace（worker 的 cwd）是因為 Claude worker 本來就能寫那裡，不用多開目錄權限；
+// 一行一步、只追加：被砍在寫到一半時最多壞最後一行，前面已記下的步驟都還在。
+// 任務中斷後用 POST /api/tasks/<id>/resume 重跑，同一個 workspace 的這份檔會被帶進下一棒。
+const CHECKPOINT_FILENAME = 'CHECKPOINT.txt';
+
+function checkpointPath(taskId) {
+  return path.join(taskWorkspacePath(taskId), CHECKPOINT_FILENAME);
+}
+
+// 回傳已完成的步驟（去重、保留先後）；檔不在或讀不動就回空陣列，等於從頭做。
+function readCheckpointSteps(taskId) {
+  if (!isSafeTaskId(taskId)) {
+    return [];
+  }
+  let raw;
+  try {
+    raw = fs.readFileSync(checkpointPath(taskId), 'utf8');
+  } catch (_) {
+    return [];
+  }
+  const steps = [];
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line && !line.startsWith('#') && !steps.includes(line)) {
+      steps.push(line);
+    }
+  }
+  return steps;
+}
+
+function buildCheckpointPromptSection(task) {
+  const lines = [
+    '## 斷點續傳',
+    `每做完一個步驟，就在 ${checkpointPath(task.id)} 追加一行，寫那個步驟的名稱（一行一步，不要改舊的行）。`,
+  ];
+  const steps = readCheckpointSteps(task.id);
+  if (steps.length) {
+    lines.push('這是中斷後接續的一棒。下面這些步驟上一棒已經做完，不要重做，從還沒做的地方接著做：');
+    for (const step of steps) {
+      lines.push(`- ${step}`);
+    }
+  }
+  return lines.join('\n');
 }
 
 function shouldUseDangerousClaudeBypass() {
@@ -1875,6 +1923,55 @@ async function createTask(req, res) {
   sendJson(res, 201, task);
 }
 
+// 斷點續傳的入口：卡住（逾時、runtime 重啟中斷）或失敗的任務，用同一個 id 再跑一棒。
+// 同一個 workspace 和 CHECKPOINT.txt 會被帶進下一棒，prompt 會列出已完成的步驟要它別重做。
+// 上一棒的收據欄位（逾時細節、error）在重跑前清掉，免得新的一棒做完後帳上還掛著舊原因；
+// 舊原因留在 last_error，resume_count 記第幾次續跑。
+const RESUMABLE_STATUSES = new Set(['blocked', 'failed']);
+const RUN_RECEIPT_FIELDS = [
+  'error',
+  'blocked_reason',
+  'timeout_phase',
+  'timeout_phase_stuck_sec',
+  'timeout_phase_timeline',
+  'timeout_kind',
+  'timeout_idle_sec',
+  'retry_count',
+];
+
+function resumeTask(taskId) {
+  if (!isUuidTaskId(taskId)) {
+    return { statusCode: 400, payload: { ok: false, error: 'invalid task id' } };
+  }
+  const task = readTaskSafely(taskId, 'resume');
+  if (!task) {
+    return { statusCode: 404, payload: { ok: false, error: '找不到任務' } };
+  }
+  if (!RESUMABLE_STATUSES.has(task.status)) {
+    return {
+      statusCode: 409,
+      payload: { ok: false, error: `status=${task.status} 不能續跑；只有 blocked 或 failed 的任務可以續跑`, status: task.status },
+    };
+  }
+  const previousReason = task.blocked_reason
+    ? `blocked: ${task.blocked_reason}${task.last_error ? ` (${task.last_error})` : ''}`
+    : `failed: ${task.error || task.last_error || 'unknown'}`;
+  const next = { ...task };
+  for (const field of RUN_RECEIPT_FIELDS) {
+    delete next[field];
+  }
+  next.last_error = `resumed after ${previousReason}`;
+  next.resume_count = (Number.isInteger(task.resume_count) ? task.resume_count : 0) + 1;
+  const steps = readCheckpointSteps(taskId);
+  const pendingTask = updateTaskStatus(next, 'pending');
+  appendProgressText(
+    taskId,
+    `Resume #${pendingTask.resume_count}: ${steps.length} checkpoint step(s) carried over${steps.length ? ` (${steps.join(', ')})` : ''}`,
+  );
+  startTaskWorker(pendingTask);
+  return { statusCode: 202, payload: { ok: true, task: pendingTask, checkpoint_steps: steps } };
+}
+
 async function tgRequest(token, method, body) {
   const payload = JSON.stringify(body || {});
   const base = new URL(TG_API_BASE_URL);
@@ -2133,6 +2230,18 @@ async function handleRequest(req, res) {
     return;
   }
 
+  const resumeMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/resume$/);
+  if (req.method === 'POST' && resumeMatch) {
+    const writeAccess = verifyWriteAccess(req);
+    if (!writeAccess.ok) {
+      sendJson(res, writeAccess.status, { ok: false, error: writeAccess.error });
+      return;
+    }
+    const { statusCode, payload } = resumeTask(resumeMatch[1]);
+    sendJson(res, statusCode, payload);
+    return;
+  }
+
   // 不 decode：合法 id 是 UUID，不會含編碼字元；%2F 之類原樣進格式驗證被擋成 400。
   const resultMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/result$/);
   if (req.method === 'GET' && resultMatch) {
@@ -2197,7 +2306,7 @@ function sweepOrphanRunningTasks() {
     }
     updateTaskStatus(task, 'blocked', {
       blocked_reason: 'interrupted',
-      last_error: 'runtime restarted while task was running; not retried automatically',
+      last_error: `runtime restarted while task was running; not retried automatically (resume with POST /api/tasks/${task.id}/resume)`,
     });
     swept.push(task.id);
   }
@@ -2308,6 +2417,10 @@ module.exports = {
   createRuntimeServer,
   RUNTIME_TOKEN_COOKIE,
   runtimeTokenCookieName,
+  // 斷點續傳：checkpoint 讀取與 prompt 段落開出入口，才驗得到「已完成的步驟被帶進下一棒」。
+  readCheckpointSteps,
+  checkpointPath,
+  buildClaudePrompt,
   MAX_TASK_RETRIES,
   RETRY_BACKOFF_MS,
   TG_API_BASE_URL,

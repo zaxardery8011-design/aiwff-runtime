@@ -371,7 +371,7 @@ AIWFF_OPENAI_MODEL=qwen3:32b
 | 沒有多節點 fleet | 這個 runtime 跑在一台機器上，不協調一整組機器 |
 | Windows PATH 設定 | Windows 上需要讓 `claude.cmd` 可以從 PATH 找到 |
 | Memory 是文字注入，不是 RAG | RAG 是先檢索資料再餵給模型的做法；這裡先把 Markdown 記憶直接放進 context，大檔會吃上下文，所以 `memory/facts.md` 要保持精簡 |
-| 不適合超長任務 | 超過約 10 分鐘的任務沒有 checkpoint resume（中途記點、下次接著跑）；更重的工作流由完整 AIWFF 處理 |
+| 斷點續傳要手動、以步驟為單位 | worker 每做完一步就記在 `data/workspaces/<id>/CHECKPOINT.txt`。卡住或失敗的任務可以用 `POST /api/tasks/<id>/resume` 續跑，下一棒會被告知哪些步驟不要重做。重啟後不會自動續跑，做到一半被砍的那一步會重做，OpenAI 相容 worker 沒有斷點。更重的工作流由完整 AIWFF 處理 |
 
 ## Roadmap
 
