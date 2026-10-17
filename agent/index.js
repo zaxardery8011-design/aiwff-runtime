@@ -4,6 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const crypto = require('crypto');
+const os = require('os');
+const { route: routeConversationMessage, normalizeMode: normalizeChatMode } = require('./chat-router');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 loadDotEnv();
@@ -58,6 +60,14 @@ const TG_API_BASE_URL = process.env.TG_API_BASE_URL || 'https://api.telegram.org
 const TG_REQUEST_TIMEOUT_MS = envInt('TG_REQUEST_TIMEOUT_MS', 20000, { min: 1000, max: 120000 });
 const TG_POLL_BASE_MS = envInt('TG_POLL_BASE_MS', 2000, { min: 200, max: 60000 });
 const TG_POLL_MAX_BACKOFF_MS = envInt('TG_POLL_MAX_BACKOFF_MS', 60000, { min: TG_POLL_BASE_MS, max: 600000 });
+const TG_MAX_MESSAGE_CHARS = 4000;
+
+// 聊天模式（AIWFF_MODE）：聊天呼叫唯讀、無工具、單輪，逾時預設 30 秒。
+const CHAT_TIMEOUT_MS = envInt('AIWFF_CHAT_TIMEOUT_SEC', 30, { min: 1, max: 300 }) * 1000;
+const MAX_CHAT_INPUT_CHARS = 8000;
+const MAX_CHAT_REPLY_CHARS = 16000;
+const MOCK_CHAT_REPLY = '（mock）收到你的訊息。這是 MOCK_WORKER 模式的固定回覆；接上真的模型後，這裡會直接回答。';
+const CHAT_TASK_HINT = '不是要建任務？下次用 /chat 開頭';
 
 // 崩潰韌性護欄：把裸露例外/rejection 與非同步回呼裡的 fs 寫入導向 stderr，
 // 讓單一失敗只留紀錄、不整隻 runtime 崩掉。設計取捨＝韌性優先於嚴格中止。
@@ -989,6 +999,7 @@ function getDoctorReport() {
     checkPathReadable('inbox_dir', INBOX_DIR),
     checkPathReadable('memory_dir', MEMORY_DIR),
     { id: 'worker_mode', ok: true, detail: runtimeWorkerMode() },
+    { id: 'chat_mode', ok: true, detail: chatModeDetail() },
     { id: 'port', ok: true, detail: String(PORT) },
   ];
   return {
@@ -1003,13 +1014,14 @@ function getSettingsSnapshot() {
     ok: true,
     port: PORT,
     worker_mode: runtimeWorkerMode(),
+    chat_mode: runtimeChatMode(),
     default_worker_timeout_sec: DEFAULT_WORKER_TIMEOUT_SEC,
     max_worker_timeout_sec: MAX_WORKER_TIMEOUT_SEC,
     memory_source: 'memory/*.md',
     writable_data_dirs: ['data/tasks', 'data/artifacts', 'data/inbox'],
     endpoints: [
       { name: 'HUD', route: 'GET /api/hud + GET /api/health' },
-      { name: '對話 / 新任務', route: 'POST /api/tasks, GET /api/tasks/:id/result' },
+      { name: '對話 / 新任務', route: 'POST /api/chat, POST /api/tasks, GET /api/tasks/:id/result' },
       { name: '任務', route: 'GET /api/tasks, GET /api/tasks/:id' },
       { name: '進度 / 事件', route: 'GET /api/events, GET /api/tasks/:id/progress' },
       { name: '收件匣 / 卡住', route: 'GET /api/inbox, GET /api/tasks?status=blocked' },
@@ -1735,7 +1747,8 @@ function buildOpenAICompatibleMessages(task) {
   ];
 }
 
-async function requestOpenAICompatibleCompletion(task, timeoutMs) {
+// messages 不給就用任務版；聊天模式傳自己的 messages（同一條無工具、單次 completion 路徑）。
+async function requestOpenAICompatibleCompletion(task, timeoutMs, messages = buildOpenAICompatibleMessages(task)) {
   const config = openAICompatibleConfig();
   if (!config.baseUrl || !config.model) {
     throw Object.assign(new Error('AIWFF_OPENAI_BASE_URL and AIWFF_OPENAI_MODEL are required when AIWFF_WORKER_PROVIDER=openai_compatible'), { retryable: false });
@@ -1748,7 +1761,7 @@ async function requestOpenAICompatibleCompletion(task, timeoutMs) {
   const response = await fetch(`${config.baseUrl}/chat/completions`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ model: config.model, messages: buildOpenAICompatibleMessages(task) }),
+    body: JSON.stringify({ model: config.model, messages }),
     signal: AbortSignal.timeout(timeoutMs),
   });
   const raw = await response.text();
@@ -1875,6 +1888,241 @@ async function createTask(req, res) {
   sendJson(res, 201, task);
 }
 
+// ── 聊天模式 ──────────────────────────────────────────────
+// AIWFF_MODE：both（預設）＝一般訊息直接回答、明確要做事或 /task 才建任務；
+// chat＝只聊天；task＝每則訊息都建任務（舊行為）。未設或值不認得一律當 both。
+function runtimeChatMode() {
+  return normalizeChatMode(process.env.AIWFF_MODE);
+}
+
+function chatModeDetail() {
+  const mode = runtimeChatMode();
+  const raw = String(process.env.AIWFF_MODE || '').trim();
+  if (!raw) {
+    return `${mode}（AIWFF_MODE 未設，用預設）`;
+  }
+  if (raw.toLowerCase() !== mode) {
+    return `${mode}（AIWFF_MODE=${raw.slice(0, 40)} 不認得，用預設）`;
+  }
+  return mode;
+}
+
+// 聊天用哪一條模型路徑：順序跟 startTaskWorker 一致。agy 在 v0 沒有聊天路徑，具名回報。
+function chatBackend() {
+  if (shouldUseOpenAICompatibleWorker()) {
+    return 'openai_compatible';
+  }
+  if (shouldUseAgyWorker()) {
+    return 'unsupported';
+  }
+  return shouldUseMockWorker() ? 'mock' : 'claude';
+}
+
+function chatSystemPrompt() {
+  const facts = readTextFileIfExists(path.join(MEMORY_DIR, 'facts.md'));
+  const preferences = readTextFileIfExists(path.join(MEMORY_DIR, 'preferences.md'));
+  return `你是用戶的本地 AI 助理，現在是聊天模式：直接回答用戶這一則訊息。
+這條路徑沒有工具、不能讀寫檔案，也不會建立任務；不要假裝做了任何事。用戶要你動手做事時，請他改用 /task 開頭。
+
+## 記憶
+${facts}
+${preferences}`.trim();
+}
+
+// 唯讀、無工具、單輪：--tools "" 關掉全部內建工具、不載 MCP、不存 session；
+// 不帶 --add-dir，也不吃 CLAUDE_BYPASS_APPROVALS（聊天永遠不跳過權限）。
+function buildClaudeChatArgs() {
+  return ['--print', '--tools', '', '--permission-mode', 'dontAsk', '--strict-mcp-config', '--no-session-persistence'];
+}
+
+function runClaudeChat(text) {
+  const claudeCmd = process.env.CLAUDE_CMD || 'claude';
+  const prompt = `${chatSystemPrompt()}\n\n## 訊息\n${text}\n`;
+  return new Promise((resolve, reject) => {
+    // cwd 放系統暫存目錄：不在 repo 裡，也就不會載入任務用的 CLAUDE.md（那份要求「動手執行」）。
+    const child = spawnClaudeProcess(claudeCmd, buildClaudeChatArgs(), { cwd: os.tmpdir() });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        reject(error);
+      } else {
+        resolve(value);
+      }
+    };
+    const timer = setTimeout(() => {
+      killProcessTree(child);
+      finish(Object.assign(new Error(`chat reply timed out after ${CHAT_TIMEOUT_MS / 1000}s`), { code: 'chat_timeout' }));
+    }, CHAT_TIMEOUT_MS);
+
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      if (stdout.length < MAX_CHAT_REPLY_CHARS * 2) {
+        stdout += chunk;
+      }
+    });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+      stderr = (stderr + chunk).slice(-2000);
+    });
+    child.on('error', (error) => finish(error));
+    child.stdin.on('error', () => {});
+    child.stdin.end(prompt);
+    child.on('close', (code, signal) => {
+      if (code !== 0) {
+        const exitReason = code === null ? `signal ${signal || 'unknown'}` : `code ${code}`;
+        const tail = stderr.trim().slice(-500) || stdout.trim().slice(-500);
+        finish(new Error(`Claude chat exited with ${exitReason}: ${tail || 'no stderr or stdout output'}`));
+        return;
+      }
+      const reply = stdout.trim();
+      if (!reply) {
+        finish(new Error('Claude chat exited 0 with an empty reply'));
+        return;
+      }
+      finish(null, reply);
+    });
+  });
+}
+
+async function generateChatReply(text) {
+  const backend = chatBackend();
+  const startedAt = Date.now();
+  let reply;
+  if (backend === 'mock') {
+    reply = MOCK_CHAT_REPLY;
+  } else if (backend === 'openai_compatible') {
+    const chatId = `chat-${crypto.randomUUID()}`;
+    const messages = [
+      { role: 'system', content: chatSystemPrompt() },
+      { role: 'user', content: text },
+    ];
+    reply = (await requestOpenAICompatibleCompletion({ id: chatId }, CHAT_TIMEOUT_MS, messages)).trim();
+  } else if (backend === 'claude') {
+    reply = await runClaudeChat(text);
+  } else {
+    throw Object.assign(new Error('chat mode is not available for this worker provider yet; use /task to create a task'), {
+      code: 'chat_unsupported_provider',
+    });
+  }
+  if (reply.length > MAX_CHAT_REPLY_CHARS) {
+    reply = `${reply.slice(0, MAX_CHAT_REPLY_CHARS)}\n…（回答過長，已截斷）`;
+  }
+  return { reply, backend, elapsed_ms: Date.now() - startedAt };
+}
+
+function commandReplyText(command, mode) {
+  if (command === '/start') {
+    if (mode === 'task') {
+      return '主腦已上線。傳任何指令給我，我會自主執行。';
+    }
+    if (mode === 'chat') {
+      return '主腦已上線（只聊天模式）。直接傳訊息給我就好。';
+    }
+    return '主腦已上線。直接聊天就好；要我動手做事，用 /task 開頭。';
+  }
+  if (command === '/tasks') {
+    const tasks = listTasks().slice(0, 5);
+    return tasks.map((task) => `[${task.status}] ${task.title}`).join('\n') || '（無任務）';
+  }
+  // /help
+  const lines = [`目前模式：${mode}`];
+  if (mode === 'task') {
+    lines.push('每則訊息都會建成任務。', '/tasks 看最近 5 筆任務');
+  } else if (mode === 'chat') {
+    lines.push('直接傳訊息就會回答，不建任務。', '/tasks 看最近 5 筆任務');
+  } else {
+    lines.push(
+      '直接傳訊息就會回答。',
+      '/task <內容>：建任務，讓我動手做',
+      '/chat <內容>：強制只聊天（例如「幫我…」開頭但只想聊）',
+      '「幫我…」「寫一個…」這類明確要做事、又不是問句的訊息，會自動建任務。',
+      '/tasks 看最近 5 筆任務',
+    );
+  }
+  return lines.join('\n');
+}
+
+function taskCreatedReplyText(task, title, hint) {
+  const lines = [`✅ 收到，任務建立：${title}`, `ID: ${task.id.slice(0, 8)}...`, '執行中，完成後通知你。'];
+  if (hint) {
+    lines.push(CHAT_TASK_HINT);
+  }
+  return lines.join('\n');
+}
+
+// TG、POST /api/chat、webui 對話框共用：依 AIWFF_MODE 路由，回 { ok, kind, mode, reply, ... }。
+// 聊天模型呼叫失敗會拋（由各入口轉成自己的錯誤回覆）；判成任務才會寫 data/tasks。
+async function handleConversationMessage(rawText) {
+  const text = String(rawText || '').trim();
+  const mode = runtimeChatMode();
+  const routed = routeConversationMessage(text, mode);
+
+  if (routed.kind === 'command') {
+    return { ok: true, kind: 'command', mode, command: routed.instruction, reply: commandReplyText(routed.instruction, mode) };
+  }
+
+  if (routed.kind === 'task') {
+    if (!routed.instruction) {
+      return { ok: true, kind: 'usage', mode, reply: '用法：/task <要我做的事>' };
+    }
+    const title = routed.instruction.split(/\r?\n/)[0].slice(0, 60);
+    const task = createTaskFromTg({ title, instruction: routed.instruction });
+    return {
+      ok: true,
+      kind: 'task',
+      mode,
+      task,
+      auto_detected: Boolean(routed.hint),
+      hint: routed.hint ? CHAT_TASK_HINT : null,
+      reply: taskCreatedReplyText(task, title, routed.hint),
+    };
+  }
+
+  if (routed.notice === 'task_disabled') {
+    return { ok: true, kind: 'chat', mode, notice: 'task_disabled', reply: '此安裝只開聊天模式（AIWFF_MODE=chat），不建任務；直接傳訊息就好。' };
+  }
+  if (!routed.instruction) {
+    return { ok: true, kind: 'usage', mode, reply: '用法：/chat <想聊的內容>' };
+  }
+  const result = await generateChatReply(routed.instruction);
+  return { ok: true, kind: 'chat', mode, reply: result.reply, backend: result.backend, elapsed_ms: result.elapsed_ms };
+}
+
+async function handleChatRequest(req, res) {
+  let payload;
+  try {
+    const rawBody = await readBody(req);
+    payload = rawBody ? JSON.parse(rawBody) : {};
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: `Invalid JSON: ${error.message}` });
+    return;
+  }
+  const text = payload && typeof payload.text === 'string' ? payload.text.trim() : '';
+  if (!text) {
+    sendJson(res, 400, { ok: false, error: 'text is required' });
+    return;
+  }
+  if (text.length > MAX_CHAT_INPUT_CHARS) {
+    sendJson(res, 413, { ok: false, error: `text is longer than ${MAX_CHAT_INPUT_CHARS} characters` });
+    return;
+  }
+  let result;
+  try {
+    result = await handleConversationMessage(text);
+  } catch (error) {
+    sendJson(res, 502, { ok: false, kind: 'chat', mode: runtimeChatMode(), error: `chat reply failed: ${error.message}`, code: error.code || null });
+    return;
+  }
+  sendJson(res, result.kind === 'task' ? 201 : 200, result);
+}
+
 async function tgRequest(token, method, body) {
   const payload = JSON.stringify(body || {});
   const base = new URL(TG_API_BASE_URL);
@@ -1940,25 +2188,24 @@ async function pollTelegram() {
       continue;
     }
 
-    const text = msg.text.trim();
-    if (text === '/start') {
-      await tgRequest(token, 'sendMessage', { chat_id: msg.chat.id, text: '主腦已上線。傳任何指令給我，我會自主執行。' });
+    // 路由依 AIWFF_MODE：指令照舊、/task 或明確要做事才建任務、其他直接聊天回答。
+    let result;
+    try {
+      result = await handleConversationMessage(msg.text);
+    } catch (error) {
+      logStderr('telegram-chat', error);
+      await tgRequest(token, 'sendMessage', {
+        chat_id: msg.chat.id,
+        text: `⚠️ 聊天回覆失敗：${String(error.message).slice(0, 500)}\n要我動手做事，請用 /task 開頭。`,
+      });
       continue;
     }
-    if (text === '/tasks') {
-      const tasks = listTasks().slice(0, 5);
-      const lines = tasks.map((task) => `[${task.status}] ${task.title}`).join('\n') || '（無任務）';
-      await tgRequest(token, 'sendMessage', { chat_id: msg.chat.id, text: lines });
-      continue;
+    if (result.kind === 'task') {
+      tgPendingNotify[result.task.id] = msg.chat.id;
     }
-
-    const title = text.split(/\r?\n/)[0].slice(0, 60);
-    const task = createTaskFromTg({ title, instruction: text });
-    tgPendingNotify[task.id] = msg.chat.id;
-    await tgRequest(token, 'sendMessage', {
-      chat_id: msg.chat.id,
-      text: `✅ 收到，任務建立：${title}\nID: ${task.id.slice(0, 8)}...\n執行中，完成後通知你。`,
-    });
+    const replyText =
+      result.reply.length > TG_MAX_MESSAGE_CHARS ? `${result.reply.slice(0, TG_MAX_MESSAGE_CHARS)}\n…（已截斷）` : result.reply;
+    await tgRequest(token, 'sendMessage', { chat_id: msg.chat.id, text: replyText });
   }
 }
 
@@ -2130,6 +2377,17 @@ async function handleRequest(req, res) {
       return;
     }
     await createTask(req, res);
+    return;
+  }
+
+  // 聊天入口：跟 TG 同一套路由。會花模型呼叫、也可能建任務，所以跟 POST /api/tasks 一樣要寫入授權。
+  if (req.method === 'POST' && url.pathname === '/api/chat') {
+    const writeAccess = verifyWriteAccess(req);
+    if (!writeAccess.ok) {
+      sendJson(res, writeAccess.status, { ok: false, error: writeAccess.error });
+      return;
+    }
+    await handleChatRequest(req, res);
     return;
   }
 
@@ -2306,6 +2564,10 @@ module.exports = {
   writeAgyPromptFile,
   killProcessTree,
   createRuntimeServer,
+  // 聊天模式：模式讀法與 Claude 聊天參數開出入口，才驗得到「無工具、不吃 bypass」。
+  runtimeChatMode,
+  buildClaudeChatArgs,
+  CHAT_TASK_HINT,
   RUNTIME_TOKEN_COOKIE,
   runtimeTokenCookieName,
   MAX_TASK_RETRIES,
