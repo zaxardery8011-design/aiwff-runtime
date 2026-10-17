@@ -570,6 +570,9 @@ function taskSummary(task) {
 
 function taskEventSummary(task) {
   if (task.status === 'blocked') {
+    if (task.env_hint) {
+      return `卡住（環境問題）：${task.env_hint}`;
+    }
     return task.blocked_reason ? `卡住：${task.blocked_reason}` : '卡住';
   }
   if (task.status === 'done') {
@@ -1341,7 +1344,7 @@ function notifyTelegramTaskDone(task) {
   if (task.status === 'done') {
     resultText = `✅ 任務完成：${task.title}\n結果：${task.artifact_path}`;
   } else if (task.status === 'blocked') {
-    resultText = `⚠️ 任務卡住：${task.title}\n原因：${task.blocked_reason || '未知'}`;
+    resultText = `⚠️ 任務卡住：${task.title}\n原因：${task.env_hint ? `環境問題，${task.env_hint}` : task.blocked_reason || '未知'}`;
   } else {
     resultText = `❌ 任務失敗：${task.title}\n原因：${task.error || '未知'}`;
   }
@@ -1443,6 +1446,86 @@ function buildCheckpointPromptSection(task) {
     }
   }
   return lines.join('\n');
+}
+
+// worker 失敗時先判斷是不是「環境」的問題：登入過期、找不到 worker 程式、權限不足、網路不通。
+// 這幾種重跑同一棒也不會好（網路除外），而且要人去修的是機器，不是任務本身；
+// 跟任務自己做錯混在 failed 裡，看帳的人會去改任務內容，白忙一場。
+// 只看 worker 非 0 退出（或根本起不來）時的輸出；exit 0 沒產出那條不判，那是任務層的事。
+const ENV_FAILURE_RULES = [
+  {
+    cause: 'missing_tool',
+    retryable: false,
+    hint: '找不到 worker 程式：確認 CLI 已安裝、在 PATH 上，或把 CLAUDE_CMD／AGY_CMD 設成完整路徑',
+    pattern: /is not recognized as an internal or external command|不是內部或外部命令|: command not found|not found in PATH/i,
+  },
+  {
+    cause: 'auth',
+    retryable: false,
+    hint: '登入過期或金鑰無效：重新登入 worker CLI（例如在終端機跑 claude 再 /login）或更新金鑰，再續跑這個任務',
+    pattern: /Failed to authenticate|authentication_error|invalid[ _-]?(x-)?api[ _-]?key|OAuth token (has )?expired|token has expired|not logged in|please run \/login|please log ?in/i,
+  },
+  {
+    cause: 'permission',
+    retryable: false,
+    hint: '權限不足：worker 讀寫檔案或執行時被系統擋下，檢查資料夾權限或防毒／安全軟體設定',
+    pattern: /\bEACCES\b|\bEPERM\b|permission denied|access is denied|operation not permitted|存取被拒/i,
+  },
+  {
+    cause: 'network',
+    retryable: true,
+    hint: '網路不通：worker 連不到服務端，檢查網路、代理或防火牆設定',
+    pattern: /\bECONNREFUSED\b|\bECONNRESET\b|\bETIMEDOUT\b|\bENOTFOUND\b|\bEAI_AGAIN\b|getaddrinfo|socket hang up|Connection error|fetch failed|network is unreachable|Could not resolve host/i,
+  },
+];
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// 回傳 { cause, retryable, hint } 或 null（null＝不是環境問題，照原本的失敗流程走）。
+function classifyEnvFailure(output, { spawnError = null, command = '' } = {}) {
+  const byCause = (cause) => {
+    const rule = ENV_FAILURE_RULES.find((entry) => entry.cause === cause);
+    return { cause: rule.cause, retryable: rule.retryable, hint: rule.hint };
+  };
+  const errorCode = spawnError && spawnError.code;
+  if (errorCode === 'ENOENT') {
+    return byCause('missing_tool');
+  }
+  if (errorCode === 'EACCES' || errorCode === 'EPERM') {
+    return byCause('permission');
+  }
+  const text = `${spawnError ? spawnError.message : ''}\n${output || ''}`;
+  // Windows 的 cmd 找不到指令時，訊息跟著系統語系走（中文版在管道裡還會是亂碼），
+  // 但開頭一定是用單引號包起來的指令名稱，這個形狀不受語系影響。
+  if (command && new RegExp(`^'${escapeRegExp(String(command).replace(/^"|"$/g, ''))}' `, 'm').test(text)) {
+    return byCause('missing_tool');
+  }
+  for (const rule of ENV_FAILURE_RULES) {
+    if (rule.pattern.test(text)) {
+      return byCause(rule.cause);
+    }
+  }
+  return null;
+}
+
+// 環境問題的收尾：能重試的（網路）先交回一般 retry；其餘直接停成 blocked，
+// 不燒重試額度、不算任務失敗。回傳 true＝已經處理掉，呼叫端不要再往下走。
+function settleEnvFailure(currentTask, failureReason, envFailure, attempt) {
+  if (!envFailure || (envFailure.retryable && attempt <= MAX_TASK_RETRIES)) {
+    return false;
+  }
+  appendProgressText(currentTask.id, `Environment problem (${envFailure.cause}): ${envFailure.hint}`);
+  const blockedTask = updateTaskStatus(currentTask, 'blocked', {
+    blocked_reason: 'environment',
+    env_cause: envFailure.cause,
+    env_hint: envFailure.hint,
+    last_error: failureReason,
+    retry_count: attempt - 1,
+  });
+  notifyTelegramTaskDone(blockedTask);
+  return true;
 }
 
 function shouldUseDangerousClaudeBypass() {
@@ -1569,6 +1652,15 @@ function spawnClaudeWorker(task, attempt = 1) {
     if (!failureReason) {
       const doneTask = updateTaskStatus(currentTask, 'done', { artifact_path: artifactResultRef(task.id) });
       notifyTelegramTaskDone(doneTask);
+      return;
+    }
+
+    // 環境問題（登入、找不到程式、權限、網路）先分出來：不算任務失敗，停成 blocked 讓人去修機器。
+    const envFailure =
+      spawnError || code !== 0
+        ? classifyEnvFailure(`${stderr.slice(-4000)}\n${stdout.slice(-4000)}`, { spawnError, command: claudeCmd })
+        : null;
+    if (settleEnvFailure(currentTask, failureReason, envFailure, attempt)) {
       return;
     }
 
@@ -1730,6 +1822,14 @@ function spawnAgyWorker(task, attempt = 1) {
     if (!failureReason) {
       const doneTask = updateTaskStatus(currentTask, 'done', { artifact_path: artifactResultRef(task.id) });
       notifyTelegramTaskDone(doneTask);
+      return;
+    }
+
+    const envFailure =
+      spawnError || code !== 0
+        ? classifyEnvFailure(`${stderr.slice(-4000)}\n${stdout.slice(-4000)}`, { spawnError, command: agyCmd })
+        : null;
+    if (settleEnvFailure(currentTask, failureReason, envFailure, attempt)) {
       return;
     }
 
@@ -1937,6 +2037,8 @@ const RUN_RECEIPT_FIELDS = [
   'timeout_kind',
   'timeout_idle_sec',
   'retry_count',
+  'env_cause',
+  'env_hint',
 ];
 
 function resumeTask(taskId) {
@@ -2421,6 +2523,9 @@ module.exports = {
   readCheckpointSteps,
   checkpointPath,
   buildClaudePrompt,
+  // worker 失敗的環境判定是純函式：四類環境原因加「不是環境問題」都要驗得到。
+  classifyEnvFailure,
+  taskEventSummary,
   MAX_TASK_RETRIES,
   RETRY_BACKOFF_MS,
   TG_API_BASE_URL,

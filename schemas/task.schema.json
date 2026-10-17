@@ -74,6 +74,14 @@
     "resume_count": {
       "type": "integer",
       "minimum": 0
+    },
+    "env_cause": {
+      "type": "string",
+      "enum": ["auth", "missing_tool", "permission", "network"]
+    },
+    "env_hint": {
+      "type": "string",
+      "minLength": 1
     }
   }
 }
