@@ -1005,14 +1005,14 @@
       </section>
 
       <section id="view-new-task" class="view">
-        <div class="task-chat" aria-label="用對話建立任務">
+        <div class="task-chat" aria-label="對話與建立任務">
           <div class="chat-messages" id="task-chat-messages" aria-live="polite"></div>
           <div class="chat-login-notice" id="task-chat-login" role="status" hidden>
-            尚未登入，不能建立任務。請到跑 <code>npm run web</code> 的終端機，點「登入 WebUI：」後面那條登入連結。
+            尚未登入，不能對話或建立任務。請到跑 <code>npm run web</code> 的終端機，點「登入 WebUI：」後面那條登入連結。
           </div>
           <div class="chat-input" id="task-chat-input-box">
             <div class="chat-input-row">
-              <textarea id="task-chat-text" rows="1" placeholder="輸入新任務… Enter 送出 / Shift+Enter 換行"></textarea>
+              <textarea id="task-chat-text" rows="1" placeholder="輸入訊息… Enter 送出 / Shift+Enter 換行"></textarea>
               <button class="chat-submit" id="task-chat-send" type="button" title="送出" aria-label="送出">▶</button>
               <span class="chat-state-badge" id="task-chat-status">IDLE · 待機</span>
             </div>
@@ -1158,7 +1158,7 @@
       chatMessages: [
         {
           role: 'assistant',
-          text: '這裡是 public 版任務入口。輸入一句新任務，我會用既有 task 生命週期建立任務並回報進度。',
+          text: '輸入一句話送出，預設每則訊息都會建成任務，並在這裡回報進度。設了 AIWFF_MODE=both 時，一般訊息直接回答，/task 開頭（或「幫我…」「寫一個…」這類明確指令）才建任務。',
           meta: '系統 · 待機'
         }
       ]
@@ -1168,6 +1168,7 @@
       health: '/api/health',
       hud: '/api/hud',
       tasks: '/api/tasks',
+      chat: '/api/chat',
       events: '/api/events',
       inbox: '/api/inbox',
       memory: '/api/memory',
@@ -1198,6 +1199,7 @@
       ok: '狀態',
       port: '連接埠',
       worker_mode: 'Worker 模式',
+      chat_mode: '聊天模式',
       default_worker_timeout_sec: '預設逾時秒數',
       max_worker_timeout_sec: '最大逾時秒數',
       memory_source: '記憶來源',
@@ -1210,6 +1212,7 @@
       inbox_dir: '收件匣目錄',
       memory_dir: '記憶目錄',
       worker_mode: 'Worker 模式',
+      chat_mode: '聊天模式',
       port: '連接埠',
       doctor_fetch: '診斷報告'
     };
@@ -1368,12 +1371,6 @@
       if (extra && extra.answer) message.answer = true;
       state.chatMessages.push(message);
       if (!deferRender) renderChat();
-    }
-
-    function taskTitleFromText(text) {
-      var firstLine = String(text || '').split(/\r?\n/).find(function(line) { return line.trim(); }) || '新任務';
-      var title = firstLine.trim().replace(/\s+/g, ' ');
-      return title.length > 80 ? title.slice(0, 77) + '...' : title;
     }
 
     function taskStatusMessage(task, created) {
@@ -2399,27 +2396,33 @@
       if (!text || state.chatBusy || state.loggedIn === false) return;
       state.chatBusy = true;
       if (button) button.disabled = true;
-      setChatBadge('建立中 · 送出中');
+      setChatBadge('送出中 · 等回覆');
       appendChatMessage('user', text, timeMeta('你'));
       try {
-        var created = await fetchJson(routes.tasks, {
+        // POST /api/chat 跟 TG 同一套路由：一般訊息直接回答，/task 或明確要做事才建任務。
+        var data = await fetchJson(routes.chat, {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            title: taskTitleFromText(text),
-            instruction: text
-          })
+          body: JSON.stringify({ text: text })
         });
-        rememberChatTask(created);
-        appendChatMessage('assistant', taskStatusMessage(created, true), timeMeta('系統'));
+        if (data.kind === 'task' && data.task) {
+          rememberChatTask(data.task);
+          var lines = taskStatusMessage(data.task, true);
+          if (data.hint) lines += '\n' + data.hint;
+          appendChatMessage('assistant', lines, timeMeta('系統'));
+        } else if (data.kind === 'chat' && !data.notice) {
+          appendChatMessage('assistant', String(data.reply || '').trim() || '（回答是空的）', timeMeta('回答'), false, { answer: true });
+        } else {
+          appendChatMessage('assistant', String(data.reply || ''), timeMeta('系統'));
+        }
         if (input) {
           input.value = '';
           input.style.height = 'auto';
         }
         await refresh();
       } catch (error) {
-        appendChatMessage('assistant', '建立失敗：' + error.message, timeMeta('系統'));
+        appendChatMessage('assistant', '送出失敗：' + error.message, timeMeta('系統'));
         // runtime 重啟會換 token，舊 cookie 失效 → 重查登入狀態。
         await refreshSession();
       } finally {
