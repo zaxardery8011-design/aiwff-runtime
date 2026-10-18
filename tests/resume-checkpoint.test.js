@@ -581,6 +581,56 @@ test('resume is refused with max_resumes once resume_count reaches MAX_TASK_RESU
   }
 });
 
+// 假 worker：從不寫 CHECKPOINT（像 OpenAI 相容那條），每棒都直接失敗退出。
+function noCheckpointClaudeScript() {
+  return `
+process.stdin.resume();
+process.stdin.on('end', () => { console.error('worker without checkpoint failed'); process.exit(1); });
+`;
+}
+
+test('a task that never wrote a checkpoint is not refused with no_progress; only MAX_TASK_RESUMES stops it', async () => {
+  resetDataDir();
+  const claudeCmd = writeFakeClaude('no-checkpoint-claude', noCheckpointClaudeScript());
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    ENABLE_REAL_CLAUDE_WORKER: '1',
+    CLAUDE_CMD: claudeCmd,
+    MAX_TASK_RETRIES: '0',
+    MAX_TASK_RESUMES: '5',
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'no checkpoint',
+      instruction: 'never writes CHECKPOINT.txt',
+      timeout_sec: 20,
+    }, AUTH_HEADERS);
+    await waitForTaskStatus(runtime.port, created.id, ['failed']);
+    for (let i = 1; i <= 5; i += 1) {
+      const accepted = await resumeWhenPreviousRunEnds(runtime.port, created.id);
+      assert.equal(accepted.statusCode, 202, `resume #${i}`);
+      assert.equal(accepted.body.task.resume_count, i);
+      assert.equal(accepted.body.task.resume_checkpoint_steps, 0);
+      assert.equal(accepted.body.task.resume_no_progress_count, 0);
+      const failed = await waitForTaskStatus(runtime.port, created.id, ['failed']);
+      assert.equal(failed.resume_count, i);
+    }
+    let refused;
+    const deadline = Date.now() + 8000;
+    do {
+      refused = await postRaw(runtime.port, `/api/tasks/${created.id}/resume`);
+      if (refused.body.cause === 'previous_worker_alive') await sleep(150);
+    } while (refused.body.cause === 'previous_worker_alive' && Date.now() < deadline);
+    assert.equal(refused.statusCode, 409);
+    assert.equal(refused.body.cause, 'max_resumes');
+    assert.equal(refused.body.resume_count, 5);
+    assert.equal(refused.body.max_resumes, 5);
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
 test('task schema accepts error_origin written by the daily-iterate branch (F7)', () => {
   const now = new Date().toISOString();
   const task = { id: '00000000-0000-4000-8000-0000000000d3', title: 't', instruction: 'i', status: 'failed', error: 'x', error_origin: 'worker', created_at: now, updated_at: now };

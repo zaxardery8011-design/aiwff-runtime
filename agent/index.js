@@ -2246,7 +2246,8 @@ const RUN_RECEIPT_FIELDS = [
 const MAX_RESUME_REASON_CHARS = 500;
 // 續跑的煞車：主判準是進展。每次續跑記下當下 checkpoint 去重步數（resume_checkpoint_steps），
 // 下一次續跑時步數沒增加就把 resume_no_progress_count 加 1，連續 NO_PROGRESS_LIMIT 次沒增加回 409 no_progress。
-// 第一次續跑沒有基準，不算。MAX_TASK_RESUMES 是寬鬆的最後保險，給「每棒都多記一步、卻永遠做不完」的情況。
+// 第一次續跑沒有基準，不算；從沒寫過 checkpoint 的 task 也不算（見 resumeTask）。
+// MAX_TASK_RESUMES 是寬鬆的最後保險，給「每棒都多記一步、卻永遠做不完」和「根本不寫 checkpoint」的情況。
 const NO_PROGRESS_LIMIT = 2;
 const MAX_TASK_RESUMES = envInt('MAX_TASK_RESUMES', 20, { min: 1, max: 1000 });
 
@@ -2296,8 +2297,11 @@ function resumeTask(taskId) {
   }
   const checkpoint = readCheckpoint(taskId);
   const steps = checkpoint.steps;
+  // 從沒寫過 checkpoint 的 worker（例如 OpenAI 相容那條）步數恆為 0，用步數判進展會誤擋正常長任務；
+  // 這種 task 只套 MAX_TASK_RESUMES。曾經出現過步數 >0（現在或上次續跑記下的）才套 no_progress。
+  const everCheckpointed = steps.length > 0 || task.resume_checkpoint_steps > 0;
   let noProgressCount = 0;
-  if (Number.isInteger(task.resume_checkpoint_steps) && steps.length <= task.resume_checkpoint_steps) {
+  if (everCheckpointed && Number.isInteger(task.resume_checkpoint_steps) && steps.length <= task.resume_checkpoint_steps) {
     noProgressCount = (Number.isInteger(task.resume_no_progress_count) ? task.resume_no_progress_count : 0) + 1;
   }
   if (noProgressCount >= NO_PROGRESS_LIMIT) {
