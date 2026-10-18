@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
@@ -6,6 +7,10 @@ const { spawn } = require('child_process');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const PREFERRED_PORT = Number(process.env.PORT || 3100);
+// 寫入 API 要 runtime token：daemon 沒設 AIWFF_RUNTIME_TOKEN 時會自己產生一個 demo 拿不到的值，
+// 所以 demo 先決定 token（沿用環境變數，沒有就自產），同時交給 daemon 並帶在每個請求上。
+const RUNTIME_TOKEN = process.env.AIWFF_RUNTIME_TOKEN || crypto.randomBytes(24).toString('hex');
+const AUTH_HEADERS = { 'x-aiwff-runtime-token': RUNTIME_TOKEN };
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -125,7 +130,7 @@ async function waitForHealth(port, daemon) {
 async function waitForTaskDone(port, taskId) {
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
-    const response = await requestJson(port, 'GET', `/api/tasks/${taskId}`);
+    const response = await requestJson(port, 'GET', `/api/tasks/${taskId}`, null, AUTH_HEADERS);
     if (response.task.status === 'done') {
       return response.task;
     }
@@ -166,7 +171,7 @@ async function main() {
   const port = await choosePort();
   const daemon = spawn('node', ['agent/index.js'], {
     cwd: ROOT_DIR,
-    env: { ...process.env, PORT: String(port), MOCK_WORKER: '1' },
+    env: { ...process.env, PORT: String(port), MOCK_WORKER: '1', AIWFF_RUNTIME_TOKEN: RUNTIME_TOKEN },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -178,7 +183,7 @@ async function main() {
     const created = await requestJson(port, 'POST', '/api/tasks', {
       title: 'Demo task',
       instruction: 'Run the mock task lifecycle from scripts/demo.js',
-    });
+    }, AUTH_HEADERS);
     const task = await waitForTaskDone(port, created.id);
     const artifactPath = path.join(ROOT_DIR, 'data', 'artifacts', `${task.id}.result.json`);
     const readback = readBackArtifact(artifactPath, task.id);
