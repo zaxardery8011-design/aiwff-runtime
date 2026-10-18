@@ -2244,6 +2244,11 @@ const RUN_RECEIPT_FIELDS = [
 ];
 // last_error 只留最近一次的原因（第幾次續跑看 resume_count），而且限長，不會一棒一棒越包越長。
 const MAX_RESUME_REASON_CHARS = 500;
+// 續跑的煞車：主判準是進展。每次續跑記下當下 checkpoint 去重步數（resume_checkpoint_steps），
+// 下一次續跑時步數沒增加就把 resume_no_progress_count 加 1，連續 NO_PROGRESS_LIMIT 次沒增加回 409 no_progress。
+// 第一次續跑沒有基準，不算。MAX_TASK_RESUMES 是寬鬆的最後保險，給「每棒都多記一步、卻永遠做不完」的情況。
+const NO_PROGRESS_LIMIT = 2;
+const MAX_TASK_RESUMES = envInt('MAX_TASK_RESUMES', 20, { min: 1, max: 1000 });
 
 function resumeRefusal(statusCode, cause, error, extra = {}) {
   return { statusCode, payload: { ok: false, cause, error, ...extra } };
@@ -2280,6 +2285,29 @@ function resumeTask(taskId) {
       { pid: alivePid },
     );
   }
+  const resumeCount = Number.isInteger(task.resume_count) ? task.resume_count : 0;
+  if (resumeCount >= MAX_TASK_RESUMES) {
+    return resumeRefusal(
+      409,
+      'max_resumes',
+      `已續跑 ${resumeCount} 次，到上限 ${MAX_TASK_RESUMES}（MAX_TASK_RESUMES），不再續跑；請檢查任務本身或拆小再重開`,
+      { resume_count: resumeCount, max_resumes: MAX_TASK_RESUMES },
+    );
+  }
+  const checkpoint = readCheckpoint(taskId);
+  const steps = checkpoint.steps;
+  let noProgressCount = 0;
+  if (Number.isInteger(task.resume_checkpoint_steps) && steps.length <= task.resume_checkpoint_steps) {
+    noProgressCount = (Number.isInteger(task.resume_no_progress_count) ? task.resume_no_progress_count : 0) + 1;
+  }
+  if (noProgressCount >= NO_PROGRESS_LIMIT) {
+    return resumeRefusal(
+      409,
+      'no_progress',
+      `連續 ${noProgressCount} 次續跑 checkpoint 步數都沒增加（停在 ${steps.length} 步），不再續跑；請檢查 worker 為什麼沒有往下做`,
+      { checkpoint_steps: steps.length, no_progress_count: noProgressCount },
+    );
+  }
   const lastError = typeof task.last_error === 'string' && !task.last_error.startsWith('resumed after ') ? task.last_error : '';
   const previousReason = (
     task.blocked_reason
@@ -2291,7 +2319,9 @@ function resumeTask(taskId) {
     delete next[field];
   }
   next.last_error = `resumed after ${previousReason}`;
-  next.resume_count = (Number.isInteger(task.resume_count) ? task.resume_count : 0) + 1;
+  next.resume_count = resumeCount + 1;
+  next.resume_checkpoint_steps = steps.length;
+  next.resume_no_progress_count = noProgressCount;
   const pendingTask = { ...next, status: 'pending', updated_at: nowIso() };
   // 先確認寫得回去才放 worker：寫不成的話磁碟上還是 blocked／failed，worker 的結果也寫不回來，
   // 而且 409 防重入失效（連發兩次就是兩棒並行）。做法跟 createTaskObject 一樣，寫不成就不放。
@@ -2312,8 +2342,6 @@ function resumeTask(taskId) {
   if (!safeWriteJsonFile(taskPath(taskId), pendingTask)) {
     return resumeRefusal(500, 'task_write_failed', '任務狀態寫不進去，不能續跑');
   }
-  const checkpoint = readCheckpoint(taskId);
-  const steps = checkpoint.steps;
   appendProgressText(
     taskId,
     `Resume #${pendingTask.resume_count}: ${steps.length} checkpoint step(s) carried over${steps.length ? ` (${steps.join(', ')})` : ''}`,

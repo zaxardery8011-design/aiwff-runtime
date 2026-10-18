@@ -515,6 +515,72 @@ test('resume refuses with a named cause and starts no worker when the task canno
   }
 });
 
+test('resume is refused with no_progress after two resumes in a row where the checkpoint did not grow', async () => {
+  resetDataDir();
+  const stuckId = '00000000-0000-4000-8000-0000000000e1';
+  const onceId = '00000000-0000-4000-8000-0000000000e2';
+  const now = new Date().toISOString();
+  const base = { instruction: 'x', status: 'blocked', blocked_reason: 'timeout', created_at: now, updated_at: now, resume_count: 1, resume_checkpoint_steps: 1 };
+  // 上一次續跑時 1 步、那一棒又沒增加過一次；這次還是 1 步 → 連續第 2 次沒增加。
+  writeTaskFile({ ...base, id: stuckId, title: 'stuck', resume_no_progress_count: 1 });
+  // 只有一次沒增加：放行，計數記成 1。
+  writeTaskFile({ ...base, id: onceId, title: 'stalled once', resume_no_progress_count: 0 });
+  for (const id of [stuckId, onceId]) {
+    fs.mkdirSync(path.join(WORKSPACES_DIR, id), { recursive: true });
+    fs.writeFileSync(path.join(WORKSPACES_DIR, id, 'CHECKPOINT.txt'), 'step-1\n');
+  }
+  const runtime = await startDaemon({ MOCK_WORKER: '1' });
+
+  try {
+    const refused = await postRaw(runtime.port, `/api/tasks/${stuckId}/resume`);
+    assert.equal(refused.statusCode, 409);
+    assert.equal(refused.body.cause, 'no_progress');
+    assert.equal(refused.body.checkpoint_steps, 1);
+    assert.equal(refused.body.no_progress_count, 2);
+    const { task } = await requestJson(runtime.port, 'GET', `/api/tasks/${stuckId}`);
+    assert.equal(task.status, 'blocked', 'a refused resume leaves the task as it was');
+    assert.equal(task.resume_count, 1);
+    assert.doesNotMatch(progressText(stuckId), /Mock worker|Resume #/, 'no worker may start for a resume that was refused');
+
+    const accepted = await postRaw(runtime.port, `/api/tasks/${onceId}/resume`);
+    assert.equal(accepted.statusCode, 202);
+    assert.equal(accepted.body.task.resume_count, 2);
+    assert.equal(accepted.body.task.resume_no_progress_count, 1);
+    assert.equal(accepted.body.task.resume_checkpoint_steps, 1);
+    await waitForTaskStatus(runtime.port, onceId, ['done']);
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
+test('resume is refused with max_resumes once resume_count reaches MAX_TASK_RESUMES, even while making progress', async () => {
+  resetDataDir();
+  const taskId = '00000000-0000-4000-8000-0000000000e3';
+  const now = new Date().toISOString();
+  writeTaskFile({
+    id: taskId, title: 'many resumes', instruction: 'x', status: 'blocked', blocked_reason: 'timeout', created_at: now, updated_at: now,
+    resume_count: 2, resume_checkpoint_steps: 1, resume_no_progress_count: 0,
+  });
+  fs.mkdirSync(path.join(WORKSPACES_DIR, taskId), { recursive: true });
+  // 步數有增加（1 → 2），擋下它的只能是上限。
+  fs.writeFileSync(path.join(WORKSPACES_DIR, taskId, 'CHECKPOINT.txt'), 'step-1\nstep-2\n');
+  const runtime = await startDaemon({ MOCK_WORKER: '1', MAX_TASK_RESUMES: '2' });
+
+  try {
+    const refused = await postRaw(runtime.port, `/api/tasks/${taskId}/resume`);
+    assert.equal(refused.statusCode, 409);
+    assert.equal(refused.body.cause, 'max_resumes');
+    assert.equal(refused.body.resume_count, 2);
+    assert.equal(refused.body.max_resumes, 2);
+    const { task } = await requestJson(runtime.port, 'GET', `/api/tasks/${taskId}`);
+    assert.equal(task.status, 'blocked');
+    assert.equal(task.resume_count, 2);
+    assert.doesNotMatch(progressText(taskId), /Mock worker|Resume #/);
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
 test('task schema accepts error_origin written by the daily-iterate branch (F7)', () => {
   const now = new Date().toISOString();
   const task = { id: '00000000-0000-4000-8000-0000000000d3', title: 't', instruction: 'i', status: 'failed', error: 'x', error_origin: 'worker', created_at: now, updated_at: now };

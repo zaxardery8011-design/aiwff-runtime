@@ -79,6 +79,14 @@
       "type": "integer",
       "minimum": 0
     },
+    "resume_checkpoint_steps": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "resume_no_progress_count": {
+      "type": "integer",
+      "minimum": 0
+    },
     "env_cause": {
       "type": "string",
       "enum": ["auth", "missing_tool", "permission", "network"]
