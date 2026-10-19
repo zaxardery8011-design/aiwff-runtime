@@ -697,6 +697,7 @@ function readProgressLines(taskId, limit = 30) {
   }
   return fs
     .readFileSync(filePath, 'utf8')
+    .replace(/^﻿/, '')
     .split(/\r?\n/)
     .filter(Boolean)
     .slice(-limit)
@@ -733,8 +734,10 @@ function readProgressEntries(taskId, limit = 30) {
   if (!fs.existsSync(filePath)) {
     return null;
   }
+  // 外部 worker 自己寫的進度檔可能帶 UTF-8 BOM；不去掉的話第一筆 JSON.parse 失敗，文字變生 JSON、時間戳丟掉。
   return fs
     .readFileSync(filePath, 'utf8')
+    .replace(/^﻿/, '')
     .split(/\r?\n/)
     .filter(Boolean)
     .slice(-limit)

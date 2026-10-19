@@ -1941,6 +1941,28 @@ test('readProgressEntries / countProgressLines: entries 切上限、count 數整
   assert.equal(countProgressLines(`missing-${uniqueSuffix()}`), null);
 });
 
+test('readProgressEntries: 進度檔開頭帶 UTF-8 BOM 時，第一筆的文字與時間戳照常讀到', () => {
+  const { readProgressEntries } = agentModule;
+  fs.mkdirSync(TASKS_DIR, { recursive: true });
+
+  const taskId = `bom-probe-${uniqueSuffix()}`;
+  const progressFile = path.join(TASKS_DIR, `${taskId}.progress.jsonl`);
+  // 外部 worker 用 PS5.1 的 Out-File -Encoding utf8 寫進度時，檔頭會多一個 BOM
+  const lines = [
+    JSON.stringify({ ts: 1700000000000, text: 'first' }),
+    JSON.stringify({ ts: 1700000001000, text: 'second' }),
+  ];
+  fs.writeFileSync(progressFile, `﻿${lines.join('\n')}\n`);
+
+  try {
+    const entries = readProgressEntries(taskId, 30);
+    assert.deepEqual(entries.map((e) => e.text), ['first', 'second'], JSON.stringify(entries));
+    assert.equal(entries[0].ts, 1700000000000);
+  } finally {
+    fs.rmSync(progressFile, { force: true });
+  }
+});
+
 test('collectInboxEvents: 回未切上限的全量並依 ts 新到舊排序，壞檔降級成具名 unreadable 而不是整趟炸掉', () => {
   const { collectInboxEvents, INBOX_LIST_CAP } = agentModule;
   fs.mkdirSync(INBOX_DIR, { recursive: true });
