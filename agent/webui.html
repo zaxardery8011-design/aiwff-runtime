@@ -1085,7 +1085,7 @@
             <div id="inbox-list" class="panel-body"></div>
           </section>
           <section class="panel">
-            <h2>卡住</h2>
+            <h2>等你處理（卡住／失敗）</h2>
             <div id="blocked-list" class="panel-body"></div>
           </section>
         </div>
@@ -1636,8 +1636,9 @@
       }).join('') : empty('收件匣目前是空的');
       setHtml('inbox-list', truncationRow(state.truncation.inbox) + inboxHtml);
 
-      var blocked = sortedTasks().filter(function(task) { return task.status === 'blocked'; });
-      setHtml('blocked-list', blocked.length ? blocked.map(taskRow).join('') : empty('目前沒有卡住任務'));
+      // 「等你處理」清單（借鏡 tuios 共用 Inbox）：卡住和失敗的任務都要人看，集中在同一欄；只讀已抓到的任務，不新增 API。
+      var attention = sortedTasks().filter(function(task) { return task.status === 'blocked' || task.status === 'failed'; });
+      setHtml('blocked-list', attention.length ? attention.map(taskRow).join('') : empty('目前沒有等你處理的任務'));
     }
 
     function renderMemory() {
