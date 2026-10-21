@@ -988,6 +988,26 @@ function failedTaskBacklog(tasks) {
   return { count: failed.length, oldest_at: oldestAt };
 }
 
+// 任務目錄 0 筆時，health 分不出「還沒建過任務」和「建過但被清空了」，兩種都長得
+// 像健康的新安裝。建過任務就在 data/ 根下留一個標記（不放在 tasks/ 裡，只清 tasks/
+// 不會連標記一起清掉）；整個 data/ 被砍則跟全新安裝分不開，這裡不假裝分得開。
+const TASK_STORE_MARKER = path.join(DATA_DIR, 'task_store_used.json');
+
+function markTaskStoreUsed() {
+  if (!fs.existsSync(TASK_STORE_MARKER)) {
+    writeJsonFile(TASK_STORE_MARKER, { first_seen_at: nowIso() });
+  }
+}
+
+function taskStoreState(tasks) {
+  if (tasks.length > 0) {
+    // 舊版建的任務沒留過標記：看到有任務就補記，之後清空才認得出來。
+    markTaskStoreUsed();
+    return { state: 'has_tasks', task_count: tasks.length };
+  }
+  return { state: fs.existsSync(TASK_STORE_MARKER) ? 'emptied' : 'never_used', task_count: 0 };
+}
+
 function checkPathReadable(id, dirPath) {
   try {
     fs.accessSync(dirPath, fs.constants.R_OK);
@@ -2194,6 +2214,7 @@ function createTaskObject(title, instruction, options = {}) {
     throw new Error(`task schema violation at create: ${violation}`);
   }
   writeJsonFile(taskPath(task.id), task);
+  markTaskStoreUsed();
   startTaskWorker(task);
   return task;
 }
@@ -2780,12 +2801,22 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/health') {
     // 積壓數讀不到（任務目錄壞掉）也不能讓 health 失敗：回 null 加原因，ok 不變。
     let failedBacklog;
+    let taskStore;
     try {
-      failedBacklog = failedTaskBacklog(listTasks());
+      const tasks = listTasks();
+      failedBacklog = failedTaskBacklog(tasks);
+      taskStore = taskStoreState(tasks);
     } catch (error) {
       failedBacklog = { count: null, oldest_at: null, error: error.message };
+      taskStore = { state: null, task_count: null, error: error.message };
     }
-    sendJson(res, 200, { ok: true, pid: process.pid, uptime: process.uptime(), failed_backlog: failedBacklog });
+    sendJson(res, 200, {
+      ok: true,
+      pid: process.pid,
+      uptime: process.uptime(),
+      failed_backlog: failedBacklog,
+      task_store: taskStore,
+    });
     return;
   }
 
@@ -3046,6 +3077,7 @@ module.exports = {
   appendProgressText,
   listTasks,
   failedTaskBacklog,
+  taskStoreState,
   // 0 筆的具名理由是純函式，開出入口才驗得到「三種 0 分得開」。
   taskQueryZeroReason,
   installProcessGuards,

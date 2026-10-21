@@ -917,6 +917,34 @@ test('health: failed_backlog counts failed tasks and names the oldest, ok stays 
   }
 });
 
+// --- health 分得出「還沒建過任務」和「任務被清空」，兩種 0 筆不再長一樣 ---
+test('health: task_store tells a never-used store from one whose tasks were wiped', async () => {
+  resetDataDir();
+  const runtime = await startDaemon();
+  try {
+    const fresh = await requestJson(runtime.port, 'GET', '/api/health');
+    assert.equal(fresh.ok, true);
+    assert.deepEqual(fresh.task_store, { state: 'never_used', task_count: 0 });
+
+    fs.writeFileSync(path.join(TASKS_DIR, 'store-one.json'), JSON.stringify({
+      id: 'store-one', status: 'done', title: 'x', instruction: 'x',
+      created_at: '2026-10-21T00:00:00.000Z', updated_at: '2026-10-21T00:00:00.000Z',
+    }));
+    const used = await requestJson(runtime.port, 'GET', '/api/health');
+    assert.deepEqual(used.task_store, { state: 'has_tasks', task_count: 1 });
+
+    // 只清 tasks/：標記在 data/ 根下，清空要認得出來，ok 仍是 liveness 語意。
+    fs.rmSync(TASKS_DIR, { recursive: true, force: true });
+    fs.mkdirSync(TASKS_DIR, { recursive: true });
+    const wiped = await requestJson(runtime.port, 'GET', '/api/health');
+    assert.equal(wiped.ok, true);
+    assert.deepEqual(wiped.task_store, { state: 'emptied', task_count: 0 });
+  } finally {
+    await stopDaemon(runtime.daemon);
+    resetDataDir();
+  }
+});
+
 // --- (4) 讀取端遇未知 row type 跳筆、不整條凍結 ---
 test('ledger reader: a task row that parses but is not an object does not freeze the whole list', () => {
   fs.mkdirSync(TASKS_DIR, { recursive: true });
