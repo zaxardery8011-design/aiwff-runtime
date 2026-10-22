@@ -2251,7 +2251,9 @@ const MAX_RESUME_REASON_CHARS = 500;
 const NO_PROGRESS_LIMIT = 2;
 const MAX_TASK_RESUMES = envInt('MAX_TASK_RESUMES', 20, { min: 1, max: 1000 });
 
-function resumeRefusal(statusCode, cause, error, extra = {}) {
+// 被拒的續跑也在進度裡留一行：不然只有按下續跑的那個 HTTP 回應知道為什麼沒動，事後翻進度看不出來。
+function resumeRefusal(taskId, statusCode, cause, error, extra = {}) {
+  appendProgressText(taskId, `Resume refused (${cause}): ${error}`);
   return { statusCode, payload: { ok: false, cause, error, ...extra } };
 }
 
@@ -2265,7 +2267,7 @@ function resumeTask(taskId) {
   } catch (error) {
     // 檔在但讀不動：清單上會顯示成「任務檔無法讀取」，這裡不能回「找不到任務」。
     logStderr(`resume refused, task file unreadable (${taskId})`, error);
-    return resumeRefusal(409, 'task_file_unreadable', `任務檔讀不動，不能續跑：${error.message}`);
+    return resumeRefusal(taskId, 409, 'task_file_unreadable', `任務檔讀不動，不能續跑：${error.message}`);
   }
   if (!task) {
     return { statusCode: 404, payload: { ok: false, error: '找不到任務' } };
@@ -2280,6 +2282,7 @@ function resumeTask(taskId) {
   const alivePid = liveWorkerPid(taskId);
   if (alivePid) {
     return resumeRefusal(
+      taskId,
       409,
       'previous_worker_alive',
       `上一棒 worker（pid ${alivePid}）還沒結束，等它結束再續跑；確定那個 pid 已經不是這個任務的 worker，可以刪掉 ${workerPidPath(taskId)}`,
@@ -2289,6 +2292,7 @@ function resumeTask(taskId) {
   const resumeCount = Number.isInteger(task.resume_count) ? task.resume_count : 0;
   if (resumeCount >= MAX_TASK_RESUMES) {
     return resumeRefusal(
+      taskId,
       409,
       'max_resumes',
       `已續跑 ${resumeCount} 次，到上限 ${MAX_TASK_RESUMES}（MAX_TASK_RESUMES），不再續跑；請檢查任務本身或拆小再重開`,
@@ -2306,6 +2310,7 @@ function resumeTask(taskId) {
   }
   if (noProgressCount >= NO_PROGRESS_LIMIT) {
     return resumeRefusal(
+      taskId,
       409,
       'no_progress',
       `連續 ${noProgressCount} 次續跑 checkpoint 步數都沒增加（停在 ${steps.length} 步），不再續跑；請檢查 worker 為什麼沒有往下做`,
@@ -2332,7 +2337,7 @@ function resumeTask(taskId) {
   const violation = taskSchemaViolation(pendingTask);
   if (violation) {
     logStderr(`resume refused, task file rejected by schema (${taskId})`, violation);
-    return resumeRefusal(409, 'task_file_rejected', `任務檔有這一版不認得或不合規的內容（${violation}），寫不回去，不能續跑`, {
+    return resumeRefusal(taskId, 409, 'task_file_rejected', `任務檔有這一版不認得或不合規的內容（${violation}），寫不回去，不能續跑`, {
       detail: violation,
     });
   }
@@ -2341,10 +2346,10 @@ function resumeTask(taskId) {
     movedArtifacts = setAsidePreviousArtifacts(taskId);
   } catch (error) {
     logStderr(`resume refused, previous artifact could not be set aside (${taskId})`, error);
-    return resumeRefusal(500, 'artifact_set_aside_failed', `上一棒的結果檔改名失敗，不能續跑：${error.message}`);
+    return resumeRefusal(taskId, 500, 'artifact_set_aside_failed', `上一棒的結果檔改名失敗，不能續跑：${error.message}`);
   }
   if (!safeWriteJsonFile(taskPath(taskId), pendingTask)) {
-    return resumeRefusal(500, 'task_write_failed', '任務狀態寫不進去，不能續跑');
+    return resumeRefusal(taskId, 500, 'task_write_failed', '任務狀態寫不進去，不能續跑');
   }
   appendProgressText(
     taskId,

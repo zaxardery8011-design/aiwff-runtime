@@ -479,6 +479,7 @@ test('resume is refused while the previous run is still alive (pid file left by 
     const { task } = await requestJson(runtime.port, 'GET', `/api/tasks/${taskId}`);
     assert.equal(task.status, 'blocked', 'a refused resume leaves the task as it was');
     assert.equal(task.resume_count, undefined);
+    assert.match(progressText(taskId), /Resume refused \(previous_worker_alive\)/);
 
     fs.rmSync(pidFile);
     const accepted = await postRaw(runtime.port, `/api/tasks/${taskId}/resume`);
@@ -541,6 +542,7 @@ test('resume is refused with no_progress after two resumes in a row where the ch
     assert.equal(task.status, 'blocked', 'a refused resume leaves the task as it was');
     assert.equal(task.resume_count, 1);
     assert.doesNotMatch(progressText(stuckId), /Mock worker|Resume #/, 'no worker may start for a resume that was refused');
+    assert.match(progressText(stuckId), /Resume refused \(no_progress\): 連續 2 次續跑/, 'a refused resume leaves a line in the progress log');
 
     const accepted = await postRaw(runtime.port, `/api/tasks/${onceId}/resume`);
     assert.equal(accepted.statusCode, 202);
@@ -576,6 +578,7 @@ test('resume is refused with max_resumes once resume_count reaches MAX_TASK_RESU
     assert.equal(task.status, 'blocked');
     assert.equal(task.resume_count, 2);
     assert.doesNotMatch(progressText(taskId), /Mock worker|Resume #/);
+    assert.match(progressText(taskId), /Resume refused \(max_resumes\): 已續跑 2 次/);
   } finally {
     await stopDaemon(runtime.daemon);
   }
