@@ -167,6 +167,17 @@ function readBackArtifact(artifactPath, taskId) {
   return { bytes: buffer.length, completed_at: artifact.completed_at };
 }
 
+// 送出停止訊號不等於 daemon 已經退出：等到 'exit' 事件才算停好，逾時就回 false，
+// 讓 demo 不會在 daemon 還佔著 port／檔案時就報完成。
+async function stopDaemon(daemon, timeoutMs = 5000) {
+  if (daemon.exitCode !== null || daemon.signalCode !== null) {
+    return true;
+  }
+  const exited = new Promise((resolve) => daemon.once('exit', () => resolve(true)));
+  daemon.kill();
+  return Promise.race([exited, sleep(timeoutMs).then(() => false)]);
+}
+
 async function main() {
   const port = await choosePort();
   const daemon = spawn('node', ['agent/index.js'], {
@@ -174,10 +185,12 @@ async function main() {
     env: { ...process.env, PORT: String(port), MOCK_WORKER: '1', AIWFF_RUNTIME_TOKEN: RUNTIME_TOKEN },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  console.log(`Daemon PID: ${daemon.pid}`);
 
   daemon.stdout.on('data', (chunk) => process.stdout.write(chunk));
   daemon.stderr.on('data', (chunk) => process.stderr.write(chunk));
 
+  let stopped = false;
   try {
     await waitForHealth(port, daemon);
     const created = await requestJson(port, 'POST', '/api/tasks', {
@@ -192,10 +205,14 @@ async function main() {
     console.log(`Artifact: ${artifactPath}`);
     console.log(`Artifact readback: bytes=${readback.bytes} completed_at=${readback.completed_at}`);
     console.log(`Status: ${task.status}`);
-    console.log('✓ Demo completed — task lifecycle verified');
   } finally {
-    daemon.kill();
+    stopped = await stopDaemon(daemon);
   }
+  if (!stopped) {
+    throw new Error(`daemon pid ${daemon.pid} did not exit within 5 seconds after stop`);
+  }
+  console.log(`Daemon PID ${daemon.pid} exited`);
+  console.log('✓ Demo completed — task lifecycle verified');
 }
 
 if (require.main === module) {
