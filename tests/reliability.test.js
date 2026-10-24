@@ -698,6 +698,60 @@ test('crash guardrail: safeWriteJsonFile survives an unwritable path and reports
   assert.equal(result, false);
 });
 
+test('crash guardrail: atomic write retries a briefly locked rename before falling back', () => {
+  resetDataDir();
+  const dir = path.join(DATA_DIR, 'rename-retry');
+  fs.mkdirSync(dir, { recursive: true });
+  const target = path.join(dir, 'task.json');
+  const realRename = fs.renameSync;
+
+  // 占用兩次就放掉：應在重試內走 rename 成功，temp 不殘留。
+  let calls = 0;
+  fs.renameSync = (from, to) => {
+    calls += 1;
+    if (calls <= 2) {
+      throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+    }
+    return realRename(from, to);
+  };
+  try {
+    assert.equal(agentModule.safeWriteJsonFile(target, { value: 1 }), true);
+  } finally {
+    fs.renameSync = realRename;
+  }
+  assert.equal(calls, 3);
+  assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf8')), { value: 1 });
+  assert.deepEqual(fs.readdirSync(dir), ['task.json']);
+
+  // 一直被占：重試有上限（首次 + 3 次），之後退直寫，內容仍是新值。
+  calls = 0;
+  fs.renameSync = () => {
+    calls += 1;
+    throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+  };
+  try {
+    assert.equal(agentModule.safeWriteJsonFile(target, { value: 2 }), true);
+  } finally {
+    fs.renameSync = realRename;
+  }
+  assert.equal(calls, 4);
+  assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf8')), { value: 2 });
+  assert.deepEqual(fs.readdirSync(dir), ['task.json']);
+
+  // 非占用類錯誤不重試。
+  calls = 0;
+  fs.renameSync = () => {
+    calls += 1;
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  };
+  try {
+    assert.equal(agentModule.safeWriteJsonFile(target, { value: 3 }), true);
+  } finally {
+    fs.renameSync = realRename;
+  }
+  assert.equal(calls, 1);
+});
+
 // 存檔當下驗 schema：壞掉的 task 不該先落檔、再靠讀取端事後補救。
 test('save-time schema gate: named cause per violation, and a valid task still lands', () => {
   const validTask = {

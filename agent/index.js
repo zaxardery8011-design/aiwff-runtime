@@ -148,14 +148,36 @@ function readTextFileIfExists(filePath) {
 // 直寫目標檔的話，程序在寫到一半被砍（worker timeout kill、當機、Windows 關機）
 // 會留下截斷的 JSON，下一次 readJsonFile 直接 parse 失敗，該 task 狀態就此救不回。
 // 改成 同目錄 temp → rename 原子換檔：rename 之前目標檔一直是上一份完整內容。
-// rename 在目標被別的程序開著時（Windows 常見）可能 EPERM/EBUSY，這時退回直寫，
-// 最差也只是回到原本的行為，不會比修之前差。
+// rename 在目標被別的程序開著時（Windows 常見：防毒、索引器、編輯器）可能 EPERM/EBUSY。
+// 這種占用通常幾十毫秒就放掉，所以先有上限地退避重試（10/20/40 ms，最多卡 70 ms），
+// 重試完仍不行才退回直寫——最差也只是回到原本的行為，不會比修之前差。
+const RENAME_RETRY_DELAYS_MS = [10, 20, 40];
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function renameWithRetry(fromPath, toPath) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.renameSync(fromPath, toPath);
+      return;
+    } catch (error) {
+      const retryable = error && (error.code === 'EPERM' || error.code === 'EBUSY');
+      if (!retryable || attempt >= RENAME_RETRY_DELAYS_MS.length) {
+        throw error;
+      }
+      sleepSync(RENAME_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
 function writeJsonFile(filePath, value) {
   const text = `${JSON.stringify(value, null, 2)}\n`;
   const tmpPath = `${filePath}.tmp-${process.pid}`;
   try {
     fs.writeFileSync(tmpPath, text);
-    fs.renameSync(tmpPath, filePath);
+    renameWithRetry(tmpPath, filePath);
   } catch (error) {
     try {
       fs.unlinkSync(tmpPath);
