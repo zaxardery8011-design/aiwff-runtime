@@ -407,7 +407,8 @@ function listFiles(dir, rootDir = ROOT_DIR, skipped = []) {
         skipped.push(toRepoPath(path.join(dir, entry.name), rootDir));
         continue;
       }
-      result.push(...listFiles(path.join(dir, entry.name), rootDir, skipped));
+      // 逐筆併入，不用 push(...陣列)：子目錄檔數一大，展開成引數會撞引數上限而爆堆疊。
+      for (const file of listFiles(path.join(dir, entry.name), rootDir, skipped)) result.push(file);
       continue;
     }
     if (entry.isFile() && !SKIP_FILES.has(entry.name)) {
