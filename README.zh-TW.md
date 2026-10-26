@@ -179,10 +179,11 @@ npm start
 
 接著檢查：
 
-1. 用瀏覽器打開終端機印出的登入連結（`登入 WebUI：http://127.0.0.1:3100/?token=...`）。沒用登入連結也看得到畫面，但對話分頁不能建立任務。
-2. 如果有接 Telegram，傳任意訊息給你的 bot。
+1. 用瀏覽器打開終端機印出的登入連結（`登入 WebUI：http://127.0.0.1:3100/?token=...`）。沒用登入連結也看得到畫面，但對話分頁不能建立任務。stdout 不是終端機（例如導到 log 檔）時只會印遮罩版連結（`?token=abcd…`），完整連結在 `data/webui_login_url.txt`。
+2. 如果有接 Telegram，傳任意訊息給你的 bot。沒有 Telegram：改在 WebUI 對話分頁送訊息，或用登入連結裡的 token 直接打 API 建任務：
+   `curl -X POST http://127.0.0.1:3100/api/tasks -H "Authorization: Bearer <token>" -H "Content-Type: application/json" -d "{\"title\":\"hello\",\"instruction\":\"say hello\"}"`（應回 `201`；Windows PowerShell 請用 `curl.exe`）。
 3. 確認 WebUI 出現新任務。
-4. 等 Telegram 或 WebUI 顯示完成。
+4. 等 Telegram 或 WebUI 顯示完成；沒有 Telegram 也可以用 `GET /api/tasks` 看任務變成 `done`。
 5. 在任務詳情裡找到 artifact 路徑。
 
 常用本機檢查：

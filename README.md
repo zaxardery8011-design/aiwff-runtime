@@ -173,10 +173,11 @@ npm start
 
 Then verify it:
 
-1. Open the login link printed in the terminal (`登入 WebUI：http://127.0.0.1:3100/?token=...`). Without it the WebUI still loads, but the chat tab cannot create tasks.
-2. Send any message to your Telegram Bot.
+1. Open the login link printed in the terminal (`登入 WebUI：http://127.0.0.1:3100/?token=...`). Without it the WebUI still loads, but the chat tab cannot create tasks. If stdout is not a terminal (redirected to a log file), only a masked link (`?token=abcd…`) is printed; the full link is in `data/webui_login_url.txt`.
+2. Send any message to your Telegram Bot. No Telegram? Send the message from the WebUI chat tab instead, or create a task over HTTP with the token from the login link:
+   `curl -X POST http://127.0.0.1:3100/api/tasks -H "Authorization: Bearer <token>" -H "Content-Type: application/json" -d "{\"title\":\"hello\",\"instruction\":\"say hello\"}"` (expect `201`; on Windows PowerShell use `curl.exe`).
 3. Confirm a new task appears in the WebUI.
-4. Wait for the Telegram completion notice.
+4. Wait for the Telegram completion notice. Without Telegram, watch the task reach `done` in the WebUI or via `GET /api/tasks`.
 5. Inspect the artifact path shown in the task detail panel.
 
 Useful local checks:
