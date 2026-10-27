@@ -830,6 +830,50 @@ test('task retry: real worker recovers on a later attempt and records retry_coun
   }
 });
 
+test('task retry: the retry prompt opens with the attempt number and prior progress; the first prompt is unchanged', async () => {
+  resetDataDir();
+  const counterFile = path.join(DATA_DIR, 'test-bin', 'retry-preamble.attempts');
+  const promptDir = path.join(DATA_DIR, 'test-bin', 'retry-preamble-prompts');
+  const script = retryClaudeScript(counterFile, 1).replace(
+    "fs.writeFileSync(counter, String(n));",
+    `fs.writeFileSync(counter, String(n));
+  fs.mkdirSync(${JSON.stringify(promptDir)}, { recursive: true });
+  fs.writeFileSync(path.join(${JSON.stringify(promptDir)}, 'attempt-' + n + '.txt'), input);
+  if (n === 1) { console.log('step one done token=sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef'); }`,
+  );
+  const claudeCmd = writeFakeClaude('retry-preamble-claude', script);
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    ENABLE_REAL_CLAUDE_WORKER: '1',
+    CLAUDE_CMD: claudeCmd,
+    MAX_TASK_RETRIES: '1',
+    RETRY_BACKOFF_MS: '50',
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'retry preamble',
+      instruction: 'fail once then succeed',
+      timeout_sec: 20,
+    }, AUTH_HEADERS);
+    const task = await waitForTaskStatus(runtime.port, created.id, ['done'], 20000);
+    assert.equal(task.status, 'done');
+    const first = fs.readFileSync(path.join(promptDir, 'attempt-1.txt'), 'utf8');
+    const second = fs.readFileSync(path.join(promptDir, 'attempt-2.txt'), 'utf8');
+    assert.ok(!first.includes('## 重試說明'), 'first attempt prompt must not carry a retry preamble');
+    assert.ok(!first.includes('次嘗試'), 'first attempt prompt must not mention attempts');
+    assert.ok(second.startsWith('## 重試說明\n這是第 2 次嘗試'), `second prompt head: ${second.slice(0, 200)}`);
+    assert.match(second, /step one done/);
+    assert.match(second, /intentional failure/);
+    assert.ok(!second.includes('sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef'), 'token-like string must be masked');
+    assert.match(second, /\[masked \d+ chars\]/);
+    // 重試說明之後就是原本的指令，一字不差。
+    assert.ok(second.endsWith(first), 'retry prompt must be the preamble followed by the unchanged original prompt');
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
 test('task retry: real worker gives up as failed after retries are exhausted', async () => {
   resetDataDir();
   const counterFile = path.join(DATA_DIR, 'test-bin', 'retry-exhaust.attempts');

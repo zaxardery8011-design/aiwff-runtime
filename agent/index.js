@@ -1369,12 +1369,62 @@ function notifyTelegramTaskDone(task) {
   delete tgPendingNotify[task.id];
 }
 
-function buildClaudePrompt(task) {
+// 失敗重試時放在指令最前面的說明：講明這是第幾次嘗試，附上次留下的進度與產物路徑，
+// 讓 worker 先核對已做到哪，不把做過的重做、也不把沒做完的當做完。首次嘗試回空字串，指令一字不變。
+const RETRY_PROGRESS_LINES = 20;
+const RETRY_PROGRESS_MAX_CHARS = 1500;
+
+// 摘要會原樣交給 worker：先把疑似 token 的長字串遮掉（32 字以上不含空白的英數／符號串）。
+function maskTokenLikeStrings(text) {
+  return String(text).replace(/[A-Za-z0-9_\-+/=.:]{32,}/g, (value) => `${value.slice(0, 4)}…[masked ${value.length} chars]`);
+}
+
+function listPriorAttemptArtifacts(taskId) {
+  const found = [];
+  for (const [suffix] of PREVIOUS_ARTIFACT_SUFFIXES) {
+    const file = path.join(ARTIFACTS_DIR, `${taskId}${suffix}`);
+    if (fs.existsSync(file)) {
+      found.push(file);
+    }
+  }
+  try {
+    for (const name of fs.readdirSync(taskWorkspacePath(taskId))) {
+      if (name !== AGY_PROMPT_FILENAME) {
+        found.push(path.join(taskWorkspacePath(taskId), name));
+      }
+    }
+  } catch (_) {
+    // workspace 還沒建就是沒有產物。
+  }
+  return found;
+}
+
+function buildRetryPreamble(task, attempt) {
+  if (!(attempt > 1)) {
+    return '';
+  }
+  const progress = (readProgressLines(task.id, RETRY_PROGRESS_LINES) || []).join('\n');
+  const summary = maskTokenLikeStrings(progress).slice(0, RETRY_PROGRESS_MAX_CHARS);
+  const artifacts = listPriorAttemptArtifacts(task.id);
+  return [
+    '## 重試說明',
+    `這是第 ${attempt} 次嘗試（上一次失敗：${maskTokenLikeStrings(task.last_error || '原因未記錄')}）。`,
+    '先查上次已經做到哪：做過且確認完成的不要重做；上次寫了一半或沒驗過的不要當成已完成。',
+    '上次進度摘要（progress 最後幾筆）：',
+    summary || '（沒有進度紀錄）',
+    '上次已落的產物路徑：',
+    artifacts.length ? artifacts.map((file) => `- ${file}`).join('\n') : '（沒有）',
+    '',
+    '',
+  ].join('\n');
+}
+
+function buildClaudePrompt(task, attempt = 1) {
   const systemPrompt = readTextFileIfExists(path.join(ROOT_DIR, 'CLAUDE.md'));
   const facts = readTextFileIfExists(path.join(MEMORY_DIR, 'facts.md'));
   const preferences = readTextFileIfExists(path.join(MEMORY_DIR, 'preferences.md'));
 
-  return `${systemPrompt}
+  return `${buildRetryPreamble(task, attempt)}${systemPrompt}
 
 ## 記憶
 ${facts}
@@ -1690,7 +1740,7 @@ function spawnClaudeProcess(claudeCmd, args, optionsOverride = {}) {
 function spawnClaudeWorker(task, attempt = 1) {
   ensureDirectories();
   const claudeCmd = process.env.CLAUDE_CMD || 'claude';
-  const fullPrompt = buildClaudePrompt(task);
+  const fullPrompt = buildClaudePrompt(task, attempt);
   const runningTask = updateTaskStatus(task, 'running');
   const timeoutMs = normalizeWorkerTimeoutSec(task) * 1000;
   const workerCwd = taskWorkspacePath(task.id);
@@ -1850,9 +1900,9 @@ function buildAgyArgs(promptFilePath) {
   return args;
 }
 
-function writeAgyPromptFile(task, workerCwd) {
+function writeAgyPromptFile(task, workerCwd, attempt = 1) {
   const promptFilePath = path.join(workerCwd, AGY_PROMPT_FILENAME);
-  fs.writeFileSync(promptFilePath, buildClaudePrompt(task), 'utf8');
+  fs.writeFileSync(promptFilePath, buildClaudePrompt(task, attempt), 'utf8');
   return promptFilePath;
 }
 
@@ -1939,7 +1989,7 @@ function spawnAgyWorker(task, attempt = 1) {
   const timeoutMs = normalizeWorkerTimeoutSec(task) * 1000;
   const workerCwd = taskWorkspacePath(task.id);
   fs.mkdirSync(workerCwd, { recursive: true });
-  const args = buildAgyArgs(writeAgyPromptFile(task, workerCwd));
+  const args = buildAgyArgs(writeAgyPromptFile(task, workerCwd, attempt));
   if (envFlag('AGY_SKIP_PERMISSIONS')) {
     const warning = 'SECURITY WARNING: agy worker is running with --dangerously-skip-permissions (AGY_SKIP_PERMISSIONS=1).';
     logStderr(warning, `task=${task.id}`);
