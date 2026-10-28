@@ -179,6 +179,21 @@ Then verify it:
 4. Wait for the Telegram completion notice.
 5. Inspect the artifact path shown in the task detail panel.
 
+No Telegram yet? Steps 2 and 4 are optional; create the task from the WebUI or the HTTP API instead:
+
+- If the terminal shows `登入 WebUI（token 已遮罩）：http://127.0.0.1:3100/?token=abcd…`, the token was masked because stdout is not an interactive terminal (for example, it is redirected to a log file). The full login link is in `data/webui_login_url.txt`; open that URL instead.
+- **WebUI:** after opening the login link, type a request in the chat tab. The new task shows up in the task list with its status and artifact path.
+- **HTTP API:** `POST /api/tasks` takes the same token as a Bearer header. Copy the value after `?token=` from the full login link (or set a fixed `AIWFF_RUNTIME_TOKEN` in `.env`):
+
+  ```bash
+  curl -X POST http://127.0.0.1:3100/api/tasks \
+    -H "Authorization: Bearer <token>" \
+    -H "Content-Type: application/json" \
+    -d '{"title":"hello","instruction":"Write a one-line hello file."}'
+  ```
+
+  The reply is the new task JSON. Check it with `curl http://127.0.0.1:3100/api/tasks/<id>` until `status` is `done`. A missing or wrong token returns `401`.
+
 Useful local checks:
 
 ```bash
