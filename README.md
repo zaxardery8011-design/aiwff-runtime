@@ -179,6 +179,22 @@ Then verify it:
 4. Wait for the Telegram completion notice.
 5. Inspect the artifact path shown in the task detail panel.
 
+No Telegram bot yet? Create and check a task over HTTP instead. The runtime token is the `token=` value of the login link; when stdout is not a terminal (for example redirected to a log), the terminal shows a masked link and the full one is written to `data/webui_login_url.txt`.
+
+```bash
+TOKEN=<token from the login link>
+curl -s -X POST http://127.0.0.1:3100/api/tasks \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"hello","instruction":"say hi"}'
+# -> 201 with the new task JSON; copy its "id"
+curl -s http://127.0.0.1:3100/api/tasks/<id>
+# -> "status" moves from pending to done (or failed / blocked); "artifact_path" points at the result file
+curl -s http://127.0.0.1:3100/api/tasks/<id>/result -H "Authorization: Bearer $TOKEN"
+# -> the result content; without the token this returns 401
+```
+
+Without a token, `POST /api/tasks` returns 401. A browser that opened the login link sends the same token as a cookie, so it needs no header. On Windows PowerShell, call `curl.exe` (not `curl`) and put the JSON body in a file passed with `-d "@task.json"`.
+
 Useful local checks:
 
 ```bash
