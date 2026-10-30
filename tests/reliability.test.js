@@ -874,6 +874,47 @@ test('task retry: the retry prompt opens with the attempt number and prior progr
   }
 });
 
+test('task resume: the resumed run opens with the resume count and the prior run error', async () => {
+  resetDataDir();
+  const counterFile = path.join(DATA_DIR, 'test-bin', 'resume-preamble.attempts');
+  const promptDir = path.join(DATA_DIR, 'test-bin', 'resume-preamble-prompts');
+  const script = retryClaudeScript(counterFile, 1).replace(
+    "fs.writeFileSync(counter, String(n));",
+    `fs.writeFileSync(counter, String(n));
+  fs.mkdirSync(${JSON.stringify(promptDir)}, { recursive: true });
+  fs.writeFileSync(path.join(${JSON.stringify(promptDir)}, 'attempt-' + n + '.txt'), input);`,
+  );
+  const claudeCmd = writeFakeClaude('resume-preamble-claude', script);
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    ENABLE_REAL_CLAUDE_WORKER: '1',
+    CLAUDE_CMD: claudeCmd,
+    MAX_TASK_RETRIES: '0',
+    RETRY_BACKOFF_MS: '50',
+  });
+
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'resume preamble',
+      instruction: 'fail once then succeed after resume',
+      timeout_sec: 20,
+    }, AUTH_HEADERS);
+    const failed = await waitForTaskStatus(runtime.port, created.id, ['failed'], 20000);
+    assert.equal(failed.status, 'failed');
+    await requestJson(runtime.port, 'POST', `/api/tasks/${created.id}/resume`, {}, AUTH_HEADERS);
+    const task = await waitForTaskStatus(runtime.port, created.id, ['done'], 20000);
+    assert.equal(task.status, 'done');
+    const first = fs.readFileSync(path.join(promptDir, 'attempt-1.txt'), 'utf8');
+    const second = fs.readFileSync(path.join(promptDir, 'attempt-2.txt'), 'utf8');
+    assert.ok(!first.includes('## 重試說明'), 'first run prompt must not carry a retry preamble');
+    assert.ok(second.startsWith('## 重試說明\n這是第 1 次續跑'), `resumed prompt head: ${second.slice(0, 200)}`);
+    assert.match(second, /intentional failure/);
+    assert.ok(second.endsWith(first), 'resumed prompt must be the preamble followed by the unchanged original prompt');
+  } finally {
+    await stopDaemon(runtime.daemon);
+  }
+});
+
 test('task retry: real worker gives up as failed after retries are exhausted', async () => {
   resetDataDir();
   const counterFile = path.join(DATA_DIR, 'test-bin', 'retry-exhaust.attempts');
@@ -2501,6 +2542,37 @@ test('startup login lines: non-TTY output masks the token, TTY keeps the full li
   assert.ok(agentModule.startupLoginLines(true).join('\n').includes(fullUrl));
 });
 
+
+test('openai_compatible provider: the retry request carries the attempt number and prior error; the first is unchanged', async () => {
+  resetDataDir();
+  const fake = await startFakeOpenAI(503);
+  const runtime = await startDaemon({
+    MOCK_WORKER: '',
+    AIWFF_WORKER_PROVIDER: 'openai_compatible',
+    AIWFF_OPENAI_BASE_URL: `http://127.0.0.1:${fake.port}/v1`,
+    AIWFF_OPENAI_MODEL: 'test-model',
+    MAX_TASK_RETRIES: '1',
+    RETRY_BACKOFF_MS: '10',
+  });
+  try {
+    const created = await requestJson(runtime.port, 'POST', '/api/tasks', {
+      title: 'openai retry preamble', instruction: 'respond',
+    }, AUTH_HEADERS);
+    const task = await waitForTaskStatus(runtime.port, created.id, ['done', 'failed'], 10000);
+    assert.equal(task.status, 'done');
+    assert.equal(fake.requests.length, 2);
+    const userOf = (req) => req.body.messages.find((m) => m.role === 'user').content;
+    const first = userOf(fake.requests[0]);
+    const second = userOf(fake.requests[1]);
+    assert.ok(!first.includes('## 重試說明'), 'first request must not carry a retry preamble');
+    assert.ok(second.startsWith('## 重試說明\n這是第 2 次嘗試'), `retry request head: ${second.slice(0, 200)}`);
+    assert.match(second, /HTTP 503:/);
+    assert.ok(second.endsWith(first), 'retry request must be the preamble followed by the unchanged original request');
+  } finally {
+    await stopDaemon(runtime.daemon);
+    fake.server.close();
+  }
+});
 
 for (const status of [400, 401, 404, 408, 429, 503]) {
   test(`openai_compatible provider: HTTP ${status} classifies retry by status`, async () => {

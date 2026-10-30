@@ -1400,15 +1400,20 @@ function listPriorAttemptArtifacts(taskId) {
 }
 
 function buildRetryPreamble(task, attempt) {
-  if (!(attempt > 1)) {
+  // /resume 放下去的那一棒 attempt 從 1 重算（重試額度要重新給），但它一樣是接在失敗的上一棒後面。
+  const resumed = Number.isInteger(task.resume_count) && task.resume_count > 0;
+  if (!(attempt > 1) && !resumed) {
     return '';
   }
   const progress = (readProgressLines(task.id, RETRY_PROGRESS_LINES) || []).join('\n');
   const summary = maskTokenLikeStrings(progress).slice(0, RETRY_PROGRESS_MAX_CHARS);
   const artifacts = listPriorAttemptArtifacts(task.id);
+  const lastError = maskTokenLikeStrings(task.last_error || '原因未記錄');
   return [
     '## 重試說明',
-    `這是第 ${attempt} 次嘗試（上一次失敗：${maskTokenLikeStrings(task.last_error || '原因未記錄')}）。`,
+    attempt > 1
+      ? `這是第 ${attempt} 次嘗試（上一次失敗：${lastError}）。`
+      : `這是第 ${task.resume_count} 次續跑（上一棒：${lastError}）。`,
     '先查上次已經做到哪：做過且確認完成的不要重做；上次寫了一半或沒驗過的不要當成已完成。',
     '上次進度摘要（progress 最後幾筆）：',
     summary || '（沒有進度紀錄）',
@@ -2121,7 +2126,7 @@ function openAICompatibleConfig() {
   };
 }
 
-function buildOpenAICompatibleMessages(task) {
+function buildOpenAICompatibleMessages(task, attempt = 1) {
   const facts = readTextFileIfExists(path.join(MEMORY_DIR, 'facts.md'));
   const preferences = readTextFileIfExists(path.join(MEMORY_DIR, 'preferences.md'));
   return [
@@ -2129,7 +2134,7 @@ function buildOpenAICompatibleMessages(task) {
       role: 'system',
       content: `你是用戶的本地 AI 助理。這條路徑沒有工具可用，請直接輸出任務結果本身。\n\n## 記憶\n${facts}\n${preferences}`.trim(),
     },
-    { role: 'user', content: `標題: ${task.title}\n指令: ${task.instruction}` },
+    { role: 'user', content: `${buildRetryPreamble(task, attempt)}標題: ${task.title}\n指令: ${task.instruction}` },
   ];
 }
 
@@ -2170,7 +2175,7 @@ function runOpenAICompatibleWorker(task, attempt = 1) {
   const { baseUrl, model } = openAICompatibleConfig();
   appendProgressText(task.id, `OpenAI-compatible request base_url=${baseUrl} model=${model} attempt=${attempt}`);
 
-  requestOpenAICompatibleCompletion(task, normalizeWorkerTimeoutSec(task) * 1000)
+  requestOpenAICompatibleCompletion(task, normalizeWorkerTimeoutSec(task) * 1000, buildOpenAICompatibleMessages(task, attempt))
     .then((content) => {
       fs.writeFileSync(artifactResultPath(task.id), `${content.trim()}\n`);
       const doneTask = updateTaskStatus(readTask(task.id) || runningTask, 'done', {
