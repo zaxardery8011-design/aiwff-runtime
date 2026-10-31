@@ -2404,7 +2404,7 @@
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ text: text })
+          body: JSON.stringify({ text: text, conversation_id: 'webui' })
         });
         if (data.kind === 'task' && data.task) {
           rememberChatTask(data.task);

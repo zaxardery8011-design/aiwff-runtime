@@ -3,7 +3,9 @@
 // 純函式，不碰網路、不碰檔案；TG、POST /api/chat、webui 對話框共用這一份判斷。
 
 // 指令：不分大小寫、可帶 @bot（TG 群組裡會送 /tasks@MyBot）。
-const COMMAND_RE = /^\/(start|tasks|help)(?:@[A-Za-z0-9_]+)?$/i;
+// /new 與 /reset 同義：開新對話，instruction 一律回 /new。
+const COMMAND_RE = /^\/(start|tasks|help|new|reset)(?:@[A-Za-z0-9_]+)?$/i;
+const COMMAND_ALIASES = { reset: 'new' };
 // /task、/chat：不分大小寫、可帶 @bot、可省略後面的空格（/task寫一個…）；
 // 後面緊接英數字就不算（/tasks、/taskforce 不是 /task）。
 const TASK_CMD_RE = /^\/task(?:@[A-Za-z0-9_]+)?(?![A-Za-z0-9_])\s*([\s\S]*)$/i;
@@ -48,7 +50,10 @@ function route(rawText, rawMode) {
   const text = String(rawText || '').trim();
   const mode = normalizeMode(rawMode);
   const command = text.match(COMMAND_RE);
-  if (command) return { kind: 'command', instruction: `/${command[1].toLowerCase()}` };
+  if (command) {
+    const name = command[1].toLowerCase();
+    return { kind: 'command', instruction: `/${COMMAND_ALIASES[name] || name}` };
+  }
 
   const taskCmd = text.match(TASK_CMD_RE);
   const chatCmd = text.match(CHAT_CMD_RE);

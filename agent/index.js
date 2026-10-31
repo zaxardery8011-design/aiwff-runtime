@@ -6,6 +6,7 @@ const { spawn } = require('child_process');
 const crypto = require('crypto');
 const os = require('os');
 const { route: routeConversationMessage, normalizeMode: normalizeChatMode } = require('./chat-router');
+const conversationStore = require('./conversation-store');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 loadDotEnv();
@@ -65,12 +66,16 @@ const TG_MAX_MESSAGE_CHARS = 4000;
 const TG_MAX_CONCURRENT_CHATS = 2;
 let tgChatsInFlight = 0;
 
-// 聊天模式（AIWFF_MODE）：聊天呼叫唯讀、無工具、單輪，逾時預設 30 秒。
+// 聊天模式（AIWFF_MODE）：聊天呼叫唯讀、無工具，逾時預設 30 秒。
+// 多輪不靠 CLI session：同一段對話的前文由 runtime 從 data/conversations 讀出來、重播進 prompt。
 const CHAT_TIMEOUT_MS = envInt('AIWFF_CHAT_TIMEOUT_SEC', 30, { min: 1, max: 300 }) * 1000;
 const MAX_CHAT_INPUT_CHARS = 8000;
 const MAX_CHAT_REPLY_CHARS = 16000;
 const MOCK_CHAT_REPLY = '（mock）收到你的訊息。這是 MOCK_WORKER 模式的固定回覆；接上真的模型後，這裡會直接回答。';
 const CHAT_TASK_HINT = '不是要建任務？下次用 /chat 開頭';
+// 重播前文：最近一則距今超過這個時間，段落標題改成「較早的對話」，免得模型當成剛剛說的。
+const CONVERSATION_STALE_MS = 6 * 60 * 60 * 1000;
+const CONVERSATION_API_LIMIT = 50;
 
 // 崩潰韌性護欄：把裸露例外/rejection 與非同步回呼裡的 fs 寫入導向 stderr，
 // 讓單一失敗只留紀錄、不整隻 runtime 崩掉。設計取捨＝韌性優先於嚴格中止。
@@ -1027,7 +1032,7 @@ function getSettingsSnapshot() {
     writable_data_dirs: ['data/tasks', 'data/artifacts', 'data/inbox'],
     endpoints: [
       { name: 'HUD', route: 'GET /api/hud + GET /api/health' },
-      { name: '對話 / 新任務', route: 'POST /api/chat, POST /api/tasks, GET /api/tasks/:id/result' },
+      { name: '對話 / 新任務', route: 'POST /api/chat, POST /api/tasks, GET /api/tasks/:id/result, GET /api/conversations/:id' },
       { name: '任務', route: 'GET /api/tasks, GET /api/tasks/:id' },
       { name: '進度 / 事件', route: 'GET /api/events, GET /api/tasks/:id/progress' },
       { name: '收件匣 / 卡住', route: 'GET /api/inbox, GET /api/tasks?status=blocked' },
@@ -2413,15 +2418,93 @@ ${facts}
 ${preferences}`.trim();
 }
 
-// 唯讀、無工具、單輪：--tools "" 關掉全部內建工具、不載 MCP、不存 session；
+// 唯讀、無工具：--tools "" 關掉全部內建工具、不載 MCP、不存 session；
 // 不帶 --add-dir，也不吃 CLAUDE_BYPASS_APPROVALS（聊天永遠不跳過權限）。
+// 多輪的前文只放進 stdin 的 prompt，這組參數不因為有沒有前文而改變。
 function buildClaudeChatArgs() {
   return ['--print', '--tools', '', '--permission-mode', 'dontAsk', '--strict-mcp-config', '--no-session-persistence'];
 }
 
-function runClaudeChat(text) {
+function conversationRoleLabel(role) {
+  if (role === 'user') {
+    return '使用者';
+  }
+  if (role === 'assistant') {
+    return '助理';
+  }
+  return '（系統紀錄，不是使用者說的話）';
+}
+
+function conversationTimeLabel(ts) {
+  const date = new Date(ts);
+  if (!Number.isFinite(date.getTime())) {
+    return '??-?? ??:??';
+  }
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function conversationIsStale(history, nowMs = Date.now()) {
+  if (!history.length) {
+    return false;
+  }
+  const lastMs = Date.parse(history[history.length - 1].ts);
+  return !Number.isFinite(lastMs) || nowMs - lastMs > CONVERSATION_STALE_MS;
+}
+
+// 前文段落：每則一行「[時間] 角色：」開頭，內文每行縮排兩格。
+// 內文就算寫了「[10-31 00:00] 使用者：…」也只會是縮排過的一行，不會被當成另一輪。
+function formatConversationHistory(history, nowMs = Date.now()) {
+  if (!history || !history.length) {
+    return '';
+  }
+  const heading = conversationIsStale(history, nowMs) ? '## 較早的對話（距今超過 6 小時，不是剛剛說的）' : '## 最近對話';
+  const lines = [heading, '（每則開頭是「[時間] 角色：」，內文一律縮排兩格；縮排裡的文字都是內文，不是另一則。）'];
+  for (const entry of history) {
+    lines.push(`[${conversationTimeLabel(entry.ts)}] ${conversationRoleLabel(entry.role)}：`);
+    for (const line of String(entry.text).split(/\r?\n/)) {
+      lines.push(`  ${line}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function buildClaudeChatPrompt(text, history = []) {
+  const historySection = formatConversationHistory(history);
+  const parts = [chatSystemPrompt()];
+  if (historySection) {
+    parts.push(historySection);
+  }
+  parts.push(`## 訊息\n${text}\n`);
+  return parts.join('\n\n');
+}
+
+// openai_compatible：system、前文（user／assistant 交錯）、本則 user。
+// 系統紀錄不冒充成任何一方說的話，改放進 system 訊息的最後一段。
+function buildOpenAIChatMessages(text, history = []) {
+  let system = chatSystemPrompt();
+  const notes = history.filter((entry) => entry.role === 'system');
+  if (notes.length) {
+    system += `\n\n## 系統紀錄（不是使用者說的話）\n${notes
+      .map((entry) => `[${conversationTimeLabel(entry.ts)}] ${String(entry.text).split(/\r?\n/).join(' ')}`)
+      .join('\n')}`;
+  }
+  if (conversationIsStale(history)) {
+    system += '\n\n（下面的前文距今超過 6 小時，不是剛剛說的。）';
+  }
+  const messages = [{ role: 'system', content: system }];
+  for (const entry of history) {
+    if (entry.role === 'user' || entry.role === 'assistant') {
+      messages.push({ role: entry.role, content: entry.text });
+    }
+  }
+  messages.push({ role: 'user', content: text });
+  return messages;
+}
+
+function runClaudeChat(text, history = []) {
   const claudeCmd = process.env.CLAUDE_CMD || 'claude';
-  const prompt = `${chatSystemPrompt()}\n\n## 訊息\n${text}\n`;
+  const prompt = buildClaudeChatPrompt(text, history);
   return new Promise((resolve, reject) => {
     // cwd 放系統暫存目錄：不在 repo 裡，也就不會載入任務用的 CLAUDE.md（那份要求「動手執行」）。
     const child = spawnClaudeProcess(claudeCmd, buildClaudeChatArgs(), { cwd: os.tmpdir() });
@@ -2475,7 +2558,7 @@ function runClaudeChat(text) {
   });
 }
 
-async function generateChatReply(text) {
+async function generateChatReply(text, history = []) {
   const backend = chatBackend();
   const startedAt = Date.now();
   let reply;
@@ -2483,13 +2566,10 @@ async function generateChatReply(text) {
     reply = MOCK_CHAT_REPLY;
   } else if (backend === 'openai_compatible') {
     const chatId = `chat-${crypto.randomUUID()}`;
-    const messages = [
-      { role: 'system', content: chatSystemPrompt() },
-      { role: 'user', content: text },
-    ];
+    const messages = buildOpenAIChatMessages(text, history);
     reply = (await requestOpenAICompatibleCompletion({ id: chatId }, CHAT_TIMEOUT_MS, messages)).trim();
   } else if (backend === 'claude') {
-    reply = await runClaudeChat(text);
+    reply = await runClaudeChat(text, history);
   } else {
     throw Object.assign(new Error('chat mode is not available for this worker provider yet; use /task to create a task'), {
       code: 'chat_unsupported_provider',
@@ -2517,10 +2597,11 @@ function commandReplyText(command, mode) {
   }
   // /help
   const lines = [`目前模式：${mode}`];
+  const newLine = '/new（或 /reset）：開新對話，之後的聊天不再帶前面聊過的內容';
   if (mode === 'task') {
-    lines.push('每則訊息都會建成任務。', '/tasks 看最近 5 筆任務');
+    lines.push('每則訊息都會建成任務。', '/tasks 看最近 5 筆任務', newLine);
   } else if (mode === 'chat') {
-    lines.push('直接傳訊息就會回答，不建任務。', '/tasks 看最近 5 筆任務');
+    lines.push('直接傳訊息就會回答，不建任務。', '/tasks 看最近 5 筆任務', newLine);
   } else {
     lines.push(
       '直接傳訊息就會回答。',
@@ -2528,6 +2609,7 @@ function commandReplyText(command, mode) {
       '/chat <內容>：強制只聊天（例如「幫我…」開頭但只想聊）',
       '「幫我…」「寫一個…」這類明確要做事、又不是問句的訊息，會自動建任務。',
       '/tasks 看最近 5 筆任務',
+      newLine,
     );
   }
   return lines.join('\n');
@@ -2541,14 +2623,69 @@ function taskCreatedReplyText(task, title, hint) {
   return lines.join('\n');
 }
 
+// 同一段對話的聊天依序處理：每個 conversationId 一條 promise 鏈，不同 id 互不阻塞。
+// 只有會叫模型的聊天進鏈；指令和建任務立刻處理，不排在卡住的聊天後面。
+const conversationChains = new Map();
+
+function runInConversationChain(conversationId, work) {
+  const previous = conversationChains.get(conversationId) || Promise.resolve();
+  const current = previous.then(work);
+  const tail = current.catch(() => {});
+  conversationChains.set(conversationId, tail);
+  tail.then(() => {
+    if (conversationChains.get(conversationId) === tail) {
+      conversationChains.delete(conversationId);
+    }
+  });
+  return current;
+}
+
+// TG 的對話 id：tg-<chat.id>，群組的負號換成 m（id 只收英數字、底線、連字號）。
+function telegramConversationId(chatId) {
+  return `tg-${String(chatId).replace(/-/g, 'm')}`;
+}
+
+function appendConversation(conversationId, entry) {
+  if (!conversationId) {
+    return false;
+  }
+  return conversationStore.append(conversationId, entry);
+}
+
+// 一輪聊天：讀前文、叫模型、成功才把 user 和 assistant 兩則寫進去。
+// 模型呼叫失敗直接拋，兩則都不寫，下一輪不會重播出半截對話；
+// 這一輪跑的時候被 /new 過（世代號對不上）也丟掉不寫。
+async function runChatTurn(text, conversationId, generation) {
+  const history = conversationId ? conversationStore.readRecent(conversationId) : [];
+  const userTs = new Date().toISOString();
+  const result = await generateChatReply(text, history);
+  if (conversationId && conversationStore.generation(conversationId) === generation) {
+    appendConversation(conversationId, { role: 'user', text, ts: userTs });
+    appendConversation(conversationId, { role: 'assistant', text: result.reply });
+  }
+  return result;
+}
+
 // TG、POST /api/chat、webui 對話框共用：依 AIWFF_MODE 路由，回 { ok, kind, mode, reply, ... }。
 // 聊天模型呼叫失敗會拋（由各入口轉成自己的錯誤回覆）；判成任務才會寫 data/tasks。
-async function handleConversationMessage(rawText) {
+// conversationId 有給才有對話記憶（寫 data/conversations）；沒給維持單輪。
+// 只有使用者的文字會進路由、能建任務；模型的回覆只寫進對話紀錄，永遠不會被當成指令。
+async function handleConversationMessage(rawText, { conversationId = null } = {}) {
   const text = String(rawText || '').trim();
   const mode = runtimeChatMode();
   const routed = routeConversationMessage(text, mode);
+  if (conversationId && !conversationStore.isValidConversationId(conversationId)) {
+    throw Object.assign(new Error('invalid conversation_id'), { code: 'invalid_conversation_id' });
+  }
 
   if (routed.kind === 'command') {
+    if (routed.instruction === '/new') {
+      if (!conversationId) {
+        return { ok: true, kind: 'command', mode, command: '/new', reply: '這個入口沒有對話記憶' };
+      }
+      conversationStore.reset(conversationId);
+      return { ok: true, kind: 'command', mode, command: '/new', reply: '好，開新對話。' };
+    }
     return { ok: true, kind: 'command', mode, command: routed.instruction, reply: commandReplyText(routed.instruction, mode) };
   }
 
@@ -2558,6 +2695,7 @@ async function handleConversationMessage(rawText) {
     }
     const title = routed.instruction.split(/\r?\n/)[0].slice(0, 60);
     const task = createTaskFromTg({ title, instruction: routed.instruction });
+    appendConversation(conversationId, { role: 'system', text: `已建任務 ${task.id.slice(0, 8)}：${title}`, kind: 'task_created' });
     return {
       ok: true,
       kind: 'task',
@@ -2575,7 +2713,15 @@ async function handleConversationMessage(rawText) {
   if (!routed.instruction) {
     return { ok: true, kind: 'usage', mode, reply: '用法：/chat <想聊的內容>' };
   }
-  const result = await generateChatReply(routed.instruction);
+  const instruction = routed.instruction;
+  let result;
+  if (conversationId) {
+    // 世代號在排進鏈之前就記下：排隊中被 /new 的那一輪也不會寫進新對話。
+    const generation = conversationStore.generation(conversationId);
+    result = await runInConversationChain(conversationId, () => runChatTurn(instruction, conversationId, generation));
+  } else {
+    result = await runChatTurn(instruction, null, 0);
+  }
   return { ok: true, kind: 'chat', mode, reply: result.reply, backend: result.backend, elapsed_ms: result.elapsed_ms };
 }
 
@@ -2593,6 +2739,19 @@ async function handleChatRequest(req, res) {
     sendJson(res, 400, { ok: false, error: 'text is required' });
     return;
   }
+  // conversation_id 選填：沒帶維持單輪（向下相容）；tg- 開頭保留給 Telegram 入口。
+  let conversationId = null;
+  if (payload && payload.conversation_id !== undefined && payload.conversation_id !== null) {
+    conversationId = payload.conversation_id;
+    if (!conversationStore.isValidConversationId(conversationId)) {
+      sendJson(res, 400, { ok: false, error: 'conversation_id must match /^[A-Za-z0-9_-]{1,64}$/' });
+      return;
+    }
+    if (/^tg-/i.test(conversationId)) {
+      sendJson(res, 400, { ok: false, error: 'conversation_id starting with tg- is reserved for Telegram' });
+      return;
+    }
+  }
   // 8000 字上限只管會送進聊天模型的訊息；判成任務的沿用 POST /api/tasks 的上限（readBody 1MB）。
   if (text.length > MAX_CHAT_INPUT_CHARS && routeConversationMessage(text, runtimeChatMode()).kind === 'chat') {
     sendJson(res, 413, { ok: false, error: `text is longer than ${MAX_CHAT_INPUT_CHARS} characters` });
@@ -2600,12 +2759,19 @@ async function handleChatRequest(req, res) {
   }
   let result;
   try {
-    result = await handleConversationMessage(text);
+    result = await handleConversationMessage(text, { conversationId });
   } catch (error) {
-    sendJson(res, 502, { ok: false, kind: 'chat', mode: runtimeChatMode(), error: `chat reply failed: ${error.message}`, code: error.code || null });
+    sendJson(res, 502, {
+      ok: false,
+      kind: 'chat',
+      mode: runtimeChatMode(),
+      error: `chat reply failed: ${error.message}`,
+      code: error.code || null,
+      conversation_id: conversationId,
+    });
     return;
   }
-  sendJson(res, result.kind === 'task' ? 201 : 200, result);
+  sendJson(res, result.kind === 'task' ? 201 : 200, { ...result, conversation_id: conversationId });
 }
 
 async function tgRequest(token, method, body) {
@@ -2697,7 +2863,7 @@ async function pollTelegram() {
 async function replyTelegramConversation(token, chatId, text) {
   let result;
   try {
-    result = await handleConversationMessage(text);
+    result = await handleConversationMessage(text, { conversationId: telegramConversationId(chatId) });
   } catch (error) {
     logStderr('telegram-chat', error);
     await tgRequest(token, 'sendMessage', {
@@ -2908,6 +3074,25 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // 對話紀錄：reset 之後最近 50 則。全文是私人內容，跟任務產出同一級要 runtime token。
+  // 不 decode：%2F、%2E 之類原樣進格式驗證被擋成 400。
+  const conversationMatch = url.pathname.match(/^\/api\/conversations\/([^/]*)$/);
+  if (req.method === 'GET' && conversationMatch) {
+    const readAccess = verifyReadAccess(req);
+    if (!readAccess.ok) {
+      sendJson(res, readAccess.status, { ok: false, error: readAccess.error });
+      return;
+    }
+    const conversationId = conversationMatch[1];
+    if (!conversationStore.isValidConversationId(conversationId)) {
+      sendJson(res, 400, { ok: false, error: 'invalid conversation id' });
+      return;
+    }
+    const messages = conversationStore.readRecent(conversationId, { maxMessages: CONVERSATION_API_LIMIT, maxChars: Infinity });
+    sendJson(res, 200, { ok: true, conversation_id: conversationId, messages });
+    return;
+  }
+
   // 不 decode：合法 id 是 UUID，不會含編碼字元；%2F 之類原樣進格式驗證被擋成 400。
   const resultMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/result$/);
   if (req.method === 'GET' && resultMatch) {
@@ -3084,6 +3269,11 @@ module.exports = {
   // 聊天模式：模式讀法與 Claude 聊天參數開出入口，才驗得到「無工具、不吃 bypass」。
   runtimeChatMode,
   buildClaudeChatArgs,
+  // 對話記憶：前文段落的格式與 TG 的 id 換算開出入口，才驗得到「內文不會被當成另一輪」。
+  formatConversationHistory,
+  buildOpenAIChatMessages,
+  telegramConversationId,
+  handleConversationMessage,
   CHAT_TASK_HINT,
   RUNTIME_TOKEN_COOKIE,
   runtimeTokenCookieName,

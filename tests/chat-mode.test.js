@@ -680,7 +680,7 @@ test('webui 對話框：送 POST /api/chat；「你好」顯示回答不建任�
   await ui.context.sendChatTask();
   const chatPost = calls.find((call) => call.method === 'POST');
   assert.equal(chatPost.route, '/api/chat');
-  assert.deepEqual(JSON.parse(chatPost.body), { text: '你好' });
+  assert.deepEqual(JSON.parse(chatPost.body), { text: '你好', conversation_id: 'webui' });
   assert.ok(!calls.some((call) => call.method === 'POST' && call.route === '/api/tasks'), '不能再打 POST /api/tasks');
   const answer = ui.context.state.chatMessages.find((message) => message.answer);
   assert.ok(answer && answer.text.includes('（mock）'), JSON.stringify(ui.context.state.chatMessages));
@@ -695,4 +695,38 @@ test('webui 對話框：送 POST /api/chat；「你好」顯示回答不建任�
   assert.equal(Object.keys(ui.context.state.chatTasks).length, 1);
   assert.equal(taskFileNames().length, before + 1);
   await waitForTaskStatus(Object.keys(ui.context.state.chatTasks)[0], ['done', 'failed', 'blocked']);
+});
+
+// 對話記憶（J1）：這支測試的 TG 與 webui 入口會帶對話 id，對話檔一律寫到系統暫存目錄，結束時清掉。
+// 對話目錄每次呼叫都重讀環境變數，所以在這裡（任何測試開跑前）設好就生效。
+const CONVERSATIONS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'aiwff-chat-mode-conv-'));
+const savedConversationsDir = process.env.AIWFF_CONVERSATIONS_DIR;
+process.env.AIWFF_CONVERSATIONS_DIR = CONVERSATIONS_DIR;
+
+test.after(() => {
+  fs.rmSync(CONVERSATIONS_DIR, { recursive: true, force: true });
+  if (savedConversationsDir === undefined) delete process.env.AIWFF_CONVERSATIONS_DIR;
+  else process.env.AIWFF_CONVERSATIONS_DIR = savedConversationsDir;
+});
+
+test('對話記憶：webui 對話框的聊天寫進 webui 對話；/new 與 /reset 是指令', async () => {
+  process.env.AIWFF_MODE = 'both';
+  assert.deepEqual(route('/new', 'both'), { kind: 'command', instruction: '/new' });
+  assert.deepEqual(route('/RESET@MyBot', 'task'), { kind: 'command', instruction: '/new' });
+  assert.equal(route('/newbie', 'both').kind, 'chat');
+  const calls = [];
+  const ui = loadWebui(calls);
+  ui.document.getElementById('task-chat-text').value = '記得我叫小明嗎';
+  await ui.context.sendChatTask();
+  const lines = fs
+    .readFileSync(path.join(CONVERSATIONS_DIR, 'webui.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  const [userLine, assistantLine] = lines.slice(-2);
+  assert.deepEqual([userLine.role, userLine.text], ['user', '記得我叫小明嗎']);
+  assert.equal(assistantLine.role, 'assistant');
+  assert.match(assistantLine.text, /（mock）/);
+  const help = await request(port, 'POST', '/api/chat', { headers: AUTH, payload: { text: '/help' } });
+  assert.match(help.json.reply, /\/new/);
 });
