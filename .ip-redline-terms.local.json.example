@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "normalization": "NFKC lower-case",
+  "_how_to": "Copy to .ip-redline-terms.local.json (git-ignored) or pass --terms=<file>. Each entry is the sha256 hex of one private term after NFKC + lower-case. Never commit plain terms. An empty hashes array is refused (fail-closed), so fill it before use.",
+  "hashes": []
+}
