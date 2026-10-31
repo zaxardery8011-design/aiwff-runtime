@@ -303,6 +303,8 @@ Copy `.env.example` to `.env`. The current `.env.example` exposes these fields (
 
 In real Claude mode, the daemon sends the generated task prompt through stdin instead of placing it in argv. This avoids long prompt and quoting issues while preserving streamed stdout progress.
 
+Worker processes (mock, Claude, Claude chat and agy) no longer inherit the runtime's own secrets: `AIWFF_RUNTIME_TOKEN`, `TG_BOT_TOKEN` and `AIWFF_OPENAI_API_KEY` are removed from the worker environment by default, and every other variable is passed through unchanged. This is defense in depth only. If those tokens are written in `.env`, a worker running under the same user account can still read that file.
+
 Current `.env.example`:
 
 ```env

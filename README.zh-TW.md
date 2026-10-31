@@ -311,6 +311,8 @@ Use tools and execute the task until it is complete.
 
 真 Claude 模式下，daemon 會把任務 prompt 從 stdin 送給 Claude，而不是塞進 argv。stdin 是標準輸入；這樣比較不容易踩到長 prompt 或引號轉義問題，同時保留 stdout 串流進度。stdout 是標準輸出，也就是 CLI 往外印進度的地方。
 
+worker 子程序（mock、Claude、Claude 聊天、agy）不再繼承 runtime 自己的密鑰：`AIWFF_RUNTIME_TOKEN`、`TG_BOT_TOKEN`、`AIWFF_OPENAI_API_KEY` 預設會從 worker 的環境變數拿掉，其他變數原樣保留。這只是縱深防護。這些 token 若寫在 `.env`，同一個使用者帳號下的 worker 仍讀得到那個檔。
+
 目前 `.env.example`：
 
 ```env

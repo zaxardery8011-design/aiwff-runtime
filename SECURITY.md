@@ -20,3 +20,4 @@ Open an issue with a clear description, reproduction steps, affected files, and 
 - Telegram polling requires `TG_BOT_TOKEN` and fails closed without `ADMIN_TG_CHAT_ID`.
 - Real Claude CLI workers require explicit `ENABLE_REAL_CLAUDE_WORKER=1` opt-in.
 - Approval/sandbox bypass requires explicit `CLAUDE_BYPASS_APPROVALS=1` opt-in and must never be the public default.
+- Worker child processes no longer receive the runtime's own tokens: `AIWFF_RUNTIME_TOKEN`, `TG_BOT_TOKEN` and `AIWFF_OPENAI_API_KEY` are removed from the worker environment by default. This is defense in depth only. If those tokens are written in `.env`, a worker running under the same user account can still read that file.
