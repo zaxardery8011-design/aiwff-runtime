@@ -42,7 +42,61 @@ const RULE = {
   ENV_UNMATCHED_QUOTE: 'env.parse.unmatched_quote',
   ENV_UNSAFE_FLAG: 'env.unsafe_flag',
   DOCTOR_RUNTIME: 'doctor.runtime_error',
+  CHECK_TIMEOUT: 'doctor.check_timeout',
 };
+
+function positiveIntEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+// 一項檢查卡住不能讓整個 doctor 跟著掛住：每項各有逾時上限、整體也有總時長上限。
+// 卡住的那項記成 timeout（附耗時）然後繼續下一項；總預算用完時剩下的項目直接記 timeout、不再啟動。
+const CHECK_TIMEOUT_MS = positiveIntEnv('AIWFF_DOCTOR_CHECK_TIMEOUT_MS', 5000);
+const TOTAL_TIMEOUT_MS = positiveIntEnv('AIWFF_DOCTOR_TOTAL_TIMEOUT_MS', 30000);
+// 會啟動使用者自訂外部程式（CLAUDE_CMD）的探測改成要明確開啟；npm／git 是固定命令，照常跑。
+const PROBE_CLI = process.argv.includes('--probe-cli') || process.env.AIWFF_DOCTOR_PROBE_CLI === '1';
+// 測試用：指定的檢查 id 會被換成永遠不回的假檢查，用來驗逾時路徑。
+const TEST_HANG_CHECK = process.env.AIWFF_DOCTOR_TEST_HANG_CHECK || '';
+
+function createBudget(totalMs) {
+  const deadline = Date.now() + totalMs;
+  return { remaining: () => Math.max(0, deadline - Date.now()) };
+}
+
+function timeoutCheck(id, detail) {
+  const check = makeCheck(id, false, detail, [makeReason(RULE.CHECK_TIMEOUT, detail)]);
+  check.timeout = true;
+  return check;
+}
+
+async function runBounded(id, budget, run) {
+  const started = Date.now();
+  const limit = Math.min(CHECK_TIMEOUT_MS, budget.remaining());
+  if (limit <= 0) {
+    const check = timeoutCheck(id, `timeout: not started, doctor total budget ${TOTAL_TIMEOUT_MS}ms exhausted`);
+    check.elapsed_ms = 0;
+    return check;
+  }
+  let timer;
+  const work = id === TEST_HANG_CHECK ? new Promise(() => {}) : Promise.resolve().then(() => run(limit));
+  const expired = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), limit);
+  });
+  let check;
+  try {
+    check = await Promise.race([work, expired]);
+  } catch (error) {
+    check = makeCheck(id, false, error.message);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!check) {
+    check = timeoutCheck(id, `timeout: no result after ${limit}ms`);
+  }
+  check.elapsed_ms = Date.now() - started;
+  return check;
+}
 
 function coverage(ranIds, declaredIds = DOCTOR_CHECK_IDS) {
   const ran = declaredIds.filter((id) => ranIds.includes(id));
@@ -140,25 +194,29 @@ function quoteCommandPart(value) {
   return `"${text.replace(/"/g, '\\"')}"`;
 }
 
-function commandVersion(command) {
+// spawnSync 會擋住 event loop，runBounded 的計時器搶不到；所以逾時要交給 spawnSync 自己的 timeout 砍子程序。
+function commandVersion(command, timeoutMs) {
   let result;
+  const options = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, windowsHide: true };
   if (process.platform === 'win32') {
     const commandLine = [quoteCommandPart(command), '--version'].join(' ');
-    result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], options);
   } else {
-    result = spawnSync(command, ['--version'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    result = spawnSync(command, ['--version'], options);
+  }
+  if (result.error && result.error.code === 'ETIMEDOUT') {
+    return { ok: false, timeout: true, detail: `timeout: ${command} --version gave no result after ${timeoutMs}ms` };
   }
   const output = `${result.stdout || ''}${result.stderr || ''}`.trim().split(/\r?\n/)[0] || 'no version output';
   return {
     ok: result.status === 0,
     detail: result.error ? result.error.message : output,
   };
+}
+
+function commandCheck(id, command, timeoutMs) {
+  const result = commandVersion(command, timeoutMs);
+  return result.timeout ? timeoutCheck(id, result.detail) : makeCheck(id, result.ok, result.detail);
 }
 
 function parseDotEnv() {
@@ -345,23 +403,33 @@ function recordHealthRun({ mode, ok, coverage: coverageValue, failures }) {
 
 async function runJsonDoctor() {
   const parsedEnv = parseDotEnv();
-  const npm = commandVersion('npm');
-  const git = commandVersion('git');
-  const claudeCmd = envValue(parsedEnv, 'CLAUDE_CMD') || 'claude';
-  const claude = commandVersion(claudeCmd);
-  const port = await probePort(PORT);
   const nodeMajor = Number(process.versions.node.split('.')[0]);
+  const claudeCmd = envValue(parsedEnv, 'CLAUDE_CMD') || 'claude';
+  const budget = createBudget(TOTAL_TIMEOUT_MS);
 
-  const checks = [
-    makeCheck('node_version', nodeMajor >= 18, `${process.version} ${nodeMajor >= 18 ? '>=' : '<'} 18`),
-    makeCheck('npm_available', npm.ok, npm.detail),
-    makeCheck('git_available', git.ok, git.detail),
-    makeCheck('port_available', port.ok, port.detail),
-    checkDataDirWritable(),
-    checkEnvValid(parsedEnv),
-    makeCheck('claude_cli_optional', true, claude.ok ? claude.detail : `optional CLI not found: ${claude.detail}`),
-    checkTelegramConfig(parsedEnv),
+  const plan = [
+    ['node_version', () => makeCheck('node_version', nodeMajor >= 18, `${process.version} ${nodeMajor >= 18 ? '>=' : '<'} 18`)],
+    ['npm_available', (limit) => commandCheck('npm_available', 'npm', limit)],
+    ['git_available', (limit) => commandCheck('git_available', 'git', limit)],
+    ['port_available', async () => {
+      const port = await probePort(PORT);
+      return makeCheck('port_available', port.ok, port.detail);
+    }],
+    ['data_dir_writable', () => checkDataDirWritable()],
+    ['env_valid', () => checkEnvValid(parsedEnv)],
+    ['claude_cli_optional', (limit) => {
+      if (!PROBE_CLI) {
+        return makeCheck('claude_cli_optional', true, `skipped: ${claudeCmd} probe is opt-in (pass --probe-cli)`);
+      }
+      const claude = commandVersion(claudeCmd, limit);
+      return makeCheck('claude_cli_optional', true, claude.ok ? claude.detail : `optional CLI not found: ${claude.detail}`);
+    }],
+    ['tg_config_valid', () => checkTelegramConfig(parsedEnv)],
   ];
+  const checks = [];
+  for (const [id, run] of plan) {
+    checks.push(await runBounded(id, budget, run));
+  }
   const nextActions = [];
 
   for (const check of checks) {
@@ -392,7 +460,19 @@ async function runJsonDoctor() {
 async function runTextDoctor() {
   const node = checkNodeVersionText();
   const dir = checkTasksDirectoryText();
-  const port = await checkPortAvailableText(PORT);
+  const portLimit = Math.min(CHECK_TIMEOUT_MS, TOTAL_TIMEOUT_MS);
+  let portTimer;
+  const port = await Promise.race([
+    TEST_HANG_CHECK === 'port_available' ? new Promise(() => {}) : checkPortAvailableText(PORT),
+    new Promise((resolve) => {
+      portTimer = setTimeout(() => {
+        const detail = `port ${PORT} check timeout: no result after ${portLimit}ms`;
+        console.log(`FAIL ${detail}`);
+        resolve({ status: 'fail', detail });
+      }, portLimit);
+    }),
+  ]);
+  clearTimeout(portTimer);
   // 三種收尾都要帶著分母走：PASS 沒帶分母最危險，但 WARN／FAIL 同樣會被當成「doctor 全跑過」。
   const coverageValue = coverage(TEXT_MODE_CHECK_IDS);
   const covered = formatCoverage(coverageValue);

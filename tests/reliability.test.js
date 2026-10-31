@@ -1660,6 +1660,30 @@ function withOccupiedPort(run) {
   });
 }
 
+test('doctor bounded: a hung check is marked timeout within the cap and the other checks still report', () => {
+  const started = Date.now();
+  const run = runDoctor(['--json'], {
+    AIWFF_DOCTOR_TEST_HANG_CHECK: 'git_available',
+    AIWFF_DOCTOR_CHECK_TIMEOUT_MS: '500',
+    AIWFF_DOCTOR_TOTAL_TIMEOUT_MS: '20000',
+  });
+  const elapsed = Date.now() - started;
+  const report = JSON.parse(run.stdout);
+  assert.ok(elapsed < 20000, `doctor 超過總上限才結束: ${elapsed}ms`);
+  const hung = report.checks.find((check) => check.id === 'git_available');
+  assert.equal(hung.ok, false);
+  assert.equal(hung.timeout, true);
+  assert.ok(hung.elapsed_ms >= 400, `逾時項耗時欄不合理: ${hung.elapsed_ms}`);
+  assert.deepEqual(hung.reasons.map((item) => item.rule_id), ['doctor.check_timeout']);
+  const others = report.checks.filter((check) => check.id !== 'git_available');
+  assert.equal(others.length, 7);
+  for (const check of others) {
+    assert.ok(!check.timeout, `${check.id} 不該逾時`);
+    assert.equal(typeof check.elapsed_ms, 'number');
+  }
+  assert.equal(run.code, 1);
+});
+
 test('doctor coverage: the pass line names how many checks actually ran, not the nominal "doctor"', async () => {
   // --json 建出來的 checks 是「這支腳本到底有幾項檢查」的唯一事實來源。
   const json = runDoctor(['--json'], {});
