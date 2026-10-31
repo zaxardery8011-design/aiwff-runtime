@@ -1042,6 +1042,24 @@ function renderHome() {
   return fs.readFileSync(path.join(__dirname, 'webui.html'), 'utf8');
 }
 
+// worker 會照使用者的指令做任何事，不需要 runtime 自己的密鑰：寫入 API 的 token、TG bot token、
+// OpenAI 相容端點的金鑰都只給 runtime 本身用。其餘變數（PATH、HOME、各家 CLI 的登入設定）原樣保留。
+// 只是縱深防護：token 寫在 .env 時，同一個使用者帳號下的 worker 仍讀得到那個檔。
+const WORKER_ENV_STRIPPED_KEYS = ['AIWFF_RUNTIME_TOKEN', 'TG_BOT_TOKEN', 'AIWFF_OPENAI_API_KEY'];
+
+function buildWorkerEnv() {
+  const env = { ...process.env };
+  // Windows 的環境變數名稱不分大小寫，process.env 的複本卻是普通物件，要自己比對。
+  const ignoreCase = process.platform === 'win32';
+  const stripped = new Set(WORKER_ENV_STRIPPED_KEYS.map((key) => (ignoreCase ? key.toUpperCase() : key)));
+  for (const key of Object.keys(env)) {
+    if (stripped.has(ignoreCase ? key.toUpperCase() : key)) {
+      delete env[key];
+    }
+  }
+  return env;
+}
+
 function spawnMockWorker(task) {
   const taskId = task.id;
   const timeoutMs = normalizeWorkerTimeoutSec(task) * 1000;
@@ -1051,6 +1069,7 @@ function spawnMockWorker(task) {
     cwd: ROOT_DIR,
     detached: true,
     stdio: 'ignore',
+    env: buildWorkerEnv(),
   });
   trackWorker(taskId, child);
   // stdio 是 ignore，沒有輸出可以再細分；只能誠實說「已 detach、之後看不見」。
@@ -1675,6 +1694,7 @@ function spawnClaudeProcess(claudeCmd, args, optionsOverride = {}) {
   const options = {
     cwd: optionsOverride.cwd || ROOT_DIR,
     stdio: ['pipe', 'pipe', 'pipe'],
+    env: buildWorkerEnv(),
   };
   if (process.platform !== 'win32') {
     return spawn(claudeCmd, args, options);
@@ -1958,6 +1978,7 @@ function spawnAgyWorker(task, attempt = 1) {
     cwd: workerCwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
+    env: buildWorkerEnv(),
   });
   trackWorker(task.id, child);
 
@@ -3095,6 +3116,8 @@ module.exports = {
   // worker 失敗的環境判定是純函式：四類環境原因加「不是環境問題」都要驗得到。
   classifyEnvFailure,
   workerCommandExists,
+  // worker 子程序的環境變數：拿掉 runtime 自己的密鑰，其他照舊。
+  buildWorkerEnv,
   taskEventSummary,
   MAX_TASK_RETRIES,
   RETRY_BACKOFF_MS,
