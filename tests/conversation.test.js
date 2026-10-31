@@ -533,8 +533,13 @@ test('同一個 id 依序處理、不同 id 互不阻塞', async () => {
   const captureFile = useFakeClaude('claude-order', 800);
   const startedAt = Date.now();
   const sameA = chat('同一段的第一句是什麼', 'api-order');
-  const sameB = chat('同一段的第二句呢', 'api-order');
   const other = chat('另一段的話呢', 'api-other');
+  // 兩個請求同時送出時，server 先收到哪一個不一定；等第一句進到假 CLI 再送第二句。
+  for (let i = 0; i < 100; i += 1) {
+    if (readCaptures(captureFile).some((captured) => captured.input.includes('## 訊息\n同一段的第一句是什麼'))) break;
+    await sleep(20);
+  }
+  const sameB = chat('同一段的第二句呢', 'api-order');
   const otherRes = await other;
   const otherMs = Date.now() - startedAt;
   await Promise.all([sameA, sameB]);
