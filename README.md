@@ -287,7 +287,7 @@ Prebuilt personas live in [templates/claude/](templates/claude/): dev partner, r
 
 ## Configuration
 
-Copy `.env.example` to `.env`. The current `.env.example` exposes these fields (except `AIWFF_MODE` and `AIWFF_CHAT_TIMEOUT_SEC`, which are not in `.env.example` yet; add them to `.env` yourself if you need them, for example `AIWFF_MODE=both` to turn on chat):
+Copy `.env.example` to `.env`. The current `.env.example` exposes these fields (except `AIWFF_CHAT_TIMEOUT_SEC` and `AIWFF_CONVERSATIONS_DIR`, which are not in `.env.example` yet; add them to `.env` yourself if you need them). `.env.example` sets `AIWFF_MODE=both`, so a copied `.env` turns chat on; the built-in default when the variable is unset is still `task`:
 
 | Variable | Required? | Default / empty value | Used by | Description |
 |---|---:|---|---|---|
@@ -298,7 +298,8 @@ Copy `.env.example` to `.env`. The current `.env.example` exposes these fields (
 | `MOCK_WORKER` | No | `1` | `agent/index.js` | Public-safe default: use the mock worker instead of Claude CLI |
 | `ENABLE_REAL_CLAUDE_WORKER` | Required for real Claude worker | empty | `agent/index.js` | Set to `1` only when you intentionally want Claude CLI execution |
 | `CLAUDE_BYPASS_APPROVALS` | Optional unsafe mode | empty | `agent/index.js` | Set to `1` only if you intentionally want `--dangerously-skip-permissions` on `claude --print` |
-| `AIWFF_MODE` | No | `task` | `agent/index.js` | How Telegram messages, `POST /api/chat` and the WebUI chat box are routed. `task` (default, same as before chat mode existed): every message creates a task. `both`: plain messages get a direct chat answer, `/task …` (or a clear action request such as "幫我…" that is not a question) creates a task, `/chat …` forces chat (`/task` and `/chat` are case-insensitive and accept an `@bot` suffix). `chat`: never create tasks. Empty or unknown values use `task`, so chat is only on when you set `AIWFF_MODE=both` (or `chat`) yourself. `AIWFF_WORKER_PROVIDER=agy` has no chat path: keep it on `task`, because `/api/doctor` flags `both` or `chat` with agy as not OK. `/api/doctor` shows the active mode. Chat calls are read-only, tool-less and single-turn (`claude --print --tools ""`, timeout set by `AIWFF_CHAT_TIMEOUT_SEC`) and never write `data/tasks`; with `MOCK_WORKER=1` they return a fixed string |
+| `AIWFF_MODE` | No | `task` | `agent/index.js` | How Telegram messages, `POST /api/chat` and the WebUI chat box are routed. `task` (default, same as before chat mode existed): every message creates a task. `both`: plain messages get a direct chat answer, `/task …` (or a clear action request such as "幫我…" that is not a question) creates a task, `/chat …` forces chat (`/task` and `/chat` are case-insensitive and accept an `@bot` suffix). `chat`: never create tasks. Empty or unknown values use `task`, so chat is only on when you set `AIWFF_MODE=both` (or `chat`) yourself. `AIWFF_WORKER_PROVIDER=agy` has no chat path: keep it on `task`, because `/api/doctor` flags `both` or `chat` with agy as not OK. `/api/doctor` shows the active mode. Chat calls are read-only and tool-less (`claude --print --tools ""`, timeout set by `AIWFF_CHAT_TIMEOUT_SEC`) and never write `data/tasks`; with `MOCK_WORKER=1` they return a fixed string. Earlier turns of the same conversation are replayed into the prompt (see [Chat conversation memory](#chat-conversation-memory)) |
+| `AIWFF_CONVERSATIONS_DIR` | No | `data/conversations` | `agent/conversation-store.js` | Where chat conversation logs are written (one `<conversation_id>.jsonl` per conversation) |
 | `AIWFF_CHAT_TIMEOUT_SEC` | No | `30` | `agent/index.js` | Maximum seconds to wait for one chat reply (1–300); on timeout the reply is a "chat reply failed" message and no task is created |
 
 In real Claude mode, the daemon sends the generated task prompt through stdin instead of placing it in argv. This avoids long prompt and quoting issues while preserving streamed stdout progress.
@@ -313,7 +314,21 @@ CLAUDE_CMD=claude
 MOCK_WORKER=1
 ENABLE_REAL_CLAUDE_WORKER=
 CLAUDE_BYPASS_APPROVALS=
+AIWFF_MODE=both
 ```
+
+### Chat conversation memory
+
+Chat remembers earlier turns of the same conversation, so a follow-up like "and the second point?" has context. The runtime does this itself: it does not keep a CLI session (`--no-session-persistence` stays on and the chat argv does not change). Before each chat reply it reads the recent turns of the conversation (at most 12 messages and 6000 characters after the last reset) and replays them into the prompt. For Claude they go into the stdin prompt under `## 最近對話`, each turn headed by its time and role with the text indented, so text inside a message cannot pose as another turn. When the latest turn is more than 6 hours old the heading says it is an older conversation. For `openai_compatible` they are sent as alternating `user` / `assistant` messages between the system message and the new message.
+
+- Telegram: each chat gets its own conversation (`tg-<chat id>`, with a leading `-` written as `m`).
+- WebUI chat box: one conversation named `webui`.
+- `POST /api/chat`: send `{"text": "...", "conversation_id": "my-thread"}` to use a conversation. Without `conversation_id` the call stays single-turn as before. The id must match `^[A-Za-z0-9_-]{1,64}$` and must not start with `tg-` (reserved for Telegram); otherwise the answer is 400. The response includes `conversation_id`.
+- `/new` (same as `/reset`) starts a new conversation: the log gets a reset marker and earlier turns are no longer replayed. On `POST /api/chat` without `conversation_id` it answers that this entry point has no conversation memory.
+- `GET /api/conversations/:id` returns up to the last 50 messages after the latest reset. It needs the runtime token (401 without it); an invalid id is 400 and an unknown id returns an empty list.
+- A user and assistant pair is written only after the model answers; a failed reply writes nothing. A task created from a conversation adds a system note (`已建任務 <id>：<title>`). Only what the user typed can create a task; model replies are never treated as commands. Messages of one conversation are answered in order; different conversations do not wait for each other.
+
+Conversation logs hold the full text of your chats and are stored in `data/conversations/` (append-only `.jsonl`). Do not commit them; `data/` is already in `.gitignore`.
 
 `WORK_DIR` appears in the design draft, but it is not present in the current `.env.example` and is not read by the current Phase 2 runtime.
 

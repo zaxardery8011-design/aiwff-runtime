@@ -295,7 +295,7 @@ Use tools and execute the task until it is complete.
 
 把 `.env.example` 複製成 `.env` 後再改。`.env` 是本機設定檔，通常不應該提交到 git。
 
-目前 `.env.example` 有這些欄位（`AIWFF_MODE`、`AIWFF_CHAT_TIMEOUT_SEC` 兩列例外：還沒寫進 `.env.example`，要用就自己加到 `.env`，例如加 `AIWFF_MODE=both` 開聊天）：
+目前 `.env.example` 有這些欄位（`AIWFF_CHAT_TIMEOUT_SEC`、`AIWFF_CONVERSATIONS_DIR` 兩列例外：還沒寫進 `.env.example`，要用就自己加到 `.env`）。`.env.example` 已經寫了 `AIWFF_MODE=both`，照抄成 `.env` 就會開聊天；完全沒設這個變數時，程式內的預設仍是 `task`：
 
 | 變數 | 必填？ | 預設 / 空值 | 誰會讀 | 說明 |
 |---|---:|---|---|---|
@@ -306,7 +306,8 @@ Use tools and execute the task until it is complete.
 | `MOCK_WORKER` | 否 | `1` | `agent/index.js` | 對外安全預設：使用 mock worker，不呼叫 Claude CLI |
 | `ENABLE_REAL_CLAUDE_WORKER` | 真 Claude worker 必填 | 空 | `agent/index.js` | 只有你真的要讓 Claude CLI 執行任務時才設成 `1` |
 | `CLAUDE_BYPASS_APPROVALS` | 危險模式選填 | 空 | `agent/index.js` | 只有你明確想讓 `claude --print` 加上 `--dangerously-skip-permissions` 時才設成 `1` |
-| `AIWFF_MODE` | 否 | `task` | `agent/index.js` | Telegram 訊息、`POST /api/chat`、WebUI 對話框怎麼分流。`task`（預設，跟還沒有聊天模式時一樣）：每則訊息都建任務。`both`：一般訊息直接聊天回答，`/task …` 開頭（或「幫我…」這類明確要做事、又不是問句的訊息）才建任務，`/chat …` 強制聊天（`/task`、`/chat` 不分大小寫、可帶 `@bot`）。`chat`：只聊天、不建任務。留空或值不認得就用 `task`，所以要你自己設 `AIWFF_MODE=both`（或 `chat`）才會開聊天。`AIWFF_WORKER_PROVIDER=agy` 沒有聊天路徑，請維持 `task`；agy 搭 `both` 或 `chat` 時 `/api/doctor` 會標成不正常。`/api/doctor` 會顯示目前模式。聊天呼叫唯讀、無工具、單輪（`claude --print --tools ""`，逾時見 `AIWFF_CHAT_TIMEOUT_SEC`），不寫 `data/tasks`；`MOCK_WORKER=1` 時回固定字串 |
+| `AIWFF_MODE` | 否 | `task` | `agent/index.js` | Telegram 訊息、`POST /api/chat`、WebUI 對話框怎麼分流。`task`（預設，跟還沒有聊天模式時一樣）：每則訊息都建任務。`both`：一般訊息直接聊天回答，`/task …` 開頭（或「幫我…」這類明確要做事、又不是問句的訊息）才建任務，`/chat …` 強制聊天（`/task`、`/chat` 不分大小寫、可帶 `@bot`）。`chat`：只聊天、不建任務。留空或值不認得就用 `task`，所以要你自己設 `AIWFF_MODE=both`（或 `chat`）才會開聊天。`AIWFF_WORKER_PROVIDER=agy` 沒有聊天路徑，請維持 `task`；agy 搭 `both` 或 `chat` 時 `/api/doctor` 會標成不正常。`/api/doctor` 會顯示目前模式。聊天呼叫唯讀、無工具（`claude --print --tools ""`，逾時見 `AIWFF_CHAT_TIMEOUT_SEC`），不寫 `data/tasks`；`MOCK_WORKER=1` 時回固定字串。同一段對話的前文會重播進 prompt（見[聊天的對話記憶](#聊天的對話記憶)） |
+| `AIWFF_CONVERSATIONS_DIR` | 否 | `data/conversations` | `agent/conversation-store.js` | 聊天對話紀錄寫在哪裡（每段對話一個 `<conversation_id>.jsonl`） |
 | `AIWFF_CHAT_TIMEOUT_SEC` | 否 | `30` | `agent/index.js` | 一則聊天回覆最多等幾秒（1–300）；逾時回「聊天回覆失敗」，不建任務 |
 
 真 Claude 模式下，daemon 會把任務 prompt 從 stdin 送給 Claude，而不是塞進 argv。stdin 是標準輸入；這樣比較不容易踩到長 prompt 或引號轉義問題，同時保留 stdout 串流進度。stdout 是標準輸出，也就是 CLI 往外印進度的地方。
@@ -321,7 +322,21 @@ CLAUDE_CMD=claude
 MOCK_WORKER=1
 ENABLE_REAL_CLAUDE_WORKER=
 CLAUDE_BYPASS_APPROVALS=
+AIWFF_MODE=both
 ```
+
+### 聊天的對話記憶
+
+聊天會記得同一段對話的前文，問「那第二點呢？」時模型知道在講什麼。這是 runtime 自己做的，不靠 CLI session（`--no-session-persistence` 照舊，聊天的 argv 一個字都不變）：每次回答前，runtime 讀出這段對話最近的內容（最後一次重開之後，最多 12 則、6000 字），重播進 prompt。Claude 是放進 stdin 的 prompt，段落標題是「## 最近對話」，每則開頭標時間和角色、內文縮排兩格，所以內文裡就算寫了「[時間] 使用者：」也不會被當成另一輪；最近一則距今超過 6 小時，標題會改成「較早的對話」。`openai_compatible` 則是在 system 和本則訊息之間，依序放 `user`／`assistant` 交錯的前文。
+
+- Telegram：每個聊天室各自一段對話（`tg-<chat id>`，開頭的 `-` 換成 `m`）。
+- WebUI 對話框：一段名叫 `webui` 的對話。
+- `POST /api/chat`：送 `{"text": "...", "conversation_id": "my-thread"}` 就會用那段對話；沒帶 `conversation_id` 維持跟以前一樣的單輪。id 只能是 `^[A-Za-z0-9_-]{1,64}$`，而且不能用 `tg-` 開頭（保留給 Telegram），不合法回 400。回應會多帶 `conversation_id`。
+- `/new`（同 `/reset`）開新對話：紀錄裡寫一行重開標記，之前的內容不再重播。`POST /api/chat` 沒帶 `conversation_id` 時會回「這個入口沒有對話記憶」。
+- `GET /api/conversations/:id` 回最後一次重開之後最近 50 則。要 runtime token（沒帶回 401）；id 不合法回 400，沒有這段對話回空陣列。
+- 模型回答成功後才寫進使用者和助理兩則；回答失敗兩則都不寫。從對話建任務時會多一則系統紀錄（`已建任務 <id>：<標題>`）。只有使用者打的字能建任務，模型的回覆永遠不會被當成指令。同一段對話的訊息依序回答，不同對話互不等待。
+
+對話紀錄是聊天全文，存在 `data/conversations/`（只追加的 `.jsonl`）。不要提交；`data/` 已經在 `.gitignore` 裡。
 
 `WORK_DIR` 出現在設計草稿裡，但目前 `.env.example` 沒有這個欄位，Phase 2 runtime 也不讀它。
 
