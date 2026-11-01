@@ -383,7 +383,7 @@
       grid-template-columns: 240px minmax(0, 1fr);
       background: var(--bg-0);
     }
-    /* 對話分頁左欄：bot 名冊。外來字串（名字、介紹）一律用 textContent 放進來。 */
+    /* 對話分頁左欄：bot 清單。外來字串（名字、介紹）一律用 textContent 放進來。 */
     .bot-roster {
       min-width: 0;
       min-height: 0;
@@ -498,7 +498,7 @@
     .chat-new-button:disabled { cursor: not-allowed; color: var(--fg-2); }
     .msg.pending { color: var(--fg-2); letter-spacing: 2px; }
     @media (max-width: 719px) {
-      /* 窄螢幕：名冊收成對話上方的下拉選單，不能出現橫向捲動。 */
+      /* 窄螢幕：清單收成對話上方的下拉選單，不能出現橫向捲動。 */
       .task-chat { grid-template-columns: minmax(0, 1fr); }
       .bot-roster { display: none; }
       .chat-bot-name { display: none; }
@@ -1131,8 +1131,8 @@
 
       <section id="view-new-task" class="view">
         <div class="task-chat" aria-label="對話與建立任務">
-          <aside class="bot-roster" aria-label="bot 名冊">
-            <div class="bot-roster-title">BOT · 名冊</div>
+          <aside class="bot-roster" aria-label="bot 清單">
+            <div class="bot-roster-title">BOT · 清單</div>
             <div class="bot-roster-list" id="bot-roster-list"></div>
           </aside>
           <div class="chat-pane">
@@ -1291,11 +1291,11 @@
       // null = 還沒查過 /api/session；false = 沒有登入 cookie，對話分頁停用送出。
       loggedIn: null,
       chatTasks: {},
-      // bot 名冊：null = 還沒讀到 GET /api/bots（送出時不帶 bot_id，用預設 bot）。
+      // bot 清單：null = 還沒讀到 GET /api/bots（送出時不帶 bot_id，用預設 bot）。
       bots: null,
       defaultBotId: null,
       currentBotId: null,
-      // 每個 bot 最後一則訊息的時間（botId → ISO 字串），名冊用。
+      // 每個 bot 最後一則訊息的時間（botId → ISO 字串），清單用。
       botLastTs: {},
       // 對話 id → GET /api/conversations/:id 讀回來的訊息；chatLocal 是只存在這個分頁的訊息（指令回覆、任務進度）。
       chatServer: {},
@@ -1502,7 +1502,7 @@
       return null;
     }
 
-    // ── bot 名冊與對話（J3）──────────────────────────────────
+    // ── bot 清單與對話（J3）──────────────────────────────────
     var CHAT_BASE_CONVERSATION_ID = 'webui';
     var CHAT_BOT_STORAGE_KEY = 'aiwff_runtime_chat_bot';
     var CHAT_WELCOME_MESSAGE = state.chatMessages[0];
@@ -1532,7 +1532,7 @@
       return findChatBot(state.currentBotId);
     }
 
-    // 跟後端同一條規則：預設 bot 沿用 webui，其他 bot 加後綴 -<botId>。名冊還沒讀到時就是 webui。
+    // 跟後端同一條規則：預設 bot 沿用 webui，其他 bot 加後綴 -<botId>。清單還沒讀到時就是 webui。
     function chatConversationId(bot) {
       return bot && !bot.is_default ? CHAT_BASE_CONVERSATION_ID + '-' + bot.id : CHAT_BASE_CONVERSATION_ID;
     }
@@ -1606,7 +1606,7 @@
         if (list) {
           var notice = document.createElement('div');
           notice.className = 'bot-roster-empty';
-          notice.textContent = state.loggedIn === false ? '登入後才看得到名冊' : '讀取名冊中…';
+          notice.textContent = state.loggedIn === false ? '登入後才看得到清單' : '讀取清單中…';
           list.appendChild(notice);
         }
         return;
@@ -1669,7 +1669,7 @@
       renderChat();
     }
 
-    // GET /api/bots：選上次記在 localStorage 的 bot，不在名冊裡就用預設 bot；再把每個 bot 的對話讀回來。
+    // GET /api/bots：選上次記在 localStorage 的 bot，不在清單裡就用預設 bot；再把每個 bot 的對話讀回來。
     async function loadChatBots() {
       var data = await fetchJson(routes.bots, { credentials: 'same-origin' });
       var bots = Array.isArray(data.bots) ? data.bots : [];
@@ -1687,7 +1687,7 @@
       }));
     }
 
-    // refresh 每輪都叫：名冊沒讀到就重讀，讀到了就把目前 bot 的對話畫回來。送出中不做。
+    // refresh 每輪都叫：清單沒讀到就重讀，讀到了就把目前 bot 的對話畫回來。送出中不做。
     async function refreshChatView() {
       if (state.chatBusy) return;
       try {
@@ -3030,7 +3030,7 @@
 
     renderBotRoster();
     refresh();
-    // 名冊與對話不等整輪 refresh：載入時就先讀一次。
+    // 清單與對話不等整輪 refresh：載入時就先讀一次。
     refreshChatView();
     setInterval(refresh, 5000);
   </script>

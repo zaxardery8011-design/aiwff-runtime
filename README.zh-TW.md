@@ -379,7 +379,7 @@ PowerShell：`Copy-Item -Recurse examples\bots bots`。沒有 `bots/`（或裡�
 - **安全規則一定在。** runtime 會在人設之後固定附加自己的規則：這條路徑沒有工具、不能讀寫檔案、也不會建立任務。人設寫什麼都蓋不掉。
 - **`model` 實驗中。** 要你的 CLI 支援 `--model` 才有效。值要符合 `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$`（不能有空白、引號，第一個字不能是 `-`），不合法就忽略。Claude 聊天會在固定參數後面加 `--model <值>`；`openai_compatible` 會用它取代 `AIWFF_OPENAI_MODEL`。還沒有拿真的模型驗證過。
 - **對話。** 預設 bot 沿用原本的對話 id（`webui`、`tg-<chat id>`）；其他 bot 加後綴 `-<bot id>`，例如 `webui-research-assistant`。
-- **WebUI。** 對話分頁左邊是名冊（名字、介紹、最後一則訊息時間），右邊是對話，上方有「新對話」按鈕（送 `/new`）。對話從伺服器讀回來，重新整理不會不見；上次選的 bot 記在瀏覽器裡。寬度小於 720px 時，名冊收成對話上方的下拉選單。
+- **WebUI。** 對話分頁左邊是清單（名字、介紹、最後一則訊息時間），右邊是對話，上方有「新對話」按鈕（送 `/new`）。對話從伺服器讀回來，重新整理不會不見；上次選的 bot 記在瀏覽器裡。寬度小於 720px 時，清單收成對話上方的下拉選單。
 - **Telegram。** `/bots` 列出所有 bot，並標出現在在跟誰聊。`/bot <id>` 把這個 chat 切到那個 bot，回 `現在跟 <名字> 聊。`；跟 `/new` 一樣，也會清掉這個 chat 收著還沒回的訊息。選擇存在 `data/chat_state.json`（`AIWFF_CHAT_STATE_FILE` 可以換位置）；這個檔寫壞時會退回預設 bot，並記 stderr。
 - **API。** `GET /api/bots` 回 `[{id, name, description, model, is_default}]`，不回人設內文，要 runtime token。`POST /api/chat` 可以帶 `bot_id`（不存在回 400），回應帶 `bot_id`。`/api/doctor` 和 `/api/settings` 會顯示 bot 數量和警告（略過的檔、被忽略的 `model`）。
 

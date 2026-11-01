@@ -1,5 +1,5 @@
 // 多個 bot（J3）測試：bot 目錄、聊天人設與固定安全段、--model、GET /api/bots、POST /api/chat 的 bot_id、
-// Telegram 的 /bots 與 /bot、chat_state、WebUI 名冊。
+// Telegram 的 /bots 與 /bot、chat_state、WebUI 清單。
 // 同一個 process 內起 runtime server、假 Telegram、假 OpenAI 相容端點（都只綁 127.0.0.1）；不叫真 claude、不連真網路。
 // 假 CLI、bot 目錄、對話檔、chat_state 都放系統暫存目錄，結束時清掉。
 // 要驗先後順序的地方，都等前一則確實進到假 CLI（看 capture 檔）或假 Telegram 確實送出後才送下一則。
@@ -780,7 +780,7 @@ test('(f) WebUI：載入打 GET /api/bots 與 GET /api/conversations/:id；切�
   assert.ok(answer && /（mock）/.test(answer.text), JSON.stringify(ui.context.state.chatMessages));
 
   // 外來字串一律走 textContent：名字原樣出現在 textContent，任何元素的 innerHTML 都沒有它。
-  assert.ok(ui.created.some((element) => element.textContent === EVIL_NAME), '名冊要以文字顯示 bot 名字');
+  assert.ok(ui.created.some((element) => element.textContent === EVIL_NAME), '清單要以文字顯示 bot 名字');
   assert.ok(ui.created.some((element) => element.textContent === '<b>粗體</b>介紹'));
   for (const element of [...ui.created, ...ui.elements.values()]) {
     assert.ok(!String(element.innerHTML).includes('<img src=x'), `innerHTML 不能帶 bot 名字：${element.innerHTML}`);
@@ -813,7 +813,7 @@ test('(f) WebUI：載入打 GET /api/bots 與 GET /api/conversations/:id；切�
   assert.equal(ui3.context.state.currentBotId, 'evil', '寫不進 localStorage 也照樣切換');
 });
 
-test('(f) WebUI：送出中顯示「…」等待泡泡；版面在 720px 以下把名冊收成下拉選單', async () => {
+test('(f) WebUI：送出中顯示「…」等待泡泡；版面在 720px 以下把清單收成下拉選單', async () => {
   twoBots();
   const captureFile = useFakeClaude('claude-bots-f', 1000);
   const calls = [];

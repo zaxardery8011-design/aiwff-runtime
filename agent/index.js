@@ -1055,7 +1055,7 @@ function getSettingsSnapshot() {
     endpoints: [
       { name: 'HUD', route: 'GET /api/hud + GET /api/health' },
       { name: '對話 / 新任務', route: 'POST /api/chat, POST /api/tasks, GET /api/tasks/:id/result, GET /api/conversations/:id' },
-      { name: 'bot 名冊', route: 'GET /api/bots' },
+      { name: 'bot 清單', route: 'GET /api/bots' },
       { name: '任務', route: 'GET /api/tasks, GET /api/tasks/:id' },
       { name: '進度 / 事件', route: 'GET /api/events, GET /api/tasks/:id/progress' },
       { name: '收件匣 / 卡住', route: 'GET /api/inbox, GET /api/tasks?status=blocked' },
@@ -2777,13 +2777,13 @@ async function handleConversationMessage(rawText, { conversationId = null, botId
     return { ok: true, kind: 'command', mode, command: '/bots', reply: botListReplyText(catalog, bot), ...botFields };
   }
   if (routed.kind === 'command' && routed.instruction === '/bot') {
-    // 這個入口沒有「目前的 bot」可以存：WebUI 在名冊點選，API 在 POST /api/chat 帶 bot_id。TG 在 pollTelegram 另外處理。
+    // 這個入口沒有「目前的 bot」可以存：WebUI 在清單點選，API 在 POST /api/chat 帶 bot_id。TG 在 pollTelegram 另外處理。
     return {
       ok: true,
       kind: 'command',
       mode,
       command: '/bot',
-      reply: `這裡不用 /bot 切換：WebUI 請在左邊名冊點選，API 請在 POST /api/chat 帶 bot_id。\n${botListReplyText(catalog, bot)}`,
+      reply: `這裡不用 /bot 切換：WebUI 請在左邊清單點選，API 請在 POST /api/chat 帶 bot_id。\n${botListReplyText(catalog, bot)}`,
       ...botFields,
     };
   }
@@ -3456,7 +3456,7 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // bot 名冊：只回公開欄位，不回人設內文。名冊會透露你設了哪些人設，跟對話紀錄同一級要 runtime token。
+  // bot 清單：只回公開欄位，不回人設內文。清單會透露你設了哪些人設，跟對話紀錄同一級要 runtime token。
   if (req.method === 'GET' && url.pathname === '/api/bots') {
     const readAccess = verifyReadAccess(req);
     if (!readAccess.ok) {
