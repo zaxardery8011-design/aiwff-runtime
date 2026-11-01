@@ -398,6 +398,19 @@ PowerShell：`Copy-Item -Recurse examples\bots bots`。沒有 `bots/`（或裡�
 - **Telegram 按鈕。** 確認卡是一則帶兩個按鈕的訊息：「建立任務」和「取消」（`callback_data` 是 `cf:<proposal_id>:a` 或 `:d`，遠小於 64 bytes）。只接受 chat 和按的人都是 `ADMIN_TG_CHAT_ID` 的按鈕，其他一律忽略、不建任務。按下後 bot 會回應這次點擊、拿掉按鈕，並把訊息改成標明 `已建立`、`已取消` 或 `已過期`。確認卡和任務結果的訊息都不帶 `parse_mode`。
 - **WebUI。** 對話框會畫出確認卡和兩個按鈕，按了打 `POST /api/chat/confirm`，結果寫回對話框；卡片過期後按鈕停用。任務結果改從對話紀錄來，同一個結果只出現一次。開頭那則說明照目前模式顯示。任務標題、產出、確認卡內容這類外來字串一律當純文字顯示。
 
+### 任務問問題
+
+任務做到一半缺資訊時，worker 會停下來問你，不亂猜。你在 Telegram 或 WebUI 回答後，答案會帶進下一棒續跑。
+
+- **怎麼問。** Claude worker 的 prompt 會說：缺少關鍵資訊、又不能合理假設時，不要亂猜，最後一行寫 `BLOCKED: <一個要問使用者的具體問題>` 然後結束，這時不用寫結果檔。
+- **怎麼判定。** Claude worker exit 0、沒有結果檔、stdout 最後一個非空行以 `BLOCKED:` 開頭時，任務變成 `blocked`，`blocked_reason` 是 `question`，問題存在 `question` 欄位（最多 1000 字），不重試。其他情況照舊：沒產出、最後一行也不是 `BLOCKED:`，一樣算失敗並重試 `MAX_TASK_RETRIES` 次。只有 Claude worker 會這樣判；`agy` 和 OpenAI 相容 worker 不變，prompt 也不會教它們問。mock worker 有一個測試用觸發：instruction 含 `[mock-question]` 時印出 `BLOCKED: 測試問題`，用同樣方式收尾。
+- **用 API 回答。** `POST /api/tasks/:id/resume` 可以帶 JSON body `{"answer": "..."}`，選填，字串 1～2000 字，空字串或過長回 400。不帶 body（或帶 `{}`）跟以前完全一樣。答案存在 `resume_answer`，上一棒的問題存在 `resume_question`；`question` 在續跑時清掉。下一棒的 prompt 會多一段 `## 你上一棒問的問題與使用者的回答`，寫 `問：<問題>` 和 `答：`，答案內文縮排，標明是使用者的回答。
+- **續跑煞車。** 帶著回答續跑 `blocked_reason` 是 `question` 的任務時，這次不算進 `no_progress` 的計數（問問題本來就不會多記 checkpoint 步數），只受 `MAX_TASK_RESUMES` 管。
+- **對話紀錄。** 任務有 `conversation_id` 時，問題會寫進那段對話：`任務需要你回答：<標題>` 加上問題。回答時再寫一則 user（你的答案原文）和一則 system `已帶著回答續跑：<標題>`。
+- **Telegram。** 管理員 chat 會收到 `❓ 任務需要你回答：<標題>`、問題，和一行 `直接回覆這則訊息，或用 /answer <答案>`（不帶 `parse_mode`；跟其他任務通知一樣，推回的 chat id 要等於 `ADMIN_TG_CHAT_ID` 才送）。直接回覆那則訊息，或傳 `/answer <答案>`，bot 就帶著答案續跑並回 `收到，帶著你的答案繼續做`。這個 chat 有兩個以上任務在等時，要寫成 `/answer <任務 id 前 8 碼> <答案>`；沒帶的話 bot 會列出等回答的任務清單，一個都不續跑。「回覆哪則訊息對應哪個任務」只存在記憶體：runtime 重啟後回覆舊的提問，bot 會請你改用 `/answer`。這兩種訊息都在連發緩衝和路由之前就攔下來，所以 `AIWFF_MODE=task` 不會被建成新任務，`both` 也不會被當成聊天送進模型。只認管理員 chat。
+- **WebUI。** 等回答的任務會顯示問題、一個輸入框和「送出回答並續跑」按鈕，按下打 resume API 並帶上 `{answer}`。進度裡其他 `BLOCKED:` 行照舊顯示成唯讀卡。對話分頁透過對話紀錄顯示同一題。問題文字一律用 `textContent` 顯示。
+- **開放端點不回問題內容。** 不用 token 的 `GET /api/tasks`、`GET /api/tasks/:id`，以及 HUD 的最近任務，都會拿掉 `question`、`resume_answer`、`resume_question`，只多回一個布林 `has_question`。問題內容從 `GET /api/tasks/:id/question` 拿，跟 `GET /api/tasks/:id/result` 一樣要 runtime token；WebUI 的回答卡就是從這支讀。
+
 ### 選用：OpenAI 相容端點（實驗中，預設關閉）
 
 可以把任務改交給任何 OpenAI 相容的 `/chat/completions` 端點（vLLM、ollama、LM Studio 等）。這條路徑**沒有工具**：任務標題和指令會當成一次對話送出，回覆由 runtime 寫進 `data/artifacts/<id>.result.md`。適合短分類、封閉式抽取、短摘要；要讀寫檔案的任務請繼續用 Claude worker。我們實測 32B 的本地模型做短分類可以，但計數和中文長摘要不可靠。
