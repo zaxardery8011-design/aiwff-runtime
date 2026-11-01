@@ -353,6 +353,28 @@ Conversation logs hold the full text of your chats and are stored in `data/conve
 
 `WORK_DIR` appears in the design draft, but it is not present in the current `.env.example` and is not read by the current Phase 2 runtime.
 
+### Multiple bots
+
+You can have several chat bots, like contacts in a messaging app. Each bot has its own name, description, persona and (optionally) model, and its own conversation. Bots only change chat; tasks and the task worker are not affected.
+
+To turn it on, copy the examples into a `bots/` folder at the repo root:
+
+```bash
+cp -r examples/bots bots
+```
+
+PowerShell: `Copy-Item -Recurse examples\bots bots`. Without a `bots/` folder (or with no valid file in it) there is one built-in bot, `assistant` (`助理`), and chat behaves exactly as before. `AIWFF_BOTS_DIR` points the runtime at another folder.
+
+- **One file per bot.** The file name without `.md` is the bot id and must match `^[a-z0-9][a-z0-9-]{0,31}$`. Files over 64KB are skipped. The default bot is the first file in name order.
+- **Frontmatter.** Only single-line `key: value` pairs between the first two `---` lines are read, and only three keys: `name` (defaults to the id), `description` (optional) and `model` (optional). Every other key is ignored. The body is the chat persona.
+- **No secrets in bot files.** The runtime never reads keys, tokens or environment variables from a bot file, so do not put them there.
+- **Safety rules stay on.** After the persona the runtime always appends its own rule that this path has no tools, cannot read or write files and does not create tasks. A persona cannot remove it.
+- **`model` is experimental.** It only works if your CLI supports `--model`. It must match `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$` (no spaces, no quotes, cannot start with `-`); anything else is ignored. For Claude chat it adds `--model <value>` after the fixed chat arguments; for `openai_compatible` it replaces `AIWFF_OPENAI_MODEL`. This has not been verified against real models.
+- **Conversations.** The default bot keeps the old conversation id (`webui`, `tg-<chat id>`). Other bots add `-<bot id>`, for example `webui-research-assistant`.
+- **WebUI.** The chat tab shows the roster on the left (name, description, time of the last message) and the conversation on the right, with a `新對話` button that sends `/new`. The conversation is loaded back from the server, so a page reload keeps it. The last chosen bot is remembered in the browser. Below 720px wide the roster becomes a drop-down above the chat.
+- **Telegram.** `/bots` lists the bots and marks the one you are talking to. `/bot <id>` switches this chat to that bot and answers `現在跟 <名字> 聊。`; it also drops messages still waiting in that chat, like `/new`. The choice is saved in `data/chat_state.json` (`AIWFF_CHAT_STATE_FILE` moves it). If that file is broken, chat falls back to the default bot and stderr says so.
+- **API.** `GET /api/bots` returns `[{id, name, description, model, is_default}]` without the persona text and needs the runtime token. `POST /api/chat` accepts `bot_id` (unknown id is 400) and returns `bot_id`. `/api/doctor` and `/api/settings` show the bot count and any warnings (skipped files, ignored `model` values).
+
 ### Optional: OpenAI-compatible endpoint (experimental, off by default)
 
 You can point task execution at any OpenAI-compatible `/chat/completions` endpoint (vLLM, ollama, LM Studio, …). This path has **no tools**: the task title + instruction are sent as one chat completion and the reply is written to `data/artifacts/<id>.result.md` by the runtime. Use it for short classification, closed extraction or short summaries; keep the Claude worker for anything that needs to read or write files. In our tests a 32B local model was fine for short classification but unreliable for counting and long Chinese summaries.

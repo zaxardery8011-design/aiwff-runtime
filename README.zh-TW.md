@@ -361,6 +361,28 @@ AIWFF_MODE=both
 
 `WORK_DIR` 出現在設計草稿裡，但目前 `.env.example` 沒有這個欄位，Phase 2 runtime 也不讀它。
 
+### 多個 bot
+
+可以設好幾個聊天 bot，像通訊軟體的聯絡人：每個 bot 有自己的名字、介紹、人設和（選填的）模型，各自一段對話。bot 只影響聊天，不影響任務和任務 worker。
+
+把範例複製成 repo 根目錄的 `bots/` 就啟用：
+
+```bash
+cp -r examples/bots bots
+```
+
+PowerShell：`Copy-Item -Recurse examples\bots bots`。沒有 `bots/`（或裡面沒有任何合法檔）時，只有一個內建 bot `assistant`（`助理`），聊天行為跟以前完全一樣。`AIWFF_BOTS_DIR` 可以把目錄換到別處。
+
+- **一個檔一個 bot。** 檔名去掉 `.md` 就是 bot id，要符合 `^[a-z0-9][a-z0-9-]{0,31}$`。超過 64KB 的檔會略過。預設 bot 是依檔名排序的第一個。
+- **frontmatter。** 只讀開頭兩行 `---` 之間的單行 `key: value`，而且只認三個鍵：`name`（沒寫就用 id）、`description`（選填）、`model`（選填）。其他鍵一律忽略。內文就是聊天人設。
+- **bot 檔不要放金鑰。** runtime 不會從 bot 檔讀任何金鑰、token 或環境變數，所以也不要寫進去。
+- **安全規則一定在。** runtime 會在人設之後固定附加自己的規則：這條路徑沒有工具、不能讀寫檔案、也不會建立任務。人設寫什麼都蓋不掉。
+- **`model` 實驗中。** 要你的 CLI 支援 `--model` 才有效。值要符合 `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$`（不能有空白、引號，第一個字不能是 `-`），不合法就忽略。Claude 聊天會在固定參數後面加 `--model <值>`；`openai_compatible` 會用它取代 `AIWFF_OPENAI_MODEL`。還沒有拿真的模型驗證過。
+- **對話。** 預設 bot 沿用原本的對話 id（`webui`、`tg-<chat id>`）；其他 bot 加後綴 `-<bot id>`，例如 `webui-research-assistant`。
+- **WebUI。** 對話分頁左邊是名冊（名字、介紹、最後一則訊息時間），右邊是對話，上方有「新對話」按鈕（送 `/new`）。對話從伺服器讀回來，重新整理不會不見；上次選的 bot 記在瀏覽器裡。寬度小於 720px 時，名冊收成對話上方的下拉選單。
+- **Telegram。** `/bots` 列出所有 bot，並標出現在在跟誰聊。`/bot <id>` 把這個 chat 切到那個 bot，回 `現在跟 <名字> 聊。`；跟 `/new` 一樣，也會清掉這個 chat 收著還沒回的訊息。選擇存在 `data/chat_state.json`（`AIWFF_CHAT_STATE_FILE` 可以換位置）；這個檔寫壞時會退回預設 bot，並記 stderr。
+- **API。** `GET /api/bots` 回 `[{id, name, description, model, is_default}]`，不回人設內文，要 runtime token。`POST /api/chat` 可以帶 `bot_id`（不存在回 400），回應帶 `bot_id`。`/api/doctor` 和 `/api/settings` 會顯示 bot 數量和警告（略過的檔、被忽略的 `model`）。
+
 ### 選用：OpenAI 相容端點（實驗中，預設關閉）
 
 可以把任務改交給任何 OpenAI 相容的 `/chat/completions` 端點（vLLM、ollama、LM Studio 等）。這條路徑**沒有工具**：任務標題和指令會當成一次對話送出，回覆由 runtime 寫進 `data/artifacts/<id>.result.md`。適合短分類、封閉式抽取、短摘要；要讀寫檔案的任務請繼續用 Claude worker。我們實測 32B 的本地模型做短分類可以，但計數和中文長摘要不可靠。
