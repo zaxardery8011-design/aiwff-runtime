@@ -192,6 +192,15 @@ async function main() {
   let task = readJsonFile(taskPath(taskId));
   task = claimStatusOrThrow(task, 'running');
 
+  // 測試用觸發：instruction 含 [mock-question]、而且還沒帶過回答時，照 Claude worker 的規則問一題就結束
+  // （印出 BLOCKED: 行，任務停成 blocked、blocked_reason=question）；帶著回答續跑的那一棒照常做完。
+  if (String(task.instruction || '').includes('[mock-question]') && !task.resume_answer) {
+    const question = '測試問題';
+    console.log(`BLOCKED: ${question}`);
+    claimStatusOrThrow(task, 'blocked', { blocked_reason: 'question', question });
+    return;
+  }
+
   // 斷點續傳：上一棒做完的步驟記在 workspace 的 CHECKPOINT.txt（一行一步），這一棒跳過它們。
   const checkpointFile = checkpointPath(task.id);
   fs.mkdirSync(path.dirname(checkpointFile), { recursive: true });

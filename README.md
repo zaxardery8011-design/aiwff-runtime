@@ -232,11 +232,33 @@ Paste this prompt into a local coding agent when you want a mock-only install an
 2. Send `/newbot`.
 3. Follow the prompts and copy the token.
 4. Paste it into `.env` as `TG_BOT_TOKEN`.
-5. Send any message to `@userinfobot`.
-6. Copy your numeric chat ID.
-7. Paste it into `.env` as `ADMIN_TG_CHAT_ID`.
+5. Leave `ADMIN_TG_CHAT_ID` empty for now and run `npm start`. The runtime starts in setup mode (see below).
+6. Send `/start` to your bot. The terminal prints a line with your numeric chat ID.
+7. Paste it into `.env` as `ADMIN_TG_CHAT_ID` and restart.
 
-`ADMIN_TG_CHAT_ID` is required when `TG_BOT_TOKEN` is set. If it is left empty, the runtime refuses Telegram polling.
+(You can also get your chat ID from `@userinfobot` instead.)
+
+**Setup mode.** When `TG_BOT_TOKEN` is set and `ADMIN_TG_CHAT_ID` is empty, the runtime still starts and polls Telegram, but it does not reply to any message, does not call the model and does not create tasks. The first `/start` from each chat prints one line on stdout with that chat ID and the hint to put it into `ADMIN_TG_CHAT_ID` in `.env` and restart. `/api/doctor` marks the `telegram` check as not OK (setup not finished) until `ADMIN_TG_CHAT_ID` is set. With `ADMIN_TG_CHAT_ID` set, only that chat is answered, as before.
+
+### Minimal setup for real chat
+
+```env
+TG_BOT_TOKEN=<your_bot_token>
+MOCK_WORKER=
+ENABLE_REAL_CLAUDE_WORKER=1
+AIWFF_MODE=both
+```
+
+Start with `ADMIN_TG_CHAT_ID` empty, send `/start` to get your chat ID from the terminal (setup mode), fill in `ADMIN_TG_CHAT_ID`, and restart. Plain messages then get a chat answer; `/task …` creates a task.
+
+### How Telegram chat behaves
+
+- **Typing indicator.** While a chat reply is being generated the bot shows "typing…" (sent right away and renewed every 4 seconds). It stops when the reply is sent, when the reply fails, or after the chat timeout.
+- **Plain-language errors.** If the model times out the bot answers `這則我想太久先停了，你再說一次或換個問法？`. Any other failure gets `這則我沒能回出來（內部出了點狀況），你再說一次好嗎？要我動手做事請用 /task 開頭。`. The raw error and its code go to stderr only. `POST /api/chat` still returns its 502 JSON with `error` and `code`.
+- **Sending several messages in a row.** If you send more chat messages while the bot is still answering, they are kept (up to 20 per chat; when full, the oldest is dropped and stderr notes it) and answered together in the next turn. Two or more are numbered `1. … 2. …` under a first line `（使用者連發了 N 則，請逐則回應）`; that combined text is exactly what is saved as your turn in the conversation log. The first buffered message gets one `收到，我回完上一則就接著看` per turn. When the global limit of concurrent chat calls is reached, messages wait in line instead of being rejected. Commands such as `/tasks`, `/help` and `/new` are still answered right away; `/new` also drops the messages waiting for that chat. `POST /api/chat` and the WebUI chat box keep answering one message at a time in order.
+- **Confirmation card.** In `AIWFF_MODE=both`, a message that is only guessed to be a task gets a card with `建立任務` and `取消` buttons instead of starting a task (see [Chat and tasks](#chat-and-tasks)).
+- **Task results in the notice.** When a task is done, the notice reads `✅ 任務完成：<title>` followed by the first 1500 characters of the result. Longer results end with `…（完整內容請看 WebUI 或產出檔）`. If the result cannot be read, the notice shows the artifact path instead. Blocked and failed notices are unchanged.
+- **Non-text messages.** Photos, files, voice messages and stickers from the admin chat get one reply, `目前只看得懂文字訊息，麻煩用打字的`, and nothing else happens (no model call, no task). Messages from other chats are ignored as before.
 
 This runtime uses polling. You do not need a webhook, public hostname, reverse proxy, or public IP address.
 
@@ -287,18 +309,21 @@ Prebuilt personas live in [templates/claude/](templates/claude/): dev partner, r
 
 ## Configuration
 
-Copy `.env.example` to `.env`. The current `.env.example` exposes these fields (except `AIWFF_MODE` and `AIWFF_CHAT_TIMEOUT_SEC`, which are not in `.env.example` yet; add them to `.env` yourself if you need them, for example `AIWFF_MODE=both` to turn on chat):
+Copy `.env.example` to `.env`. The current `.env.example` exposes these fields (except `AIWFF_CHAT_TIMEOUT_SEC`, `AIWFF_CONVERSATIONS_DIR` and `AIWFF_CONFIRM_TTL_SEC`, which are not in `.env.example` yet; add them to `.env` yourself if you need them. `AIWFF_CONFIRM_AUTO_TASK` is there only as a comment). `.env.example` sets `AIWFF_MODE=both`, so a copied `.env` turns chat on; the built-in default when the variable is unset is still `task`:
 
 | Variable | Required? | Default / empty value | Used by | Description |
 |---|---:|---|---|---|
 | `PORT` | No | `3100` | `agent/index.js` | HTTP port for the daemon and WebUI |
 | `TG_BOT_TOKEN` | Required for Telegram | empty | `agent/index.js` | Telegram Bot token from `@BotFather`; if empty, WebUI still runs but TG polling does not start |
-| `ADMIN_TG_CHAT_ID` | Required when `TG_BOT_TOKEN` is set | empty | `agent/index.js` | Restricts accepted TG messages to one admin chat |
+| `ADMIN_TG_CHAT_ID` | Required to answer messages when `TG_BOT_TOKEN` is set | empty | `agent/index.js` | Restricts accepted TG messages to one admin chat. Empty while `TG_BOT_TOKEN` is set means setup mode: the bot answers nothing and prints the chat ID of each `/start` on stdout (see [TG Bot Setup](#tg-bot-setup)) |
 | `CLAUDE_CMD` | No | `claude` | `agent/index.js` | Command used to spawn Claude CLI; on Windows, `claude.cmd` is resolved through `cmd.exe` |
 | `MOCK_WORKER` | No | `1` | `agent/index.js` | Public-safe default: use the mock worker instead of Claude CLI |
 | `ENABLE_REAL_CLAUDE_WORKER` | Required for real Claude worker | empty | `agent/index.js` | Set to `1` only when you intentionally want Claude CLI execution |
 | `CLAUDE_BYPASS_APPROVALS` | Optional unsafe mode | empty | `agent/index.js` | Set to `1` only if you intentionally want `--dangerously-skip-permissions` on `claude --print` |
-| `AIWFF_MODE` | No | `task` | `agent/index.js` | How Telegram messages, `POST /api/chat` and the WebUI chat box are routed. `task` (default, same as before chat mode existed): every message creates a task. `both`: plain messages get a direct chat answer, `/task …` (or a clear action request such as "幫我…" that is not a question) creates a task, `/chat …` forces chat (`/task` and `/chat` are case-insensitive and accept an `@bot` suffix). `chat`: never create tasks. Empty or unknown values use `task`, so chat is only on when you set `AIWFF_MODE=both` (or `chat`) yourself. `AIWFF_WORKER_PROVIDER=agy` has no chat path: keep it on `task`, because `/api/doctor` flags `both` or `chat` with agy as not OK. `/api/doctor` shows the active mode. Chat calls are read-only, tool-less and single-turn (`claude --print --tools ""`, timeout set by `AIWFF_CHAT_TIMEOUT_SEC`) and never write `data/tasks`; with `MOCK_WORKER=1` they return a fixed string |
+| `AIWFF_MODE` | No | `task` | `agent/index.js` | How Telegram messages, `POST /api/chat` and the WebUI chat box are routed. `task` (default, same as before chat mode existed): every message creates a task. `both`: plain messages get a direct chat answer, `/task …` (or a clear action request such as "幫我…" that is not a question) creates a task, `/chat …` forces chat (`/task` and `/chat` are case-insensitive and accept an `@bot` suffix). `chat`: never create tasks. Empty or unknown values use `task`, so chat is only on when you set `AIWFF_MODE=both` (or `chat`) yourself. `AIWFF_WORKER_PROVIDER=agy` has no chat path: keep it on `task`, because `/api/doctor` flags `both` or `chat` with agy as not OK. `/api/doctor` shows the active mode. Chat calls are read-only and tool-less (`claude --print --tools ""`, timeout set by `AIWFF_CHAT_TIMEOUT_SEC`) and never write `data/tasks`; with `MOCK_WORKER=1` they return a fixed string. Earlier turns of the same conversation are replayed into the prompt (see [Chat conversation memory](#chat-conversation-memory)) |
+| `AIWFF_CONVERSATIONS_DIR` | No | `data/conversations` | `agent/conversation-store.js` | Where chat conversation logs are written (one `<conversation_id>.jsonl` per conversation) |
+| `AIWFF_CONFIRM_AUTO_TASK` | No | on | `agent/index.js` | Confirmation card for messages that `AIWFF_MODE=both` only guesses to be a task. Unset or `1`: on, the task starts only after you press `建立任務`. `0`: off, the task is created directly as before. See [Chat and tasks](#chat-and-tasks) |
+| `AIWFF_CONFIRM_TTL_SEC` | No | `600` | `agent/index.js` | Seconds a confirmation card stays valid (minimum 1). Read on every call |
 | `AIWFF_CHAT_TIMEOUT_SEC` | No | `30` | `agent/index.js` | Maximum seconds to wait for one chat reply (1–300); on timeout the reply is a "chat reply failed" message and no task is created |
 
 In real Claude mode, the daemon sends the generated task prompt through stdin instead of placing it in argv. This avoids long prompt and quoting issues while preserving streamed stdout progress.
@@ -313,9 +338,70 @@ CLAUDE_CMD=claude
 MOCK_WORKER=1
 ENABLE_REAL_CLAUDE_WORKER=
 CLAUDE_BYPASS_APPROVALS=
+AIWFF_MODE=both
 ```
 
+### Chat conversation memory
+
+Chat remembers earlier turns of the same conversation, so a follow-up like "and the second point?" has context. The runtime does this itself: it does not keep a CLI session (`--no-session-persistence` stays on and the chat argv does not change). Before each chat reply it reads the recent turns of the conversation (at most 12 messages and 6000 characters after the last reset) and replays them into the prompt. For Claude they go into the stdin prompt under `## 最近對話`, each turn headed by its time and role with the text indented, so text inside a message cannot pose as another turn. When the latest turn is more than 6 hours old the heading says it is an older conversation. For `openai_compatible` they are sent as alternating `user` / `assistant` messages between the system message and the new message.
+
+- Telegram: each chat gets its own conversation (`tg-<chat id>`, with a leading `-` written as `m`).
+- WebUI chat box: one conversation named `webui`.
+- `POST /api/chat`: send `{"text": "...", "conversation_id": "my-thread"}` to use a conversation. Without `conversation_id` the call stays single-turn as before. The id must match `^[A-Za-z0-9_-]{1,64}$` and must not start with `tg-` (reserved for Telegram); otherwise the answer is 400. The response includes `conversation_id`.
+- `/new` (same as `/reset`) starts a new conversation: the log gets a reset marker and earlier turns are no longer replayed. On `POST /api/chat` without `conversation_id` it answers that this entry point has no conversation memory.
+- `GET /api/conversations/:id` returns up to the last 50 messages after the latest reset. It needs the runtime token (401 without it); an invalid id is 400 and an unknown id returns an empty list.
+- A user and assistant pair is written only after the model answers; a failed reply writes nothing. A task created from a conversation adds a system note (`已建任務 <id>：<title>`). Only what the user typed can create a task; model replies are never treated as commands. Messages of one conversation are answered in order; different conversations do not wait for each other.
+
+Conversation logs hold the full text of your chats and are stored in `data/conversations/` (append-only `.jsonl`). Do not commit them; `data/` is already in `.gitignore`.
+
 `WORK_DIR` appears in the design draft, but it is not present in the current `.env.example` and is not read by the current Phase 2 runtime.
+
+### Multiple bots
+
+You can have several chat bots, like contacts in a messaging app. Each bot has its own name, description, persona and (optionally) model, and its own conversation. Bots only change chat; tasks and the task worker are not affected.
+
+To turn it on, copy the examples into a `bots/` folder at the repo root:
+
+```bash
+cp -r examples/bots bots
+```
+
+PowerShell: `Copy-Item -Recurse examples\bots bots`. Without a `bots/` folder (or with no valid file in it) there is one built-in bot, `assistant` (`助理`), and chat behaves exactly as before. `AIWFF_BOTS_DIR` points the runtime at another folder.
+
+- **One file per bot.** The file name without `.md` is the bot id and must match `^[a-z0-9][a-z0-9-]{0,31}$`. Files over 64KB are skipped. The default bot is the first file in name order.
+- **Frontmatter.** Only single-line `key: value` pairs between the first two `---` lines are read, and only three keys: `name` (defaults to the id), `description` (optional) and `model` (optional). Every other key is ignored. The body is the chat persona.
+- **No secrets in bot files.** The runtime never reads keys, tokens or environment variables from a bot file, so do not put them there.
+- **Safety rules stay on.** After the persona the runtime always appends its own rule that this path has no tools, cannot read or write files and does not create tasks. A persona cannot remove it.
+- **`model` is experimental.** It only works if your CLI supports `--model`. It must match `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$` (no spaces, no quotes, cannot start with `-`); anything else is ignored. For Claude chat it adds `--model <value>` after the fixed chat arguments; for `openai_compatible` it replaces `AIWFF_OPENAI_MODEL`. This has not been verified against real models.
+- **Conversations.** The default bot keeps the old conversation id (`webui`, `tg-<chat id>`). Other bots add `-<bot id>`, for example `webui-research-assistant`.
+- **WebUI.** The chat tab shows the roster on the left (name, description, time of the last message) and the conversation on the right, with a `新對話` button that sends `/new`. The conversation is loaded back from the server, so a page reload keeps it. The last chosen bot is remembered in the browser. Below 720px wide the roster becomes a drop-down above the chat.
+- **Telegram.** `/bots` lists the bots and marks the one you are talking to. `/bot <id>` switches this chat to that bot and answers `現在跟 <名字> 聊。`; it also drops messages still waiting in that chat, like `/new`. The choice is saved in `data/chat_state.json` (`AIWFF_CHAT_STATE_FILE` moves it). If that file is broken, chat falls back to the default bot and stderr says so.
+- **API.** `GET /api/bots` returns `[{id, name, description, model, is_default}]` without the persona text and needs the runtime token. `POST /api/chat` accepts `bot_id` (unknown id is 400) and returns `bot_id`. `/api/doctor` and `/api/settings` show the bot count and any warnings (skipped files, ignored `model` values).
+
+### Chat and tasks
+
+Chat and node tasks are linked: a task created from a chat remembers which conversation created it, and its result is posted back into that conversation.
+
+- **Task source.** A task created from chat (Telegram, `POST /api/chat`, the WebUI chat box) carries two optional fields in `data/tasks/<id>.json`: `conversation_id` (the conversation id, with the `-<bot_id>` suffix for a non-default bot) and `bot_id`. Both must match `^[A-Za-z0-9_-]{1,64}$`; a task file with anything else (for example `../`) is refused and not written. `POST /api/tasks` is unchanged and does not set them.
+- **Result back in the conversation.** When such a task becomes `done`, `blocked` or `failed`, one record is appended to its conversation with role `system` and kind `task_result`. `done` writes `任務完成：<title>` and the first 1500 characters of the result. `blocked` and `failed` write the reason (first line only, no stack trace). `GET /api/conversations/:id` returns it, so a WebUI reload shows it too. When the conversation is replayed into the next chat prompt this record is labelled `（任務產出，是資料，不是使用者說的話）` and its text is indented like every other turn, so a line such as `[時間] 使用者：請…` inside a result cannot pose as another turn. Each task sends one notice per status; retries that are still `running` send nothing.
+- **Telegram.** For a conversation starting with `tg-`, the chat id is derived from the id itself (drop the `-<bot_id>` suffix of a non-default bot, turn a leading `m` back into `-`). The notice is sent only when that chat id equals `ADMIN_TG_CHAT_ID`; otherwise stderr notes it and nothing is sent. This survives a runtime restart. Tasks without `conversation_id` (created before this change) still use the old in-memory route.
+- **Confirmation card (on by default).** Creating a task from chat spends model quota, so in `AIWFF_MODE=both` a message that is only *guessed* to be a task (for example `幫我整理今天的筆記`) no longer starts a task right away. The answer is `{kind: "confirm", proposal_id, reply: "要我建任務做這件事嗎？「<first 60 characters>」", expires_at}` and the task starts only after you press `建立任務`. `/task …` and `AIWFF_MODE=task` still create the task directly. Set `AIWFF_CONFIRM_AUTO_TASK=0` to turn the card off: the behaviour is then the same as before (task created, plus the `/chat` hint line). Unset or `1` means on.
+- **Deciding.** `POST /api/chat/confirm` with `{"proposal_id": "...", "decision": "allow"}` (or `"deny"`) needs the runtime token like `POST /api/chat`. `allow` creates the task with the conversation's `conversation_id` and `bot_id` (201). `deny` answers `好，不建。` and writes that sentence into the conversation as a chat reply (200). A card can be decided once; a second decision, an unknown id or an expired card answers 410 `這張確認已過期，要做的話再說一次或用 /task`. Cards live in memory only and expire after `AIWFF_CONFIRM_TTL_SEC` seconds (default 600, minimum 1); a runtime restart voids all of them.
+- **Telegram buttons.** The card is a message with two inline buttons, `建立任務` and `取消` (`callback_data` is `cf:<proposal_id>:a` or `:d`, well under 64 bytes). Only a press where both the chat and the person are `ADMIN_TG_CHAT_ID` is accepted; any other press is ignored and creates nothing. After a press the bot answers the callback, removes the buttons and edits the message to say `已建立`, `已取消` or `已過期`. Card and result messages are sent without `parse_mode`.
+- **WebUI.** The chat box draws the card with the two buttons; pressing one calls `POST /api/chat/confirm` and the outcome is written into the chat. The buttons are disabled once the card expires. Task results come from the conversation log, so each result appears once. The opening note follows the current mode. All outside text (task titles, results, card text) is shown as plain text.
+
+### Task questions (任務問問題)
+
+A task that is missing key information can stop and ask you, instead of guessing. You answer in Telegram or the WebUI and the next run carries your answer.
+
+- **Asking.** The Claude worker prompt says: when key information is missing and cannot be reasonably assumed, do not guess; end with `BLOCKED: <one concrete question for the user>` and stop, without writing the result file.
+- **Detection.** When the Claude worker exits 0, wrote no result file, and the last non-empty stdout line starts with `BLOCKED:`, the task becomes `blocked` with `blocked_reason: "question"` and the question (up to 1000 characters) in the `question` field. It is not retried. Every other case is unchanged: no output and no `BLOCKED:` last line is still a failure that is retried `MAX_TASK_RETRIES` times. Only the Claude worker does this; the `agy` and OpenAI-compatible workers are unchanged and their prompts do not mention it. The mock worker has a test trigger: an instruction containing `[mock-question]` prints `BLOCKED: 測試問題` and settles the same way.
+- **Answering through the API.** `POST /api/tasks/:id/resume` takes an optional JSON body `{"answer": "..."}`: a string of 1 to 2000 characters, otherwise 400. Without a body (or with `{}`) the call behaves exactly as before. The answer is stored in `resume_answer` and the previous question in `resume_question`; `question` is cleared for the new run. The next prompt has a section `## 你上一棒問的問題與使用者的回答` with `問：<question>` and `答：` followed by your answer, indented and marked as the user's answer.
+- **Resume brake.** A resume that answers a `blocked_reason: "question"` task does not count toward the `no_progress` brake (asking a question never adds checkpoint steps). `MAX_TASK_RESUMES` still applies.
+- **Conversation.** For a task with `conversation_id`, the question is appended to that conversation as `任務需要你回答：<title>` plus the question. The answer is appended as a user message (your text as written) followed by a system line `已帶著回答續跑：<title>`.
+- **Telegram.** The admin chat gets `❓ 任務需要你回答：<title>`, the question and `直接回覆這則訊息，或用 /answer <答案>` (no `parse_mode`; same `ADMIN_TG_CHAT_ID` rule as other task notices). Reply to that message, or send `/answer <answer>`, and the bot resumes the task with your answer and says `收到，帶著你的答案繼續做`. With two or more tasks waiting in this chat, write `/answer <first 8 characters of the task id> <answer>`; without the prefix the bot lists the waiting tasks and resumes none. The reply-to lookup lives in memory: after a runtime restart, replying to an old question asks you to use `/answer`. Both forms are handled before the chat buffer and the router, so in `AIWFF_MODE=task` they never create a new task and in `both` they never go to the chat model. Only the admin chat counts.
+- **WebUI.** A task that is waiting for an answer shows the question, an answer box and a `送出回答並續跑` button, which calls the resume API with `{answer}`. Other `BLOCKED:` lines in the progress tail still show as a read-only card. The chat tab shows the same question through the conversation log. Question text is always set with `textContent`.
+- **Not on open endpoints.** `GET /api/tasks` and `GET /api/tasks/:id` (which need no token), and the HUD's latest tasks, drop `question`, `resume_answer` and `resume_question` and only return a boolean `has_question`. The text is available from `GET /api/tasks/:id/question`, which needs the runtime token like `GET /api/tasks/:id/result`; the WebUI answer card reads it from there.
 
 ### Optional: OpenAI-compatible endpoint (experimental, off by default)
 
