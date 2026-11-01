@@ -533,12 +533,12 @@ test('審查 F5：TG 聊天回覆不擋輪詢迴圈，後面的 /tasks 先回（
   const stop = agent.startTelegramPolling();
   try {
     const deadline = Date.now() + 10000;
-    while (Date.now() < deadline && !fakeTg.sent.some((m) => /聊天回覆失敗/.test(m.text))) {
+    while (Date.now() < deadline && !fakeTg.sent.some((m) => /這則我想太久先停了/.test(m.text))) {
       await sleep(50);
     }
     const texts = fakeTg.sent.map((m) => m.text);
-    const chatAt = texts.findIndex((t) => /聊天回覆失敗/.test(t));
-    const tasksAt = texts.findIndex((t) => !/聊天回覆失敗/.test(t));
+    const chatAt = texts.findIndex((t) => /這則我想太久先停了/.test(t));
+    const tasksAt = texts.findIndex((t) => !/這則我想太久先停了/.test(t));
     assert.ok(chatAt >= 0, `chat timeout reply missing: ${JSON.stringify(texts)}`);
     assert.ok(tasksAt >= 0 && tasksAt < chatAt, `/tasks 要比聊天逾時先回：${JSON.stringify(texts)}`);
   } finally {

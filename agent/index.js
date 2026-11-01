@@ -62,7 +62,7 @@ const TG_REQUEST_TIMEOUT_MS = envInt('TG_REQUEST_TIMEOUT_MS', 20000, { min: 1000
 const TG_POLL_BASE_MS = envInt('TG_POLL_BASE_MS', 2000, { min: 200, max: 60000 });
 const TG_POLL_MAX_BACKOFF_MS = envInt('TG_POLL_MAX_BACKOFF_MS', 60000, { min: TG_POLL_BASE_MS, max: 600000 });
 const TG_MAX_MESSAGE_CHARS = 4000;
-// TG 聊天回覆不擋輪詢迴圈；同時在跑的聊天模型呼叫最多幾則，超過就請用戶稍後再傳。
+// TG 聊天回覆不擋輪詢迴圈；同時在跑的聊天模型呼叫最多幾則，超過就排隊等前面的回完。
 const TG_MAX_CONCURRENT_CHATS = 2;
 let tgChatsInFlight = 0;
 
@@ -1011,6 +1011,7 @@ function getDoctorReport() {
     checkPathReadable('memory_dir', MEMORY_DIR),
     { id: 'worker_mode', ok: true, detail: runtimeWorkerMode() },
     { id: 'chat_mode', ...chatModeCheck() },
+    { id: 'telegram', ...telegramDoctorCheck() },
     { id: 'port', ok: true, detail: String(PORT) },
   ];
   return {
@@ -1357,6 +1358,28 @@ function pipeStdoutProgress(taskId, stream) {
   });
 }
 
+// 完成通知直接帶產出內容（前 1500 字），讀不到產出才退回顯示路徑；整則仍守 4000 字上限。
+const TG_TASK_RESULT_PREVIEW_CHARS = 1500;
+
+function telegramTaskDoneText(task) {
+  const header = `✅ 任務完成：${task.title}`;
+  let result = null;
+  try {
+    result = isUuidTaskId(task.id) ? readTaskResult(task.id) : null;
+  } catch (error) {
+    logStderr('telegram-task-result', error);
+  }
+  const content = result && typeof result.content === 'string' ? result.content.trim() : '';
+  let text;
+  if (!content) {
+    text = `${header}\n結果：${task.artifact_path}`;
+  } else {
+    const more = content.length > TG_TASK_RESULT_PREVIEW_CHARS || result.truncated;
+    text = `${header}\n\n${content.slice(0, TG_TASK_RESULT_PREVIEW_CHARS)}${more ? '\n…（完整內容請看 WebUI 或產出檔）' : ''}`;
+  }
+  return text.length > TG_MAX_MESSAGE_CHARS ? `${text.slice(0, TG_MAX_MESSAGE_CHARS - 1)}…` : text;
+}
+
 function notifyTelegramTaskDone(task) {
   const chatId = tgPendingNotify[task.id];
   if (!chatId || !process.env.TG_BOT_TOKEN) {
@@ -1364,7 +1387,7 @@ function notifyTelegramTaskDone(task) {
   }
   let resultText;
   if (task.status === 'done') {
-    resultText = `✅ 任務完成：${task.title}\n結果：${task.artifact_path}`;
+    resultText = telegramTaskDoneText(task);
   } else if (task.status === 'blocked') {
     resultText = `⚠️ 任務卡住：${task.title}\n原因：${task.env_hint ? `環境問題，${task.env_hint}` : task.blocked_reason || '未知'}`;
   } else {
@@ -2817,6 +2840,200 @@ async function tgRequest(token, method, body) {
   });
 }
 
+// TG 聊天失敗時給使用者看的人話；錯誤原文和 code 只寫 stderr。
+const TG_CHAT_TIMEOUT_TEXT = '這則我想太久先停了，你再說一次或換個問法？';
+const TG_CHAT_ERROR_TEXT = '這則我沒能回出來（內部出了點狀況），你再說一次好嗎？要我動手做事請用 /task 開頭。';
+const TG_BUSY_ACK_TEXT = '收到，我回完上一則就接著看';
+const TG_TEXT_ONLY_TEXT = '目前只看得懂文字訊息，麻煩用打字的';
+// 「輸入中」每 4 秒續一次（Telegram 的 typing 大約 5 秒就會自己消失）。
+const TG_TYPING_INTERVAL_MS = 4000;
+// 同一個 chat 忙碌時，連發進來的訊息最多緩衝幾則；滿了丟最舊的。
+const TG_MAX_BUFFERED_MESSAGES = 20;
+
+// 每個 TG chat 的聊天狀態：running 表示這個 chat 有一輪正在跑（含排隊等全域名額）；
+// buffer 是忙碌時連發進來、等下一輪合併送出的訊息；acked 表示這一輪已經回過「收到」。
+const tgChatStates = new Map();
+// 全域併發滿了改成排隊：等名額的輪次依序放在這裡。
+const tgChatSlotWaiters = [];
+// 設定模式（沒設 ADMIN_TG_CHAT_ID）下已經印過的 chat id，同一個只印一次。
+const tgSetupPrintedChatIds = new Set();
+
+// doctor 的 telegram 欄位：設定模式要標未完成設定（ok:false），其他情況照實說。
+function telegramDoctorCheck() {
+  if (!process.env.TG_BOT_TOKEN) {
+    return { ok: true, detail: '未啟用（沒設 TG_BOT_TOKEN）' };
+  }
+  if (!process.env.ADMIN_TG_CHAT_ID) {
+    return {
+      ok: false,
+      detail: '設定模式：未完成設定。對 bot 傳 /start，終端機會印出 chat id，把它填進 .env 的 ADMIN_TG_CHAT_ID 後重開',
+    };
+  }
+  return { ok: true, detail: '已設定，只回應 ADMIN_TG_CHAT_ID 的訊息' };
+}
+
+function tgChatState(chatId) {
+  const key = String(chatId);
+  let state = tgChatStates.get(key);
+  if (!state) {
+    state = { running: false, buffer: [], acked: false };
+    tgChatStates.set(key, state);
+  }
+  return state;
+}
+
+function acquireTelegramChatSlot() {
+  if (tgChatsInFlight < TG_MAX_CONCURRENT_CHATS) {
+    tgChatsInFlight += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    tgChatSlotWaiters.push(resolve);
+  });
+}
+
+function releaseTelegramChatSlot() {
+  const next = tgChatSlotWaiters.shift();
+  if (next) {
+    // 名額直接交給下一個排隊的輪次，計數不變。
+    next();
+    return;
+  }
+  tgChatsInFlight = Math.max(0, tgChatsInFlight - 1);
+}
+
+// 「輸入中」：馬上送一次、之後每 4 秒續一次；超過聊天逾時自動停。回傳 stop()，呼叫端要在 finally 裡叫。
+function startTelegramTyping(token, chatId) {
+  const send = () => {
+    tgRequest(token, 'sendChatAction', { chat_id: chatId, action: 'typing' })
+      .then((data) => {
+        if (data && data.ok === false) {
+          logStderr('telegram-typing', data.description || 'sendChatAction returned ok:false');
+        }
+      })
+      .catch((error) => logStderr('telegram-typing', error));
+  };
+  send();
+  const interval = setInterval(send, TG_TYPING_INTERVAL_MS);
+  const limit = setTimeout(() => clearInterval(interval), CHAT_TIMEOUT_MS);
+  for (const timer of [interval, limit]) {
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+  }
+  return function stop() {
+    clearInterval(interval);
+    clearTimeout(limit);
+  };
+}
+
+function telegramChatErrorText(error) {
+  return error && error.code === 'chat_timeout' ? TG_CHAT_TIMEOUT_TEXT : TG_CHAT_ERROR_TEXT;
+}
+
+function telegramReplyText(reply) {
+  return reply.length > TG_MAX_MESSAGE_CHARS ? `${reply.slice(0, TG_MAX_MESSAGE_CHARS)}\n…（已截斷）` : reply;
+}
+
+// 緩衝的連發訊息合成一則：1 則原樣；2 則以上編號，最前面加一行說明。
+function combineTelegramBuffer(texts) {
+  if (texts.length === 1) {
+    return texts[0];
+  }
+  const lines = [`（使用者連發了 ${texts.length} 則，請逐則回應）`];
+  texts.forEach((text, index) => {
+    lines.push(`${index + 1}. ${text}`);
+  });
+  return lines.join('\n');
+}
+
+// TG 一輪會叫模型的聊天：送進模型、寫進對話紀錄的 user 那一則，就是這裡的 text（合併後的也一樣）。
+// 不再經過路由：每則訊息進緩衝之前都已經判定是聊天，合併後的文字不會被誤判成任務或指令。
+async function runTelegramChatTurn(text, conversationId) {
+  const generation = conversationStore.generation(conversationId);
+  return runInConversationChain(conversationId, () => runChatTurn(text, conversationId, generation));
+}
+
+// 收到一則要叫模型的聊天：這個 chat 正在跑就放緩衝，閒著就開一輪。
+function enqueueTelegramChat(token, chatId, text) {
+  const state = tgChatState(chatId);
+  if (!state.running) {
+    state.running = true;
+    state.acked = false;
+    runTelegramChatRounds(token, chatId, text).catch((error) => logStderr('telegram-chat-round', error));
+    return;
+  }
+  state.buffer.push(text);
+  if (state.buffer.length > TG_MAX_BUFFERED_MESSAGES) {
+    state.buffer.shift();
+    logStderr('telegram-chat-buffer', `chat ${chatId} buffer full (${TG_MAX_BUFFERED_MESSAGES}), dropped the oldest message`);
+  }
+  if (!state.acked) {
+    state.acked = true;
+    tgRequest(token, 'sendMessage', { chat_id: chatId, text: TG_BUSY_ACK_TEXT }).catch((error) =>
+      logStderr('telegram-chat-ack', error),
+    );
+  }
+}
+
+// 一輪接一輪跑：這輪結束後，緩衝裡有東西就合成一則接著跑下一輪，直到緩衝清空。
+async function runTelegramChatRounds(token, chatId, firstText) {
+  const state = tgChatState(chatId);
+  let text = firstText;
+  try {
+    while (text) {
+      await replyTelegramChatRound(token, chatId, text);
+      state.acked = false;
+      if (!state.buffer.length) {
+        break;
+      }
+      text = combineTelegramBuffer(state.buffer.splice(0));
+    }
+  } finally {
+    state.running = false;
+    state.acked = false;
+    if (!state.buffer.length) {
+      tgChatStates.delete(String(chatId));
+    }
+  }
+}
+
+async function replyTelegramChatRound(token, chatId, text) {
+  await acquireTelegramChatSlot();
+  let replyText;
+  const stopTyping = startTelegramTyping(token, chatId);
+  try {
+    const result = await runTelegramChatTurn(text, telegramConversationId(chatId));
+    replyText = telegramReplyText(result.reply);
+  } catch (error) {
+    logStderr('telegram-chat', `${error.code ? `[${error.code}] ` : ''}${error.message}`);
+    replyText = telegramChatErrorText(error);
+  } finally {
+    // 先停「輸入中」再送回覆，任何結束路徑都會清掉計時器。
+    stopTyping();
+    releaseTelegramChatSlot();
+  }
+  try {
+    await tgRequest(token, 'sendMessage', { chat_id: chatId, text: replyText });
+  } catch (error) {
+    logStderr('telegram-chat-send', error);
+  }
+}
+
+// 設定模式：照常 poll，但對任何訊息都不回覆、不叫模型、不建任務；第一次收到 /start 時在終端機印出 chat id。
+function handleTelegramSetupMessage(msg) {
+  const text = typeof msg.text === 'string' ? msg.text.trim() : '';
+  if (!/^\/start(?:@\w+)?(?:\s|$)/i.test(text) || !msg.chat || msg.chat.id === undefined) {
+    return;
+  }
+  const chatId = String(msg.chat.id);
+  if (tgSetupPrintedChatIds.has(chatId)) {
+    return;
+  }
+  tgSetupPrintedChatIds.add(chatId);
+  console.log(`[Telegram 設定模式] 收到 /start，chat id = ${chatId}。把它填進 .env 的 ADMIN_TG_CHAT_ID 後重開。`);
+}
+
 async function pollTelegram() {
   const token = process.env.TG_BOT_TOKEN;
   const adminId = process.env.ADMIN_TG_CHAT_ID;
@@ -2832,57 +3049,62 @@ async function pollTelegram() {
   for (const update of data.result) {
     tgOffset = update.update_id + 1;
     const msg = update.message;
-    if (!msg || !msg.text) {
+    if (!msg || !msg.chat) {
       continue;
     }
-    if (adminId && String(msg.chat.id) !== String(adminId)) {
+    if (!adminId) {
+      handleTelegramSetupMessage(msg);
+      continue;
+    }
+    if (String(msg.chat.id) !== String(adminId)) {
+      continue;
+    }
+    // 照片、檔案、語音、貼圖這類沒有文字的訊息：回一句請用打字的，不叫模型、不建任務。
+    if (typeof msg.text !== 'string' || !msg.text.trim()) {
+      await tgRequest(token, 'sendMessage', { chat_id: msg.chat.id, text: TG_TEXT_ONLY_TEXT });
       continue;
     }
 
     // 路由依 AIWFF_MODE：指令照舊；task（預設）每則建任務；both 時 /task 或明確要做事才建任務、其他直接聊天回答。
-    // 會叫模型的聊天回覆不 await：輪詢迴圈不被聊天卡住，後面的 /tasks、/task 馬上處理；同時最多 TG_MAX_CONCURRENT_CHATS 則。
+    // 會叫模型的聊天不 await：輪詢迴圈不被聊天卡住，後面的 /tasks、/task 馬上處理。
+    // 同一個 chat 正在回答時又進來的聊天放進緩衝，這輪結束後合成一則接著回；全域名額滿了就排隊。
     const routed = routeConversationMessage(String(msg.text).trim(), runtimeChatMode());
     const callsModel = routed.kind === 'chat' && !routed.notice && Boolean(routed.instruction);
     if (!callsModel) {
+      if (routed.kind === 'command' && routed.instruction === '/new') {
+        const state = tgChatStates.get(String(msg.chat.id));
+        if (state) {
+          state.buffer.length = 0;
+          state.acked = false;
+        }
+      }
       await replyTelegramConversation(token, msg.chat.id, msg.text);
       continue;
     }
-    if (tgChatsInFlight >= TG_MAX_CONCURRENT_CHATS) {
-      await tgRequest(token, 'sendMessage', { chat_id: msg.chat.id, text: '前面的訊息還在回答中，請稍後再傳。' });
-      continue;
-    }
-    tgChatsInFlight += 1;
-    replyTelegramConversation(token, msg.chat.id, msg.text)
-      .catch((error) => logStderr('telegram-chat-send', error))
-      .finally(() => {
-        tgChatsInFlight -= 1;
-      });
+    enqueueTelegramChat(token, msg.chat.id, routed.instruction);
   }
 }
 
+// 不叫模型的訊息（指令、建任務、用法說明）：立刻處理、立刻回。
 async function replyTelegramConversation(token, chatId, text) {
   let result;
   try {
     result = await handleConversationMessage(text, { conversationId: telegramConversationId(chatId) });
   } catch (error) {
-    logStderr('telegram-chat', error);
-    await tgRequest(token, 'sendMessage', {
-      chat_id: chatId,
-      text: `⚠️ 聊天回覆失敗：${String(error.message).slice(0, 500)}\n要我動手做事，請用 /task 開頭。`,
-    });
+    logStderr('telegram-chat', `${error.code ? `[${error.code}] ` : ''}${error.message}`);
+    await tgRequest(token, 'sendMessage', { chat_id: chatId, text: telegramChatErrorText(error) });
     return;
   }
   if (result.kind === 'task') {
     tgPendingNotify[result.task.id] = chatId;
   }
-  const replyText =
-    result.reply.length > TG_MAX_MESSAGE_CHARS ? `${result.reply.slice(0, TG_MAX_MESSAGE_CHARS)}\n…（已截斷）` : result.reply;
-  await tgRequest(token, 'sendMessage', { chat_id: chatId, text: replyText });
+  await tgRequest(token, 'sendMessage', { chat_id: chatId, text: telegramReplyText(result.reply) });
 }
 
 // Telegram 斷線重連迴圈：以 setTimeout 自排程（不重疊請求），
 // 連續失敗時指數退避並記 stderr；成功一次即重置退避。回傳 stop() 供關閉。
-function startTelegramPolling() {
+// initialDelayMs 大於 0 時，第一次 poll 延後這麼久才送（設定模式用）。
+function startTelegramPolling({ initialDelayMs = 0 } = {}) {
   let failures = 0;
   let stopped = false;
   let timer = null;
@@ -2915,7 +3137,14 @@ function startTelegramPolling() {
     scheduleNext();
   }
 
-  tick();
+  if (initialDelayMs > 0) {
+    timer = setTimeout(tick, initialDelayMs);
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+  } else {
+    tick();
+  }
 
   return function stop() {
     stopped = true;
@@ -3167,6 +3396,24 @@ function sweepOrphanRunningTasks() {
   return swept;
 }
 
+// 啟動時的 Telegram 設定檢查：沒設 TG_BOT_TOKEN 不啟用；設了但沒設 ADMIN_TG_CHAT_ID 進設定模式
+// （照常 poll、不回任何訊息，只在終端機印出傳 /start 的 chat id）；兩個都設了照常運作。
+function startTelegramIfConfigured() {
+  if (!process.env.TG_BOT_TOKEN) {
+    return null;
+  }
+  if (!process.env.ADMIN_TG_CHAT_ID) {
+    // 啟動提示走 stderr，開頭保留舊的「Refusing Telegram polling」字樣：設定模式確實拒絕回覆任何訊息，舊的監看規則也還對得上。
+    console.error(
+      'Refusing Telegram polling replies: ADMIN_TG_CHAT_ID is not set, running in setup mode. ' +
+        'Telegram 設定模式：對你的 bot 傳 /start，終端機會印出 chat id；設定模式下 bot 不回任何訊息、不叫模型、不建任務。',
+    );
+  }
+  // 設定模式等一個輪詢間隔才開始 poll：使用者還要去 Telegram 傳 /start，不差這一下；
+  // 啟動後馬上被關掉的情況（例如只是看一下啟動訊息）也就不會對外送出請求。
+  return startTelegramPolling({ initialDelayMs: process.env.ADMIN_TG_CHAT_ID ? 0 : TG_POLL_BASE_MS });
+}
+
 function main() {
   installProcessGuards();
   ensureDirectories();
@@ -3205,11 +3452,7 @@ function main() {
       console.log('（AIWFF_RUNTIME_TOKEN 未設：token 為本次啟動自動產生、只存在記憶體，重啟後會換新連結。）');
     }
 
-    if (process.env.TG_BOT_TOKEN && !process.env.ADMIN_TG_CHAT_ID) {
-      console.error('Refusing Telegram polling: ADMIN_TG_CHAT_ID is required when TG_BOT_TOKEN is set.');
-    } else if (process.env.TG_BOT_TOKEN) {
-      startTelegramPolling();
-    }
+    startTelegramIfConfigured();
   });
 }
 
@@ -3235,6 +3478,7 @@ module.exports = {
   taskQueryZeroReason,
   installProcessGuards,
   startTelegramPolling,
+  startTelegramIfConfigured,
   tgRequest,
   envInt,
   // 「卡住不恢復 vs 只是慢」這一包：追蹤器負責量 idle，classifyTimeout 是純函式判定。
