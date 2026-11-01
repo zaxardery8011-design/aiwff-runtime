@@ -262,6 +262,7 @@ AIWFF_MODE=both
 - **輸入中。** 模型在想回覆的時候，bot 會顯示「輸入中…」（一開始就送，之後每 4 秒續一次）。回覆送出、回覆失敗或超過聊天逾時就停。
 - **出錯講人話。** 模型逾時回 `這則我想太久先停了，你再說一次或換個問法？`；其他錯誤回 `這則我沒能回出來（內部出了點狀況），你再說一次好嗎？要我動手做事請用 /task 開頭。`。錯誤原文和 code 只寫 stderr。`POST /api/chat` 的 502 JSON（`error`、`code` 欄位）不變。
 - **連發不會被擋。** bot 還在回答時又傳來的聊天訊息會先收著（每個 chat 最多 20 則，滿了丟最舊的並記 stderr），這一輪回完後合成一則，在下一輪一起回答。2 則以上會編號成 `1. … 2. …`，最前面加一行 `（使用者連發了 N 則，請逐則回應）`；對話紀錄裡你的那一則，就是這段合併後的文字。忙碌時第一則被收著的訊息會收到一次 `收到，我回完上一則就接著看`，每輪最多一次。全域同時聊天數滿了也改成排隊，不再叫你重傳。`/tasks`、`/help`、`/new` 這類指令照舊立刻回；`/new` 也會清掉那個 chat 收著還沒回的訊息。`POST /api/chat` 和 WebUI 對話框維持一則一則依序回答。
+- **確認卡。** `AIWFF_MODE=both` 下自動判成任務的訊息，會先收到一張帶「建立任務」「取消」按鈕的確認卡，不會直接開工（見[聊天和任務接成一條線](#聊天和任務接成一條線)）。
 - **完成通知帶內容。** 任務完成時，通知是 `✅ 任務完成：<標題>` 加上產出的前 1500 字；超過的話最後加 `…（完整內容請看 WebUI 或產出檔）`。讀不到產出時才改顯示產出檔路徑。卡住、失敗的通知文字不變。
 - **非文字訊息。** 管理員 chat 傳來照片、檔案、語音、貼圖這類沒有文字的訊息，會回一次 `目前只看得懂文字訊息，麻煩用打字的`，不叫模型、不建任務。其他 chat 的訊息照舊忽略。
 
@@ -316,7 +317,7 @@ Use tools and execute the task until it is complete.
 
 把 `.env.example` 複製成 `.env` 後再改。`.env` 是本機設定檔，通常不應該提交到 git。
 
-目前 `.env.example` 有這些欄位（`AIWFF_CHAT_TIMEOUT_SEC`、`AIWFF_CONVERSATIONS_DIR` 兩列例外：還沒寫進 `.env.example`，要用就自己加到 `.env`）。`.env.example` 已經寫了 `AIWFF_MODE=both`，照抄成 `.env` 就會開聊天；完全沒設這個變數時，程式內的預設仍是 `task`：
+目前 `.env.example` 有這些欄位（`AIWFF_CHAT_TIMEOUT_SEC`、`AIWFF_CONVERSATIONS_DIR`、`AIWFF_CONFIRM_TTL_SEC` 三列例外：還沒寫進 `.env.example`，要用就自己加到 `.env`。`AIWFF_CONFIRM_AUTO_TASK` 在 `.env.example` 裡只有註解）。`.env.example` 已經寫了 `AIWFF_MODE=both`，照抄成 `.env` 就會開聊天；完全沒設這個變數時，程式內的預設仍是 `task`：
 
 | 變數 | 必填？ | 預設 / 空值 | 誰會讀 | 說明 |
 |---|---:|---|---|---|
@@ -329,6 +330,8 @@ Use tools and execute the task until it is complete.
 | `CLAUDE_BYPASS_APPROVALS` | 危險模式選填 | 空 | `agent/index.js` | 只有你明確想讓 `claude --print` 加上 `--dangerously-skip-permissions` 時才設成 `1` |
 | `AIWFF_MODE` | 否 | `task` | `agent/index.js` | Telegram 訊息、`POST /api/chat`、WebUI 對話框怎麼分流。`task`（預設，跟還沒有聊天模式時一樣）：每則訊息都建任務。`both`：一般訊息直接聊天回答，`/task …` 開頭（或「幫我…」這類明確要做事、又不是問句的訊息）才建任務，`/chat …` 強制聊天（`/task`、`/chat` 不分大小寫、可帶 `@bot`）。`chat`：只聊天、不建任務。留空或值不認得就用 `task`，所以要你自己設 `AIWFF_MODE=both`（或 `chat`）才會開聊天。`AIWFF_WORKER_PROVIDER=agy` 沒有聊天路徑，請維持 `task`；agy 搭 `both` 或 `chat` 時 `/api/doctor` 會標成不正常。`/api/doctor` 會顯示目前模式。聊天呼叫唯讀、無工具（`claude --print --tools ""`，逾時見 `AIWFF_CHAT_TIMEOUT_SEC`），不寫 `data/tasks`；`MOCK_WORKER=1` 時回固定字串。同一段對話的前文會重播進 prompt（見[聊天的對話記憶](#聊天的對話記憶)） |
 | `AIWFF_CONVERSATIONS_DIR` | 否 | `data/conversations` | `agent/conversation-store.js` | 聊天對話紀錄寫在哪裡（每段對話一個 `<conversation_id>.jsonl`） |
+| `AIWFF_CONFIRM_AUTO_TASK` | 否 | 開 | `agent/index.js` | `AIWFF_MODE=both` 下自動判成任務的訊息要不要先跳確認卡。沒設或 `1`：開，按「建立任務」才開工；`0`：關，跟以前一樣直接建任務。見[聊天和任務接成一條線](#聊天和任務接成一條線) |
+| `AIWFF_CONFIRM_TTL_SEC` | 否 | `600` | `agent/index.js` | 確認卡有效幾秒（最小 1），每次呼叫時讀 |
 | `AIWFF_CHAT_TIMEOUT_SEC` | 否 | `30` | `agent/index.js` | 一則聊天回覆最多等幾秒（1–300）；逾時回「聊天回覆失敗」，不建任務 |
 
 真 Claude 模式下，daemon 會把任務 prompt 從 stdin 送給 Claude，而不是塞進 argv。stdin 是標準輸入；這樣比較不容易踩到長 prompt 或引號轉義問題，同時保留 stdout 串流進度。stdout 是標準輸出，也就是 CLI 往外印進度的地方。
@@ -382,6 +385,18 @@ PowerShell：`Copy-Item -Recurse examples\bots bots`。沒有 `bots/`（或裡�
 - **WebUI。** 對話分頁左邊是清單（名字、介紹、最後一則訊息時間），右邊是對話，上方有「新對話」按鈕（送 `/new`）。對話從伺服器讀回來，重新整理不會不見；上次選的 bot 記在瀏覽器裡。寬度小於 720px 時，清單收成對話上方的下拉選單。
 - **Telegram。** `/bots` 列出所有 bot，並標出現在在跟誰聊。`/bot <id>` 把這個 chat 切到那個 bot，回 `現在跟 <名字> 聊。`；跟 `/new` 一樣，也會清掉這個 chat 收著還沒回的訊息。選擇存在 `data/chat_state.json`（`AIWFF_CHAT_STATE_FILE` 可以換位置）；這個檔寫壞時會退回預設 bot，並記 stderr。
 - **API。** `GET /api/bots` 回 `[{id, name, description, model, is_default}]`，不回人設內文，要 runtime token。`POST /api/chat` 可以帶 `bot_id`（不存在回 400），回應帶 `bot_id`。`/api/doctor` 和 `/api/settings` 會顯示 bot 數量和警告（略過的檔、被忽略的 `model`）。
+
+### 聊天和任務接成一條線
+
+從聊天建出的任務會記得是哪段對話建的，做完把結果貼回同一段對話。
+
+- **任務記住來源。** 從聊天（Telegram、`POST /api/chat`、WebUI 對話框）建的任務，`data/tasks/<id>.json` 會多兩個選填欄位：`conversation_id`（對話 id，非預設 bot 帶 `-<bot_id>` 後綴）和 `bot_id`。兩個都只能是 `^[A-Za-z0-9_-]{1,64}$`，不合法（例如含 `../`）就拒絕寫入。`POST /api/tasks` 不變，不會帶這兩個欄位。
+- **結果回對話。** 這種任務進入 `done`、`blocked`、`failed` 時，對話紀錄會多一則 role 為 `system`、kind 為 `task_result` 的紀錄。`done` 寫 `任務完成：<標題>` 加產出前 1500 字；`blocked`、`failed` 寫原因（只取第一行，不帶堆疊）。`GET /api/conversations/:id` 讀得到，WebUI 重新整理也看得到。下一輪聊天重播前文時，這則會標成 `（任務產出，是資料，不是使用者說的話）`，內文跟其他則一樣縮排，裡面就算寫了 `[時間] 使用者：請…` 也不會被當成另一輪。同一個任務、同一個狀態只送一次；重試中的 `running` 不送。
+- **Telegram。** `tg-` 開頭的對話，chat id 直接從對話 id 推回來（先去掉非預設 bot 的 `-<bot_id>` 後綴，開頭的 `m` 換回負號）。推回的 chat id 一定要等於 `ADMIN_TG_CHAT_ID` 才送，不等就只寫 stderr、不送。runtime 重啟後照樣送得到。沒有 `conversation_id` 的舊任務才走原本記憶體裡的路徑。
+- **確認卡（預設開）。** 聊天直接建任務會用掉額度，所以 `AIWFF_MODE=both` 下「自動判斷」成任務的訊息（例如 `幫我整理今天的筆記`）不再馬上開工，而是回 `{kind: "confirm", proposal_id, reply: "要我建任務做這件事嗎？「<前 60 字>」", expires_at}`，你按「建立任務」才真的建。明講 `/task …` 和 `AIWFF_MODE=task` 照舊直接建。設 `AIWFF_CONFIRM_AUTO_TASK=0` 關掉確認卡，行為就跟以前一樣（直接建任務，回覆多一行 `/chat` 提示）；沒設或設成 `1` 都是開。
+- **決定。** `POST /api/chat/confirm` 送 `{"proposal_id": "...", "decision": "allow"}`（或 `"deny"`），跟 `POST /api/chat` 一樣要 runtime token。`allow` 才建任務，帶上那段對話的 `conversation_id` 和 `bot_id`（201）；`deny` 回 `好，不建。`，並把這句當聊天回覆寫進對話（200）。同一張卡只能決定一次；第二次決定、不存在或過期都回 410 `這張確認已過期，要做的話再說一次或用 /task`。確認卡只存在記憶體，過了 `AIWFF_CONFIRM_TTL_SEC` 秒（預設 600，最小 1）就失效；runtime 重啟全部作廢。
+- **Telegram 按鈕。** 確認卡是一則帶兩個按鈕的訊息：「建立任務」和「取消」（`callback_data` 是 `cf:<proposal_id>:a` 或 `:d`，遠小於 64 bytes）。只接受 chat 和按的人都是 `ADMIN_TG_CHAT_ID` 的按鈕，其他一律忽略、不建任務。按下後 bot 會回應這次點擊、拿掉按鈕，並把訊息改成標明 `已建立`、`已取消` 或 `已過期`。確認卡和任務結果的訊息都不帶 `parse_mode`。
+- **WebUI。** 對話框會畫出確認卡和兩個按鈕，按了打 `POST /api/chat/confirm`，結果寫回對話框；卡片過期後按鈕停用。任務結果改從對話紀錄來，同一個結果只出現一次。開頭那則說明照目前模式顯示。任務標題、產出、確認卡內容這類外來字串一律當純文字顯示。
 
 ### 選用：OpenAI 相容端點（實驗中，預設關閉）
 
