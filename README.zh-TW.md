@@ -238,11 +238,32 @@ MOCK_WORKER=1
 2. 傳 `/newbot`。
 3. 依提示建立 bot，複製 token。
 4. 把 token 貼進 `.env` 的 `TG_BOT_TOKEN`。
-5. 傳訊息給 `@userinfobot`。
-6. 複製你的數字 chat ID。
-7. 把它貼進 `.env` 的 `ADMIN_TG_CHAT_ID`。
+5. `ADMIN_TG_CHAT_ID` 先留空，執行 `npm start`。runtime 會以設定模式啟動（見下方說明）。
+6. 對你的 bot 傳 `/start`，終端機會印出一行，裡面有你的數字 chat ID。
+7. 把它貼進 `.env` 的 `ADMIN_TG_CHAT_ID`，再重開。
 
-有設定 `TG_BOT_TOKEN` 時，`ADMIN_TG_CHAT_ID` 也必須填。留空的話，runtime 會拒絕啟動 Telegram polling。
+（也可以改用 `@userinfobot` 查 chat ID。）
+
+**設定模式。** 有設 `TG_BOT_TOKEN`、沒設 `ADMIN_TG_CHAT_ID` 時，runtime 照樣啟動、照常 poll Telegram，但對任何訊息都不回覆、不叫模型、不建任務。每個 chat 第一次傳 `/start` 時，終端機（stdout）印出一行，內容有那個 chat ID，以及「把它填進 .env 的 ADMIN_TG_CHAT_ID 後重開」。在填好 `ADMIN_TG_CHAT_ID` 之前，`/api/doctor` 的 `telegram` 檢查會標成未完成設定（不是 OK）。設了 `ADMIN_TG_CHAT_ID` 之後跟以前一樣，只回應那個 chat。
+
+### 真聊天最少設定
+
+```env
+TG_BOT_TOKEN=<your_bot_token>
+MOCK_WORKER=
+ENABLE_REAL_CLAUDE_WORKER=1
+AIWFF_MODE=both
+```
+
+`ADMIN_TG_CHAT_ID` 先留空啟動，對 bot 傳 `/start`，從終端機拿到 chat ID（設定模式），填進 `ADMIN_TG_CHAT_ID` 後重開。之後一般訊息直接聊天回答，`/task …` 才建任務。
+
+### Telegram 聊天的行為
+
+- **輸入中。** 模型在想回覆的時候，bot 會顯示「輸入中…」（一開始就送，之後每 4 秒續一次）。回覆送出、回覆失敗或超過聊天逾時就停。
+- **出錯講人話。** 模型逾時回 `這則我想太久先停了，你再說一次或換個問法？`；其他錯誤回 `這則我沒能回出來（內部出了點狀況），你再說一次好嗎？要我動手做事請用 /task 開頭。`。錯誤原文和 code 只寫 stderr。`POST /api/chat` 的 502 JSON（`error`、`code` 欄位）不變。
+- **連發不會被擋。** bot 還在回答時又傳來的聊天訊息會先收著（每個 chat 最多 20 則，滿了丟最舊的並記 stderr），這一輪回完後合成一則，在下一輪一起回答。2 則以上會編號成 `1. … 2. …`，最前面加一行 `（使用者連發了 N 則，請逐則回應）`；對話紀錄裡你的那一則，就是這段合併後的文字。忙碌時第一則被收著的訊息會收到一次 `收到，我回完上一則就接著看`，每輪最多一次。全域同時聊天數滿了也改成排隊，不再叫你重傳。`/tasks`、`/help`、`/new` 這類指令照舊立刻回；`/new` 也會清掉那個 chat 收著還沒回的訊息。`POST /api/chat` 和 WebUI 對話框維持一則一則依序回答。
+- **完成通知帶內容。** 任務完成時，通知是 `✅ 任務完成：<標題>` 加上產出的前 1500 字；超過的話最後加 `…（完整內容請看 WebUI 或產出檔）`。讀不到產出時才改顯示產出檔路徑。卡住、失敗的通知文字不變。
+- **非文字訊息。** 管理員 chat 傳來照片、檔案、語音、貼圖這類沒有文字的訊息，會回一次 `目前只看得懂文字訊息，麻煩用打字的`，不叫模型、不建任務。其他 chat 的訊息照舊忽略。
 
 這套 runtime 使用 polling，也就是 daemon 主動去 Telegram 問有沒有新訊息。你不需要 webhook、公開 hostname、反向代理或公開 IP。
 
@@ -301,7 +322,7 @@ Use tools and execute the task until it is complete.
 |---|---:|---|---|---|
 | `PORT` | 否 | `3100` | `agent/index.js` | daemon 和 WebUI 使用的 HTTP port |
 | `TG_BOT_TOKEN` | Telegram 模式必填 | 空 | `agent/index.js` | `@BotFather` 給你的 Telegram Bot token；留空時 WebUI 仍可跑，但不啟動 TG polling |
-| `ADMIN_TG_CHAT_ID` | 有設 `TG_BOT_TOKEN` 時必填 | 空 | `agent/index.js` | 只接受這個 admin chat 的 Telegram 訊息 |
+| `ADMIN_TG_CHAT_ID` | 有設 `TG_BOT_TOKEN` 時要填才會回訊息 | 空 | `agent/index.js` | 只接受這個 admin chat 的 Telegram 訊息。設了 `TG_BOT_TOKEN` 但這裡留空就是設定模式：bot 不回任何訊息，收到 `/start` 時在終端機印出 chat ID（見 [Telegram Bot 設定](#telegram-bot-設定)） |
 | `CLAUDE_CMD` | 否 | `claude` | `agent/index.js` | 啟動 Claude CLI 的命令；Windows 會透過 `cmd.exe` 解析 `claude.cmd` |
 | `MOCK_WORKER` | 否 | `1` | `agent/index.js` | 對外安全預設：使用 mock worker，不呼叫 Claude CLI |
 | `ENABLE_REAL_CLAUDE_WORKER` | 真 Claude worker 必填 | 空 | `agent/index.js` | 只有你真的要讓 Claude CLI 執行任務時才設成 `1` |

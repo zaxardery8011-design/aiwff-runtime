@@ -232,11 +232,32 @@ Paste this prompt into a local coding agent when you want a mock-only install an
 2. Send `/newbot`.
 3. Follow the prompts and copy the token.
 4. Paste it into `.env` as `TG_BOT_TOKEN`.
-5. Send any message to `@userinfobot`.
-6. Copy your numeric chat ID.
-7. Paste it into `.env` as `ADMIN_TG_CHAT_ID`.
+5. Leave `ADMIN_TG_CHAT_ID` empty for now and run `npm start`. The runtime starts in setup mode (see below).
+6. Send `/start` to your bot. The terminal prints a line with your numeric chat ID.
+7. Paste it into `.env` as `ADMIN_TG_CHAT_ID` and restart.
 
-`ADMIN_TG_CHAT_ID` is required when `TG_BOT_TOKEN` is set. If it is left empty, the runtime refuses Telegram polling.
+(You can also get your chat ID from `@userinfobot` instead.)
+
+**Setup mode.** When `TG_BOT_TOKEN` is set and `ADMIN_TG_CHAT_ID` is empty, the runtime still starts and polls Telegram, but it does not reply to any message, does not call the model and does not create tasks. The first `/start` from each chat prints one line on stdout with that chat ID and the hint to put it into `ADMIN_TG_CHAT_ID` in `.env` and restart. `/api/doctor` marks the `telegram` check as not OK (setup not finished) until `ADMIN_TG_CHAT_ID` is set. With `ADMIN_TG_CHAT_ID` set, only that chat is answered, as before.
+
+### Minimal setup for real chat
+
+```env
+TG_BOT_TOKEN=<your_bot_token>
+MOCK_WORKER=
+ENABLE_REAL_CLAUDE_WORKER=1
+AIWFF_MODE=both
+```
+
+Start with `ADMIN_TG_CHAT_ID` empty, send `/start` to get your chat ID from the terminal (setup mode), fill in `ADMIN_TG_CHAT_ID`, and restart. Plain messages then get a chat answer; `/task …` creates a task.
+
+### How Telegram chat behaves
+
+- **Typing indicator.** While a chat reply is being generated the bot shows "typing…" (sent right away and renewed every 4 seconds). It stops when the reply is sent, when the reply fails, or after the chat timeout.
+- **Plain-language errors.** If the model times out the bot answers `這則我想太久先停了，你再說一次或換個問法？`. Any other failure gets `這則我沒能回出來（內部出了點狀況），你再說一次好嗎？要我動手做事請用 /task 開頭。`. The raw error and its code go to stderr only. `POST /api/chat` still returns its 502 JSON with `error` and `code`.
+- **Sending several messages in a row.** If you send more chat messages while the bot is still answering, they are kept (up to 20 per chat; when full, the oldest is dropped and stderr notes it) and answered together in the next turn. Two or more are numbered `1. … 2. …` under a first line `（使用者連發了 N 則，請逐則回應）`; that combined text is exactly what is saved as your turn in the conversation log. The first buffered message gets one `收到，我回完上一則就接著看` per turn. When the global limit of concurrent chat calls is reached, messages wait in line instead of being rejected. Commands such as `/tasks`, `/help` and `/new` are still answered right away; `/new` also drops the messages waiting for that chat. `POST /api/chat` and the WebUI chat box keep answering one message at a time in order.
+- **Task results in the notice.** When a task is done, the notice reads `✅ 任務完成：<title>` followed by the first 1500 characters of the result. Longer results end with `…（完整內容請看 WebUI 或產出檔）`. If the result cannot be read, the notice shows the artifact path instead. Blocked and failed notices are unchanged.
+- **Non-text messages.** Photos, files, voice messages and stickers from the admin chat get one reply, `目前只看得懂文字訊息，麻煩用打字的`, and nothing else happens (no model call, no task). Messages from other chats are ignored as before.
 
 This runtime uses polling. You do not need a webhook, public hostname, reverse proxy, or public IP address.
 
@@ -293,7 +314,7 @@ Copy `.env.example` to `.env`. The current `.env.example` exposes these fields (
 |---|---:|---|---|---|
 | `PORT` | No | `3100` | `agent/index.js` | HTTP port for the daemon and WebUI |
 | `TG_BOT_TOKEN` | Required for Telegram | empty | `agent/index.js` | Telegram Bot token from `@BotFather`; if empty, WebUI still runs but TG polling does not start |
-| `ADMIN_TG_CHAT_ID` | Required when `TG_BOT_TOKEN` is set | empty | `agent/index.js` | Restricts accepted TG messages to one admin chat |
+| `ADMIN_TG_CHAT_ID` | Required to answer messages when `TG_BOT_TOKEN` is set | empty | `agent/index.js` | Restricts accepted TG messages to one admin chat. Empty while `TG_BOT_TOKEN` is set means setup mode: the bot answers nothing and prints the chat ID of each `/start` on stdout (see [TG Bot Setup](#tg-bot-setup)) |
 | `CLAUDE_CMD` | No | `claude` | `agent/index.js` | Command used to spawn Claude CLI; on Windows, `claude.cmd` is resolved through `cmd.exe` |
 | `MOCK_WORKER` | No | `1` | `agent/index.js` | Public-safe default: use the mock worker instead of Claude CLI |
 | `ENABLE_REAL_CLAUDE_WORKER` | Required for real Claude worker | empty | `agent/index.js` | Set to `1` only when you intentionally want Claude CLI execution |
