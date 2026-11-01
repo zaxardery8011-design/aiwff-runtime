@@ -153,6 +153,7 @@ let fakeTg;
 let initialTaskFiles;
 const ENV_KEYS = [
   'AIWFF_MODE',
+  'AIWFF_CONFIRM_AUTO_TASK',
   'MOCK_WORKER',
   'ENABLE_REAL_CLAUDE_WORKER',
   'AIWFF_WORKER_PROVIDER',
@@ -168,6 +169,8 @@ const savedEnv = {};
 // PORT / TG_API_BASE_URL / AIWFF_CHAT_TIMEOUT_SEC 在模組載入時讀，必須 require 前設好。
 test.before(async () => {
   for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
+  // 確認卡預設開（J4）；這支測試驗的是加確認卡之前的直接建任務行為，所以關掉。
+  process.env.AIWFF_CONFIRM_AUTO_TASK = '0';
   fakeTg = await startFakeTelegram();
   port = await getOpenPort();
   process.env.PORT = String(port);

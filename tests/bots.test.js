@@ -252,6 +252,7 @@ let fakeOpenAI;
 let initialRepoData;
 const ENV_KEYS = [
   'AIWFF_MODE',
+  'AIWFF_CONFIRM_AUTO_TASK',
   'AIWFF_CONVERSATIONS_DIR',
   'AIWFF_BOTS_DIR',
   'AIWFF_CHAT_STATE_FILE',
@@ -272,6 +273,8 @@ const savedEnv = {};
 // PORT / TG_API_BASE_URL / AIWFF_CHAT_TIMEOUT_SEC 在模組載入時讀，必須 require 前設好。
 test.before(async () => {
   for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
+  // 確認卡預設開（J4）；這支測試驗的是加確認卡之前的直接建任務行為，所以關掉。
+  process.env.AIWFF_CONFIRM_AUTO_TASK = '0';
   initialRepoData = repoDataSnapshot();
   process.env.AIWFF_CONVERSATIONS_DIR = CONVERSATIONS_DIR;
   process.env.AIWFF_CHAT_STATE_FILE = CHAT_STATE_FILE;

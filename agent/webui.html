@@ -550,6 +550,31 @@
     .msg.answer {
       overflow-wrap: anywhere;
     }
+    .msg .confirm-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .msg .confirm-actions button {
+      font: inherit;
+      padding: 4px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border-soft);
+      background: var(--bg-1);
+      color: inherit;
+      cursor: pointer;
+    }
+    .msg .confirm-actions button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .msg .confirm-status {
+      display: block;
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--fg-2);
+    }
     .msg .meta {
       display: block;
       margin-top: 4px;
@@ -1306,7 +1331,7 @@
       chatMessages: [
         {
           role: 'assistant',
-          text: '輸入一句話送出，預設每則訊息都會建成任務，並在這裡回報進度。設了 AIWFF_MODE=both 時，一般訊息直接回答，/task 開頭（或「幫我…」「寫一個…」這類明確指令）才建任務。',
+          text: '輸入一句話送出，進度和結果會回報在這裡。',
           meta: '系統 · 待機'
         }
       ]
@@ -1317,6 +1342,7 @@
       hud: '/api/hud',
       tasks: '/api/tasks',
       chat: '/api/chat',
+      chatConfirm: '/api/chat/confirm',
       bots: '/api/bots',
       conversations: '/api/conversations/',
       events: '/api/events',
@@ -1484,8 +1510,154 @@
       meta.className = 'meta';
       meta.textContent = message.meta || '';
       node.appendChild(text);
+      if (message.confirm) appendConfirmControls(node, message);
       node.appendChild(meta);
       return node;
+    }
+
+    // ── 確認卡（J4）──────────────────────────────────────
+    // 自動判成任務的訊息先回 kind:'confirm'，這裡畫兩個按鈕；按了才打 POST /api/chat/confirm。
+    // 卡片上的字一律用 textContent。過期後按鈕停用。
+    var CONFIRM_EXPIRED_TEXT = '這張確認已過期，要做的話再說一次或用 /task';
+    var confirmExpiryTimers = {};
+
+    function confirmCardExpired(card) {
+      return Date.now() >= card.expiresMs;
+    }
+
+    function confirmStatusText(card) {
+      if (card.decided === 'allow') return '已建立';
+      if (card.decided === 'deny') return '已取消';
+      if (card.decided === 'expired' || confirmCardExpired(card)) return '已過期';
+      if (card.busy) return '送出中…';
+      var label = chatTimeLabel(card.expiresAt);
+      return label ? '到 ' + label + ' 前有效' : '';
+    }
+
+    function appendConfirmControls(node, message) {
+      var card = message.confirm;
+      var expired = confirmCardExpired(card);
+      var actions = document.createElement('div');
+      actions.className = 'confirm-actions';
+      [['allow', '建立任務'], ['deny', '取消']].forEach(function(pair) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'confirm-' + pair[0];
+        button.textContent = pair[1];
+        button.disabled = !!card.decided || !!card.busy || expired || state.loggedIn === false;
+        button.addEventListener('click', function() {
+          decideChatConfirm(message, pair[0]);
+        });
+        actions.appendChild(button);
+      });
+      node.appendChild(actions);
+      var status = document.createElement('span');
+      status.className = 'confirm-status';
+      status.textContent = confirmStatusText(card);
+      node.appendChild(status);
+      // 到期時重畫一次，讓按鈕停用。計時器另外記，卡片本身維持純資料。
+      if (!card.decided && !expired && !confirmExpiryTimers[card.proposalId]) {
+        var timer = setTimeout(function() {
+          renderChat();
+        }, Math.min(card.expiresMs - Date.now() + 50, 2147483000));
+        if (timer && typeof timer.unref === 'function') timer.unref();
+        confirmExpiryTimers[card.proposalId] = true;
+      }
+    }
+
+    function addConfirmCard(data, conversationId) {
+      var expiresMs = Date.parse(data.expires_at || '');
+      if (!isFinite(expiresMs)) expiresMs = Date.now();
+      var message = {
+        role: 'assistant',
+        text: String(data.reply || ''),
+        meta: timeMeta('確認'),
+        ts: new Date().toISOString(),
+        conversationId: conversationId,
+        confirm: { proposalId: String(data.proposal_id || ''), expiresAt: data.expires_at, expiresMs: expiresMs, decided: null, busy: false }
+      };
+      addLocalChatMessage(conversationId, message);
+      noteBotActivity(conversationId, message.ts);
+      if (conversationId === currentConversationId()) state.chatMessages.push(message);
+      renderChat();
+      return message;
+    }
+
+    function botForConversation(conversationId) {
+      var found = null;
+      (state.bots || []).forEach(function(bot) {
+        if (!found && chatConversationId(bot) === conversationId) found = bot;
+      });
+      return found;
+    }
+
+    async function decideChatConfirm(message, decision) {
+      var card = message && message.confirm;
+      if (!card || card.decided || card.busy) return;
+      var conversationId = message.conversationId || currentConversationId();
+      var target = { conversationId: conversationId };
+      if (confirmCardExpired(card)) {
+        card.decided = 'expired';
+        renderChat();
+        return;
+      }
+      card.busy = true;
+      renderChat();
+      try {
+        var response = await fetch(routes.chatConfirm, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ proposal_id: card.proposalId, decision: decision })
+        });
+        var data = {};
+        try { data = await response.json(); } catch (_) { data = {}; }
+        if (response.status === 410) {
+          card.decided = 'expired';
+          appendChatMessage('assistant', String(data.error || CONFIRM_EXPIRED_TEXT), timeMeta('系統'), true, target);
+        } else if (!response.ok || data.ok === false) {
+          throw new Error(data.error || response.statusText);
+        } else if (data.kind === 'task' && data.task) {
+          card.decided = 'allow';
+          rememberChatTask(data.task, conversationId);
+          appendChatMessage('assistant', taskStatusMessage(data.task, true), timeMeta('系統'), true, { conversationId: conversationId, taskId: data.task.id });
+        } else {
+          card.decided = 'deny';
+          // 「好，不建。」已經寫進伺服器的對話紀錄：重讀一次；讀不到才在這個分頁補一則。
+          var decidedAt = Date.now();
+          var shown = false;
+          try {
+            await loadChatConversation(botForConversation(conversationId), { force: true });
+            shown = (state.chatServer[conversationId] || []).some(function(item) {
+              return item.answer && item.text === data.reply && (Date.parse(item.ts) || 0) >= decidedAt - 60000;
+            });
+          } catch (_) {}
+          if (!shown) appendChatMessage('assistant', String(data.reply || ''), timeMeta('回答'), true, { answer: true, conversationId: conversationId });
+        }
+      } catch (error) {
+        appendChatMessage('assistant', '確認送出失敗：' + error.message, timeMeta('系統'), true, target);
+      } finally {
+        card.busy = false;
+        renderChat();
+      }
+    }
+
+    // 開頭那則系統說明照目前的 AIWFF_MODE 寫（從 GET /api/settings 讀）。
+    function chatWelcomeText(settings) {
+      var mode = settings && settings.chat_mode;
+      if (mode === 'task') return '每則訊息都會建成任務，進度和結果會回報在這裡。';
+      if (mode === 'chat') return '只聊天、不建任務。';
+      if (mode === 'both') {
+        if (settings.confirm_auto_task === false) {
+          return '一般訊息直接聊天；明確要做事的訊息直接建任務（確認卡已關閉）；/task 開頭直接建。';
+        }
+        return '一般訊息直接聊天；明確要做事的訊息會先跳確認卡，按『建立』才建任務；/task 開頭直接建。';
+      }
+      return '輸入一句話送出，進度和結果會回報在這裡。';
+    }
+
+    function applyChatWelcome() {
+      CHAT_WELCOME_MESSAGE.text = chatWelcomeText(state.settings);
     }
 
     function setChatBadge(text) {
@@ -1773,7 +1945,9 @@
       if (!task || !task.id) return;
       state.chatTasks[task.id] = {
         lastStatus: task.status || 'pending',
-        conversationId: conversationId || currentConversationId()
+        conversationId: conversationId || currentConversationId(),
+        // 帶 conversation_id 的任務：結果由後端寫進對話紀錄（kind task_result），這裡不再另外讀一次。
+        linked: !!task.conversation_id
       };
     }
 
@@ -1798,12 +1972,16 @@
         var tracked = state.chatTasks[taskId];
         var task = state.tasks.find(function(item) { return item.id === taskId; });
         if (!task) return;
+        var settled = ['done', 'blocked', 'failed'].indexOf(task.status) >= 0;
         if (task.status && task.status !== tracked.lastStatus) {
           tracked.lastStatus = task.status;
-          appendChatMessage('assistant', taskStatusMessage(task, false), timeMeta('系統'), true, { conversationId: tracked.conversationId });
+          // 有對話來源的任務結束時，結果那則從對話紀錄來，不再畫一則同樣內容的進度訊息。
+          if (!(tracked.linked && settled)) {
+            appendChatMessage('assistant', taskStatusMessage(task, false), timeMeta('系統'), true, { conversationId: tracked.conversationId });
+          }
         }
-        // 每個任務只讀一次回答（refresh 每輪都會跑到這裡）。
-        if (task.status === 'done' && !tracked.answerRequested) {
+        // 每個任務只讀一次回答（refresh 每輪都會跑到這裡）。沒有對話來源的舊任務才走這條。
+        if (task.status === 'done' && !tracked.linked && !tracked.answerRequested) {
           tracked.answerRequested = true;
           showTaskAnswer(taskId);
         }
@@ -2614,6 +2792,7 @@
         state.memory = results[5].documents || [];
         state.logs = results[6];
         state.settings = results[7];
+        applyChatWelcome();
         state.doctor = await doctorPending;
         await refreshProgress();
         await refreshTraceEntries();
@@ -2820,7 +2999,9 @@
           } else {
             addLocalChatMessage(conversationId, userMessage);
           }
-          if (data.kind === 'task' && data.task) {
+          if (data.kind === 'confirm' && data.proposal_id) {
+            addConfirmCard(data, conversationId);
+          } else if (data.kind === 'task' && data.task) {
             rememberChatTask(data.task, conversationId);
             var lines = taskStatusMessage(data.task, true);
             if (data.hint) lines += '\n' + data.hint;

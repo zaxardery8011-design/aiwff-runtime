@@ -232,6 +232,7 @@ let initialTaskFiles;
 let initialRepoConversations;
 const ENV_KEYS = [
   'AIWFF_MODE',
+  'AIWFF_CONFIRM_AUTO_TASK',
   'AIWFF_CONVERSATIONS_DIR',
   'MOCK_WORKER',
   'ENABLE_REAL_CLAUDE_WORKER',
@@ -250,6 +251,8 @@ const savedEnv = {};
 // PORT / TG_API_BASE_URL / AIWFF_CHAT_TIMEOUT_SEC 在模組載入時讀，必須 require 前設好。
 test.before(async () => {
   for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
+  // 確認卡預設開（J4）；這支測試驗的是加確認卡之前的直接建任務行為，所以關掉。
+  process.env.AIWFF_CONFIRM_AUTO_TASK = '0';
   initialRepoConversations = repoConversationsSnapshot();
   process.env.AIWFF_CONVERSATIONS_DIR = CONVERSATIONS_DIR;
   fakeTg = await startFakeTelegram();
@@ -570,6 +573,11 @@ test('判成任務：寫一則系統紀錄，下一輪聊天看得到；模型�
   assert.equal(records[0].role, 'system');
   assert.equal(records[0].text, `已建任務 ${created.json.task.id.slice(0, 8)}：寫一個 hello.txt`);
   await waitForTaskStatus(created.json.task.id, ['done', 'failed', 'blocked']);
+  // 任務結束後結果會寫回同一段對話（J4，kind task_result）；等它寫進去再聊下一輪，順序才固定。
+  const resultDeadline = Date.now() + 15000;
+  while (Date.now() < resultDeadline && !store.readRecent('api-task').some((entry) => entry.kind === 'task_result')) {
+    await sleep(100);
+  }
 
   // 假 claude 回一句 /task 開頭的話：要是被當成指令就會多建任務；這裡只能有 /task 那一筆。
   useFakeClaude('claude-task');
@@ -583,8 +591,8 @@ test('判成任務：寫一則系統紀錄，下一輪聊天看得到；模型�
   assert.equal(taskFileNames().length, before + 1);
   const log = store.readRecent('api-task');
   assert.deepEqual(
-    log.map((entry) => entry.role),
-    ['system', 'user', 'assistant'],
+    log.map((entry) => (entry.kind === 'task_result' ? 'system:task_result' : entry.role)),
+    ['system', 'system:task_result', 'user', 'assistant'],
   );
 });
 
