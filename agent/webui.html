@@ -278,6 +278,9 @@
     .task-question-card .q-head { font-size: 11px; color: var(--yellow); font-weight: 700; }
     .task-question-card .q-text { margin-top: 4px; color: var(--fg-0); white-space: pre-wrap; overflow-wrap: anywhere; }
     .task-question-card .q-meta { margin-top: 4px; font-size: 11px; color: var(--fg-2); }
+    .task-question-card .q-answer { display: block; width: 100%; margin-top: 6px; min-height: 52px; box-sizing: border-box; resize: vertical; font: inherit; }
+    .task-question-card .q-actions { margin-top: 6px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .task-question-card .q-status { font-size: 11px; color: var(--fg-2); }
     .status {
       display: inline-flex;
       min-height: 22px;
@@ -1328,6 +1331,13 @@
       chatLoadSeq: {},
       // 送出中顯示「…」等待泡泡的對話 id；null = 沒有在等。
       chatPendingConversation: null,
+      // 任務提問（taskId → 問題文字）：從要登入的 GET /api/tasks/:id/question 讀；開放的任務清單不帶問題內容。
+      questions: {},
+      questionErrors: {},
+      // 回答卡：還沒送出的草稿、送出中、送出結果（taskId → 值）。
+      answerDrafts: {},
+      answerBusy: {},
+      answerStatus: {},
       chatMessages: [
         {
           role: 'assistant',
@@ -2128,7 +2138,25 @@
       return '';
     }
 
+    // 任務停成 blocked、blocked_reason=question：worker 在等使用者回答，卡片多一個輸入框和送出按鈕。
+    function isAnswerableQuestionTask(task) {
+      return !!task && task.status === 'blocked' && task.blocked_reason === 'question';
+    }
+
+    // 問題文字一律由 fillQuestionCards 用 textContent 填進去，這裡的 HTML 只有空的容器。
     function questionCardHtml(task) {
+      if (isAnswerableQuestionTask(task)) {
+        var id = escapeHtml(task.id || '');
+        var busy = !!state.answerBusy[task.id];
+        return '<div class="task-question-card" role="group" aria-label="worker 提問">' +
+          '<div class="q-head">任務需要你回答</div>' +
+          '<div class="q-text" data-question-text="' + id + '"></div>' +
+          '<textarea class="q-answer" data-answer-input="' + id + '" maxlength="2000" placeholder="寫下你的回答" aria-label="回答"' + (busy ? ' disabled' : '') + '></textarea>' +
+          '<div class="q-actions"><button type="button" data-answer-submit="' + id + '"' + (busy ? ' disabled' : '') + '>送出回答並續跑</button>' +
+          '<span class="q-status" data-answer-status="' + id + '"></span></div>' +
+          '<div class="q-meta mono">' + id + ' · ' + escapeHtml(fmtDate(task.updated_at || task.created_at)) + '</div>' +
+        '</div>';
+      }
       var question = workerQuestion(task);
       if (!question) return '';
       return '<div class="task-question-card" role="note" aria-label="worker 提問（唯讀）">' +
@@ -2136,6 +2164,109 @@
         '<div class="q-text">' + escapeHtml(question) + '</div>' +
         '<div class="q-meta mono">' + escapeHtml(task.id || '') + ' · ' + escapeHtml(fmtDate(task.updated_at || task.created_at)) + '</div>' +
       '</div>';
+    }
+
+    function questionTextFor(taskId, task) {
+      if (task && typeof task.question === 'string' && task.question) return task.question;
+      if (typeof state.questions[taskId] === 'string' && state.questions[taskId]) return state.questions[taskId];
+      if (state.questionErrors[taskId]) return '（問題讀不到：' + state.questionErrors[taskId] + '）';
+      return '（問題讀取中…）';
+    }
+
+    // setHtml 之後補上回答卡的動態內容：問題文字、草稿、送出狀態，全部走 textContent／value。
+    function fillQuestionCards(root) {
+      if (!root || typeof root.querySelectorAll !== 'function') return;
+      var tasksById = {};
+      (state.tasks || []).forEach(function(task) { if (task && task.id) tasksById[task.id] = task; });
+      Array.prototype.forEach.call(root.querySelectorAll('[data-question-text]'), function(node) {
+        var taskId = node.getAttribute('data-question-text');
+        node.textContent = questionTextFor(taskId, tasksById[taskId]);
+      });
+      Array.prototype.forEach.call(root.querySelectorAll('[data-answer-input]'), function(node) {
+        node.value = state.answerDrafts[node.getAttribute('data-answer-input')] || '';
+      });
+      Array.prototype.forEach.call(root.querySelectorAll('[data-answer-status]'), function(node) {
+        var taskId = node.getAttribute('data-answer-status');
+        node.textContent = state.answerBusy[taskId] ? '送出中…' : (state.answerStatus[taskId] || '');
+      });
+    }
+
+    // 讀等回答任務的問題內容（要登入）。讀不到就記具名原因，卡片上顯示出來。
+    async function refreshQuestions() {
+      var waiting = (state.tasks || []).filter(isAnswerableQuestionTask);
+      await Promise.all(waiting.map(async function(task) {
+        try {
+          var data = await fetchJson('/api/tasks/' + encodeURIComponent(task.id) + '/question', { credentials: 'same-origin' });
+          state.questions[task.id] = String(data.question || '');
+          delete state.questionErrors[task.id];
+        } catch (error) {
+          state.questionErrors[task.id] = state.loggedIn === false ? '要先用終端機印的登入連結登入' : fetchErrorText(error);
+        }
+      }));
+    }
+
+    function rerenderQuestionLists() {
+      renderTasks();
+      renderInbox();
+    }
+
+    // 按下「送出回答並續跑」：POST /api/tasks/:id/resume，body 帶 { answer }。
+    async function submitTaskAnswer(taskId) {
+      if (!taskId || state.answerBusy[taskId]) return;
+      var answer = String(state.answerDrafts[taskId] || '').trim();
+      if (!answer) {
+        state.answerStatus[taskId] = '請先寫下回答';
+        rerenderQuestionLists();
+        return;
+      }
+      state.answerBusy[taskId] = true;
+      state.answerStatus[taskId] = '';
+      rerenderQuestionLists();
+      try {
+        var response = await fetch('/api/tasks/' + encodeURIComponent(taskId) + '/resume', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ answer: answer })
+        });
+        var data = {};
+        try { data = await response.json(); } catch (_) { data = {}; }
+        if (!response.ok || data.ok === false) throw new Error(data.error || response.statusText);
+        delete state.answerDrafts[taskId];
+        delete state.questions[taskId];
+        state.answerStatus[taskId] = '已送出，任務帶著你的回答繼續做';
+        if (data.task) {
+          state.tasks = (state.tasks || []).map(function(item) { return item.id === taskId ? data.task : item; });
+        }
+      } catch (error) {
+        state.answerStatus[taskId] = '送出失敗：' + error.message;
+      } finally {
+        state.answerBusy[taskId] = false;
+        rerenderQuestionLists();
+      }
+    }
+
+    // 回答卡在清單裡，清單每 5 秒重畫一次：正在打字時先不重畫那一塊，免得草稿和游標被洗掉。
+    function setTaskListHtml(id, html) {
+      var el = byId(id);
+      if (!el) return;
+      var active = document.activeElement;
+      if (active && el.contains(active) && active.getAttribute && active.getAttribute('data-answer-input')) return;
+      el.innerHTML = html;
+      fillQuestionCards(el);
+    }
+
+    function bindAnswerCards(id) {
+      var el = byId(id);
+      if (!el) return;
+      el.addEventListener('input', function(event) {
+        var taskId = event.target && event.target.getAttribute && event.target.getAttribute('data-answer-input');
+        if (taskId) state.answerDrafts[taskId] = event.target.value;
+      });
+      el.addEventListener('click', function(event) {
+        var button = event.target && event.target.closest ? event.target.closest('[data-answer-submit]') : null;
+        if (button) submitTaskAnswer(button.getAttribute('data-answer-submit'));
+      });
     }
 
     function taskRow(task) {
@@ -2168,7 +2299,7 @@
 
     function renderTasks() {
       var tasks = sortedTasks();
-      setHtml('tasks-list', tasks.length ? tasks.map(taskRow).join('') : empty('目前沒有任務'));
+      setTaskListHtml('tasks-list', tasks.length ? tasks.map(taskRow).join('') : empty('目前沒有任務'));
     }
 
     function renderEvents() {
@@ -2195,7 +2326,7 @@
       setHtml('inbox-list', truncationRow(state.truncation.inbox) + inboxHtml);
 
       var blocked = sortedTasks().filter(function(task) { return task.status === 'blocked'; });
-      setHtml('blocked-list', blocked.length ? blocked.map(taskRow).join('') : empty('目前沒有卡住任務'));
+      setTaskListHtml('blocked-list', blocked.length ? blocked.map(taskRow).join('') : empty('目前沒有卡住任務'));
     }
 
     function renderMemory() {
@@ -2795,6 +2926,7 @@
         applyChatWelcome();
         state.doctor = await doctorPending;
         await refreshProgress();
+        await refreshQuestions();
         await refreshTraceEntries();
         syncChatTasks();
         state.lastSyncMs = Date.now();
@@ -2916,6 +3048,9 @@
         renderTrace();
       });
     }
+
+    bindAnswerCards('tasks-list');
+    bindAnswerCards('blocked-list');
 
     var memoryList = byId('memory-list');
     if (memoryList) {

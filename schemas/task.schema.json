@@ -102,6 +102,18 @@
     "bot_id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9_-]{1,64}$"
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resume_answer": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resume_question": {
+      "type": "string",
+      "minLength": 1
     }
   }
 }

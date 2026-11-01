@@ -983,7 +983,7 @@ function getHudSnapshot() {
     task_counts: countTasksByStatus(tasks),
     inbox_count: listInboxEvents().length,
     memory_count: listMemoryDocuments().length,
-    latest_tasks: tasks.slice(0, 5),
+    latest_tasks: tasks.slice(0, 5).map(publicTaskView),
     latest_events: listTaskEvents(0).slice(-5),
   };
 }
@@ -1231,6 +1231,55 @@ function handleTaskResult(req, res, rawId) {
   });
 }
 
+// 不用 token 的任務端點（GET /api/tasks、GET /api/tasks/:id、HUD 的最近任務）：拿掉提問與回答的內文，
+// 只回一個布林 has_question。內文從要 token 的 GET /api/tasks/:id/question 拿。
+const PRIVATE_TASK_FIELDS = ['question', 'resume_answer', 'resume_question'];
+
+function publicTaskView(task) {
+  if (!task || typeof task !== 'object') {
+    return task;
+  }
+  const view = { ...task };
+  for (const field of PRIVATE_TASK_FIELDS) {
+    delete view[field];
+  }
+  view.has_question = typeof task.question === 'string' && task.question.length > 0;
+  return view;
+}
+
+function handleTaskQuestion(req, res, rawId) {
+  const readAccess = verifyReadAccess(req);
+  if (!readAccess.ok) {
+    sendJson(res, readAccess.status, { ok: false, error: readAccess.error });
+    return;
+  }
+  if (!isUuidTaskId(rawId)) {
+    sendJson(res, 400, { ok: false, error: 'invalid task id' });
+    return;
+  }
+  let task;
+  try {
+    task = readTask(rawId);
+  } catch (error) {
+    sendJson(res, 409, { ok: false, error: `任務檔讀不動：${error.message}` });
+    return;
+  }
+  if (!task) {
+    sendJson(res, 404, { ok: false, error: '找不到任務' });
+    return;
+  }
+  sendJson(res, 200, {
+    ok: true,
+    task_id: task.id || rawId,
+    status: task.status,
+    blocked_reason: task.blocked_reason || null,
+    waiting_for_answer: isQuestionTask(task),
+    question: typeof task.question === 'string' ? task.question : null,
+    resume_question: typeof task.resume_question === 'string' ? task.resume_question : null,
+    resume_answer: typeof task.resume_answer === 'string' ? task.resume_answer : null,
+  });
+}
+
 function appendProgressText(taskId, line) {
   // 進度是 best-effort：寫失敗（如磁碟滿）只記 stderr，不炸掉 stdout 事件回呼。
   try {
@@ -1423,9 +1472,21 @@ function taskSettledReason(task) {
   return firstLine.length > 500 ? `${firstLine.slice(0, 500)}…` : firstLine;
 }
 
+// 任務問問題時給人看的問題本文：一行、最多 1000 字（worker 端已截過，這裡再保險一次）。
+function taskQuestionText(task) {
+  const question = Array.from(String(task.question || '').trim()).slice(0, MAX_TASK_QUESTION_CHARS).join('');
+  return question || '（worker 沒有留下問題內容）';
+}
+
+const TG_QUESTION_HEADER = '❓ 任務需要你回答：';
+
 function telegramTaskSettledText(task) {
   if (task.status === 'done') {
     return telegramTaskDoneText(task);
+  }
+  if (isQuestionTask(task)) {
+    const text = `${TG_QUESTION_HEADER}${task.title}\n${taskQuestionText(task)}\n直接回覆這則訊息，或用 /answer <答案>`;
+    return text.length > TG_MAX_MESSAGE_CHARS ? `${text.slice(0, TG_MAX_MESSAGE_CHARS - 1)}…` : text;
   }
   if (task.status === 'blocked') {
     return `⚠️ 任務卡住：${task.title}\n原因：${taskSettledReason(task)}`;
@@ -1439,8 +1500,28 @@ function notifyTelegramTaskDone(task) {
   if (!chatId || !process.env.TG_BOT_TOKEN) {
     return;
   }
-  tgRequest(process.env.TG_BOT_TOKEN, 'sendMessage', { chat_id: chatId, text: telegramTaskSettledText(task) }).catch(() => {});
+  tgRequest(process.env.TG_BOT_TOKEN, 'sendMessage', { chat_id: chatId, text: telegramTaskSettledText(task) })
+    .then((data) => rememberTelegramQuestionMessage(task, chatId, data))
+    .catch(() => {});
   delete tgPendingNotify[task.id];
+}
+
+// 提問訊息 → 任務 id 的對照表（「直接回覆這則訊息」用）。只放記憶體：runtime 重啟後就沒了，那時請使用者改用 /answer。
+const MAX_TG_QUESTION_MESSAGES = 200;
+const tgQuestionMessages = new Map();
+
+function telegramQuestionMessageKey(chatId, messageId) {
+  return `${chatId}:${messageId}`;
+}
+
+function rememberTelegramQuestionMessage(task, chatId, data) {
+  if (!isQuestionTask(task) || !data || data.ok === false || !data.result || data.result.message_id === undefined) {
+    return;
+  }
+  tgQuestionMessages.set(telegramQuestionMessageKey(chatId, data.result.message_id), task.id);
+  while (tgQuestionMessages.size > MAX_TG_QUESTION_MESSAGES) {
+    tgQuestionMessages.delete(tgQuestionMessages.keys().next().value);
+  }
 }
 
 // 寫進對話紀錄的任務結果：done 帶產出前 1500 字；blocked、failed 只寫原因。
@@ -1458,6 +1539,9 @@ function taskResultConversationText(task) {
     }
     const more = content.length > TG_TASK_RESULT_PREVIEW_CHARS || result.truncated;
     return `任務完成：${task.title}\n\n${content.slice(0, TG_TASK_RESULT_PREVIEW_CHARS)}${more ? '\n…（完整內容請看 WebUI 或產出檔）' : ''}`;
+  }
+  if (isQuestionTask(task)) {
+    return `任務需要你回答：${task.title}\n${taskQuestionText(task)}`;
   }
   if (task.status === 'blocked') {
     return `任務卡住：${task.title}\n原因：${taskSettledReason(task)}`;
@@ -1506,7 +1590,9 @@ function notifyTelegramConversationTask(task) {
     .then((data) => {
       if (data && data.ok === false) {
         logStderr('task-settled telegram', data.description || 'sendMessage returned ok:false');
+        return;
       }
+      rememberTelegramQuestionMessage(task, chatId, data);
     })
     .catch((error) => logStderr('task-settled telegram', error));
 }
@@ -1545,7 +1631,8 @@ function onTaskSettled(task) {
   }
 }
 
-function buildClaudePrompt(task) {
+// askQuestions：只有 Claude worker 會判讀 BLOCKED: 問題，agy 那條不教它問（問了也接不住，只會變成沒產出的失敗）。
+function buildClaudePrompt(task, { askQuestions = true } = {}) {
   const systemPrompt = readTextFileIfExists(path.join(ROOT_DIR, 'CLAUDE.md'));
   const facts = readTextFileIfExists(path.join(MEMORY_DIR, 'facts.md'));
   const preferences = readTextFileIfExists(path.join(MEMORY_DIR, 'preferences.md'));
@@ -1565,7 +1652,39 @@ ${buildCheckpointPromptSection(task)}
 
 結果請寫到: ${artifactResultPath(task.id)}
 最後一行必須寫: DONE: <一句話說你完成了什麼>
+${askQuestions ? QUESTION_PROMPT_SECTION : ''}`;
+}
+
+const QUESTION_PROMPT_SECTION = `
+## 缺資訊時問使用者
+缺少關鍵資訊、又不能合理假設時，不要亂猜：最後一行寫 BLOCKED: <一個要問使用者的具體問題>，然後結束；這時不用寫結果檔。
 `;
+
+// 任務問問題：Claude worker exit 0、沒有結果檔、stdout 最後一個非空行以 BLOCKED: 開頭時，
+// 任務停成 blocked（blocked_reason=question），問題存在 question，等使用者回答後帶著答案續跑。
+const WORKER_QUESTION_PREFIX = 'BLOCKED:';
+const MAX_TASK_QUESTION_CHARS = 1000;
+const MAX_TASK_ANSWER_CHARS = 2000;
+
+// 回傳問題文字（最多 1000 字）；最後一個非空行不是 BLOCKED: 開頭、或冒號後面是空的就回 null。
+function workerQuestionFromStdout(stdout) {
+  const lines = String(stdout || '').split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim();
+    if (!line) {
+      continue;
+    }
+    if (!line.startsWith(WORKER_QUESTION_PREFIX)) {
+      return null;
+    }
+    const question = Array.from(line.slice(WORKER_QUESTION_PREFIX.length).trim());
+    return question.length ? question.slice(0, MAX_TASK_QUESTION_CHARS).join('') : null;
+  }
+  return null;
+}
+
+function isQuestionTask(task) {
+  return Boolean(task) && task.status === 'blocked' && task.blocked_reason === 'question';
 }
 
 function updateTaskStatus(task, status, extra = {}) {
@@ -1683,6 +1802,14 @@ function buildCheckpointPromptSection(task) {
   const previous = previousArtifactPath(task.id);
   if (fs.existsSync(previous)) {
     lines.push(`上一棒留下的結果檔（可能沒寫完）已改名為 ${previous}，可以參考；這一棒要把完整結果重新寫到下面的結果路徑。`);
+  }
+  if (typeof task.resume_answer === 'string' && task.resume_answer) {
+    lines.push('', '## 你上一棒問的問題與使用者的回答');
+    lines.push(`問：${typeof task.resume_question === 'string' && task.resume_question ? task.resume_question : '（上一棒沒有留下問題）'}`);
+    lines.push('答：（下面縮排的內容是使用者的回答，照它往下做）');
+    for (const line of task.resume_answer.split(/\r?\n/)) {
+      lines.push(`  ${line}`);
+    }
   }
   return lines.join('\n');
 }
@@ -1951,6 +2078,14 @@ function spawnClaudeWorker(task, attempt = 1) {
       const tail = stderr.trim().slice(-1000) || stdout.trim().slice(-1000);
       failureReason = `Claude exited with ${exitReason}: ${tail || 'no stderr or stdout output'}`;
     } else if (!fs.existsSync(artifactResultPath(task.id))) {
+      // worker 問問題：不算失敗、不重試，停成 blocked 等人回答。
+      const question = workerQuestionFromStdout(stdout);
+      if (question) {
+        appendProgressText(task.id, `Worker asked a question (attempt ${attempt}); task blocked until someone answers`);
+        const questionTask = updateTaskStatus(currentTask, 'blocked', { blocked_reason: 'question', question });
+        onTaskSettled(questionTask);
+        return;
+      }
       failureReason = stdout.trim()
         ? 'no artifact produced'
         : 'headless worker exited 0 with no output and no artifact (silent internal error)';
@@ -2028,7 +2163,7 @@ function buildAgyArgs(promptFilePath) {
 
 function writeAgyPromptFile(task, workerCwd) {
   const promptFilePath = path.join(workerCwd, AGY_PROMPT_FILENAME);
-  fs.writeFileSync(promptFilePath, buildClaudePrompt(task), 'utf8');
+  fs.writeFileSync(promptFilePath, buildClaudePrompt(task, { askQuestions: false }), 'utf8');
   return promptFilePath;
 }
 
@@ -2428,6 +2563,7 @@ const RUN_RECEIPT_FIELDS = [
   'env_cause',
   'env_hint',
   'error_origin',
+  'question',
 ];
 // last_error 只留最近一次的原因（第幾次續跑看 resume_count），而且限長，不會一棒一棒越包越長。
 const MAX_RESUME_REASON_CHARS = 500;
@@ -2442,10 +2578,35 @@ function resumeRefusal(statusCode, cause, error, extra = {}) {
   return { statusCode, payload: { ok: false, cause, error, ...extra } };
 }
 
-function resumeTask(taskId) {
+// 續跑帶的回答：選填；有帶就要是 1～2000 字的字串（前後空白不算）。回傳 { ok, answer? } 或 { ok:false, error }。
+function normalizeResumeAnswer(answer) {
+  if (answer === undefined) {
+    return { ok: true, answer: null };
+  }
+  if (typeof answer !== 'string') {
+    return { ok: false, error: 'answer 必須是字串' };
+  }
+  const trimmed = answer.trim();
+  const length = Array.from(trimmed).length;
+  if (!length) {
+    return { ok: false, error: 'answer 不能是空的' };
+  }
+  if (length > MAX_TASK_ANSWER_CHARS) {
+    return { ok: false, error: `answer 最多 ${MAX_TASK_ANSWER_CHARS} 字（收到 ${length} 字）` };
+  }
+  return { ok: true, answer: trimmed };
+}
+
+// options.answer：使用者對上一棒問題的回答（TG、WebUI、API 共用）。不帶就跟加這個功能之前完全一樣。
+function resumeTask(taskId, options = {}) {
   if (!isUuidTaskId(taskId)) {
     return { statusCode: 400, payload: { ok: false, error: 'invalid task id' } };
   }
+  const normalizedAnswer = normalizeResumeAnswer(options.answer);
+  if (!normalizedAnswer.ok) {
+    return { statusCode: 400, payload: { ok: false, cause: 'invalid_answer', error: normalizedAnswer.error } };
+  }
+  const answer = normalizedAnswer.answer;
   let task;
   try {
     task = readTask(taskId);
@@ -2487,9 +2648,12 @@ function resumeTask(taskId) {
   // 從沒寫過 checkpoint 的 worker（例如 OpenAI 相容那條）步數恆為 0，用步數判進展會誤擋正常長任務；
   // 這種 task 只套 MAX_TASK_RESUMES。曾經出現過步數 >0（現在或上次續跑記下的）才套 no_progress。
   const everCheckpointed = steps.length > 0 || task.resume_checkpoint_steps > 0;
+  // 帶著回答續跑上一棒的提問：問問題本來就不會多記步數，這一次不算進 no_progress，只受 MAX_TASK_RESUMES 管。
+  const answeringQuestion = answer !== null && task.blocked_reason === 'question';
+  const previousNoProgress = Number.isInteger(task.resume_no_progress_count) ? task.resume_no_progress_count : 0;
   let noProgressCount = 0;
   if (everCheckpointed && Number.isInteger(task.resume_checkpoint_steps) && steps.length <= task.resume_checkpoint_steps) {
-    noProgressCount = (Number.isInteger(task.resume_no_progress_count) ? task.resume_no_progress_count : 0) + 1;
+    noProgressCount = answeringQuestion ? previousNoProgress : previousNoProgress + 1;
   }
   if (noProgressCount >= NO_PROGRESS_LIMIT) {
     return resumeRefusal(
@@ -2508,6 +2672,15 @@ function resumeTask(taskId) {
   const next = { ...task };
   for (const field of RUN_RECEIPT_FIELDS) {
     delete next[field];
+  }
+  if (answer !== null) {
+    // 這一棒的問答：下一棒的 prompt 會帶上。上一棒沒留問題（例如對 failed 任務補充說明）時只存答案。
+    next.resume_answer = answer;
+    if (typeof task.question === 'string' && task.question) {
+      next.resume_question = task.question;
+    } else {
+      delete next.resume_question;
+    }
   }
   next.last_error = `resumed after ${previousReason}`;
   next.resume_count = resumeCount + 1;
@@ -2546,8 +2719,78 @@ function resumeTask(taskId) {
   for (const moved of movedArtifacts) {
     appendProgressText(taskId, `Previous run's artifact set aside: ${moved}`);
   }
+  if (answer !== null) {
+    appendProgressText(taskId, `Resume #${pendingTask.resume_count} carries the user's answer (${Array.from(answer).length} chars)`);
+    recordTaskAnswerInConversation(pendingTask, answer);
+  }
   startTaskWorker(pendingTask);
   return { statusCode: 202, payload: { ok: true, task: pendingTask, checkpoint_steps: steps } };
+}
+
+// 有來源對話的任務：使用者的回答（原文）和「已帶著回答續跑」都寫進那段對話。寫不成只記 stderr，不擋續跑。
+function recordTaskAnswerInConversation(task, answer) {
+  if (!task.conversation_id || !conversationStore.isValidConversationId(task.conversation_id)) {
+    return;
+  }
+  try {
+    appendConversation(task.conversation_id, { role: 'user', kind: 'task_answer', text: answer });
+    appendConversation(task.conversation_id, { role: 'system', kind: 'task_resumed', text: `已帶著回答續跑：${task.title}` });
+  } catch (error) {
+    logStderr('task-answer conversation', error);
+  }
+}
+
+// 等使用者回答的任務（blocked、blocked_reason=question），新的在前；filter 決定範圍（哪個 chat、哪段對話）。
+function listQuestionTasks(filter = () => true) {
+  return listTasks().filter((task) => isQuestionTask(task) && isUuidTaskId(task.id) && filter(task));
+}
+
+// /answer <答案>（或 /answer <任務 id 前 8 碼> <答案>）：只有一個在等時直接用；兩個以上要指定 id 前綴，
+// 沒指定就列出清單、一個都不續跑。回傳 { resumed, reply }。
+function answerQuestionCommand(arg, waiting) {
+  const text = String(arg || '').trim();
+  if (!waiting.length) {
+    return { resumed: false, reply: '目前沒有等你回答的任務。' };
+  }
+  const prefixMatch = text.match(/^([0-9a-f]{8})(?:\s+([\s\S]*))?$/i);
+  let target = null;
+  let answer = text;
+  if (prefixMatch) {
+    const found = waiting.filter((task) => task.id.slice(0, 8).toLowerCase() === prefixMatch[1].toLowerCase());
+    if (found.length === 1) {
+      target = found[0];
+      answer = (prefixMatch[2] || '').trim();
+    }
+  }
+  if (!target && waiting.length === 1) {
+    target = waiting[0];
+  }
+  if (!target) {
+    const lines = [`有 ${waiting.length} 個任務在等你回答，請寫成 /answer <任務 id 前 8 碼> <答案>：`];
+    for (const task of waiting.slice(0, 10)) {
+      const question = Array.from(String(task.question || '')).slice(0, 80).join('');
+      lines.push(`・${task.id.slice(0, 8)} ${task.title}${question ? `：${question}` : ''}`);
+    }
+    return { resumed: false, reply: lines.join('\n') };
+  }
+  if (!answer) {
+    return { resumed: false, reply: `用法：/answer <答案>\n任務「${target.title}」在等你回答。` };
+  }
+  return answerQuestionTask(target.id, answer);
+}
+
+function answerQuestionTask(taskId, answer) {
+  let result;
+  try {
+    result = resumeTask(taskId, { answer });
+  } catch (error) {
+    logStderr('task-answer resume', error);
+    return { resumed: false, reply: '續跑時出了點狀況，你再試一次。' };
+  }
+  if (result.statusCode === 202) {
+    return { resumed: true, reply: '收到，帶著你的答案繼續做', task: result.payload.task };
+  }
+  return { resumed: false, reply: `沒能續跑：${result.payload.error || '未知原因'}` };
 }
 
 // ── 聊天模式 ──────────────────────────────────────────────
@@ -2804,7 +3047,7 @@ function commandReplyText(command, mode) {
   // /help
   const lines = [`目前模式：${mode}`];
   const newLine = '/new（或 /reset）：開新對話，之後的聊天不再帶前面聊過的內容';
-  const botLines = ['/bots：列出可以聊的 bot', '/bot <id>：切換現在跟哪個 bot 聊'];
+  const botLines = ['/bots：列出可以聊的 bot', '/bot <id>：切換現在跟哪個 bot 聊', '/answer <答案>：回答任務的提問，任務會帶著答案繼續做'];
   if (mode === 'task') {
     lines.push('每則訊息都會建成任務。', '/tasks 看最近 5 筆任務', newLine, ...botLines);
   } else if (mode === 'chat') {
@@ -3045,6 +3288,13 @@ async function handleConversationMessage(rawText, { conversationId = null, botId
       reply: `這裡不用 /bot 切換：WebUI 請在左邊清單點選，API 請在 POST /api/chat 帶 bot_id。\n${botListReplyText(catalog, bot)}`,
       ...botFields,
     };
+  }
+
+  if (routed.kind === 'command' && routed.instruction === '/answer') {
+    // 這個入口的 /answer 只看同一段對話建的任務；TG 在 pollTelegram 另外處理（範圍是那個 chat）。
+    const waiting = conversationId ? listQuestionTasks((task) => task.conversation_id === conversationId) : [];
+    const answered = answerQuestionCommand(routed.arg, waiting);
+    return { ok: true, kind: 'command', mode, command: '/answer', resumed: answered.resumed, reply: answered.reply, ...botFields };
   }
 
   if (routed.kind === 'command') {
@@ -3463,6 +3713,12 @@ async function pollTelegram() {
       continue;
     }
 
+    // 回答任務的提問（回覆提問訊息、/answer）：要在連發緩衝和路由之前攔下來，
+    // 不然 task 模式會被建成新任務、both 模式會被當成聊天送進模型。
+    if (await handleTelegramAnswerMessage(token, msg)) {
+      continue;
+    }
+
     // 路由依 AIWFF_MODE：指令照舊；task（預設）每則建任務；both 時 /task 或明確要做事才建任務、其他直接聊天回答。
     // 會叫模型的聊天不 await：輪詢迴圈不被聊天卡住，後面的 /tasks、/task 馬上處理。
     // 同一個 chat 正在回答時又進來的聊天放進緩衝，這輪結束後合成一則接著回；全域名額滿了就排隊。
@@ -3481,6 +3737,58 @@ async function pollTelegram() {
     }
     enqueueTelegramChat(token, msg.chat.id, routed.instruction);
   }
+}
+
+// 這個 chat 在等回答的任務：conversation_id 推回的 chat id 等於這個 chat（不分 bot）；
+// 沒有 conversation_id 的舊任務，只認對照表裡記得是送到這個 chat 的。
+function telegramQuestionTasks(chatId) {
+  const legacy = new Set();
+  for (const [key, taskId] of tgQuestionMessages) {
+    if (key.startsWith(`${chatId}:`)) {
+      legacy.add(taskId);
+    }
+  }
+  return listQuestionTasks((task) => {
+    if (task.conversation_id) {
+      return String(telegramChatIdFromConversationId(task.conversation_id, task.bot_id)) === String(chatId);
+    }
+    return legacy.has(task.id);
+  });
+}
+
+// 回 true 表示這則訊息是在回答任務的提問、已經處理完（不要再進路由）。只會被管理員 chat 的文字訊息呼叫。
+// - /answer：交給 answerQuestionCommand（一個在等直接用、兩個以上要 id 前綴）。
+// - 回覆提問訊息：用 reply_to_message.message_id 對照；對照表沒有（runtime 重啟過）但看得出是提問訊息時，請使用者改用 /answer。
+async function handleTelegramAnswerMessage(token, msg) {
+  const chatId = msg.chat.id;
+  const text = String(msg.text).trim();
+  const routed = routeConversationMessage(text, runtimeChatMode());
+  let replyText = null;
+  if (routed.kind === 'command' && routed.instruction === '/answer') {
+    replyText = answerQuestionCommand(routed.arg, telegramQuestionTasks(chatId)).reply;
+  } else if (msg.reply_to_message && msg.reply_to_message.message_id !== undefined) {
+    const taskId = tgQuestionMessages.get(telegramQuestionMessageKey(chatId, msg.reply_to_message.message_id));
+    if (taskId) {
+      let task = null;
+      try {
+        task = readTask(taskId);
+      } catch (error) {
+        logStderr('telegram-answer', error);
+      }
+      if (isQuestionTask(task)) {
+        replyText = answerQuestionTask(taskId, text).reply;
+      } else {
+        replyText = `這題已經不用回答了（任務「${task ? task.title : taskId.slice(0, 8)}」現在是 ${task ? task.status : '找不到'}）。`;
+      }
+    } else if (String(msg.reply_to_message.text || '').startsWith(TG_QUESTION_HEADER)) {
+      replyText = '我對不上這則提問是哪個任務（runtime 重啟過，記憶體裡的對照表沒了），請改用 /answer <答案>。';
+    }
+  }
+  if (replyText === null) {
+    return false;
+  }
+  await tgRequest(token, 'sendMessage', { chat_id: chatId, text: telegramReplyText(replyText) });
+  return true;
 }
 
 // 清掉這個 chat 還沒送出的連發緩衝（/new 與 /bot 切換時用）。
@@ -3736,7 +4044,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/tasks') {
     const status = url.searchParams.get('status');
     const allTasks = listTasks();
-    const tasks = status ? allTasks.filter((task) => task.status === status) : allTasks;
+    const tasks = (status ? allTasks.filter((task) => task.status === status) : allTasks).map(publicTaskView);
     const payload = { ok: true, tasks };
     if (tasks.length === 0) {
       payload.zero_reason = taskQueryZeroReason(status, allTasks.length);
@@ -3800,7 +4108,23 @@ async function handleRequest(req, res) {
       sendJson(res, writeAccess.status, { ok: false, error: writeAccess.error });
       return;
     }
-    const { statusCode, payload } = resumeTask(resumeMatch[1]);
+    // body 選填：{ answer }。不帶 body（或帶空的）就跟以前一樣只用 id 續跑。
+    let resumeOptions = {};
+    try {
+      const rawBody = await readBody(req);
+      const parsed = rawBody.trim() ? JSON.parse(rawBody) : null;
+      if (parsed !== null && (typeof parsed !== 'object' || Array.isArray(parsed))) {
+        sendJson(res, 400, { ok: false, error: 'body 必須是 JSON 物件，例如 {"answer":"..."}' });
+        return;
+      }
+      if (parsed && Object.prototype.hasOwnProperty.call(parsed, 'answer')) {
+        resumeOptions = { answer: parsed.answer };
+      }
+    } catch (error) {
+      sendJson(res, 400, { ok: false, error: `Invalid JSON: ${error.message}` });
+      return;
+    }
+    const { statusCode, payload } = resumeTask(resumeMatch[1], resumeOptions);
     sendJson(res, statusCode, payload);
     return;
   }
@@ -3863,6 +4187,13 @@ async function handleRequest(req, res) {
   }
 
   // 不 decode：合法 id 是 UUID，不會含編碼字元；%2F 之類原樣進格式驗證被擋成 400。
+  // 任務的提問與回答：內容可能是私人的，跟任務產出同一級要 runtime token。
+  const questionMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/question$/);
+  if (req.method === 'GET' && questionMatch) {
+    handleTaskQuestion(req, res, questionMatch[1]);
+    return;
+  }
+
   const resultMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/result$/);
   if (req.method === 'GET' && resultMatch) {
     handleTaskResult(req, res, resultMatch[1]);
@@ -3901,7 +4232,7 @@ async function handleRequest(req, res) {
       sendJson(res, 404, { ok: false, error: '找不到任務' });
       return;
     }
-    sendJson(res, 200, { ok: true, task });
+    sendJson(res, 200, { ok: true, task: publicTaskView(task) });
     return;
   }
 
@@ -4074,6 +4405,7 @@ module.exports = {
   readCheckpoint,
   checkpointPath,
   buildClaudePrompt,
+  workerQuestionFromStdout,
   // worker 失敗的環境判定是純函式：四類環境原因加「不是環境問題」都要驗得到。
   classifyEnvFailure,
   workerCommandExists,
