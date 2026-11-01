@@ -379,9 +379,134 @@
       width: 100%;
       height: 100%;
       min-height: 0;
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+      background: var(--bg-0);
+    }
+    /* 對話分頁左欄：bot 名冊。外來字串（名字、介紹）一律用 textContent 放進來。 */
+    .bot-roster {
+      min-width: 0;
+      min-height: 0;
       display: flex;
       flex-direction: column;
-      background: var(--bg-0);
+      border-right: 1px solid var(--border-soft);
+      background: var(--bg-1);
+    }
+    .bot-roster-title {
+      flex-shrink: 0;
+      padding: 14px 16px 8px;
+      font-size: 11px;
+      letter-spacing: 0.6px;
+      color: var(--fg-2);
+    }
+    .bot-roster-list {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 0 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .bot-entry {
+      width: 100%;
+      min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 2px 8px;
+      padding: 9px 10px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--fg-0);
+      text-align: left;
+      cursor: pointer;
+    }
+    .bot-entry:hover { background: var(--bg-2); }
+    .bot-entry.active {
+      background: var(--bg-2);
+      border-color: var(--accent);
+    }
+    .bot-entry-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 700;
+      font-size: 13px;
+    }
+    .bot-entry-time {
+      font-size: 10px;
+      color: var(--fg-2);
+      white-space: nowrap;
+    }
+    .bot-entry-desc {
+      grid-column: 1 / -1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 11px;
+      color: var(--fg-1);
+    }
+    .bot-roster-empty {
+      padding: 8px 10px;
+      font-size: 12px;
+      color: var(--fg-2);
+    }
+    .chat-pane {
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .chat-header {
+      flex-shrink: 0;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 24px;
+      border-bottom: 1px solid var(--border-soft);
+      background: var(--bg-1);
+    }
+    .chat-bot-name {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 700;
+    }
+    .chat-bot-select {
+      display: none;
+      flex: 1;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .chat-new-button {
+      flex-shrink: 0;
+      min-height: 32px;
+      padding: 0 12px;
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      background: var(--bg-2);
+      color: var(--fg-0);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .chat-new-button:disabled { cursor: not-allowed; color: var(--fg-2); }
+    .msg.pending { color: var(--fg-2); letter-spacing: 2px; }
+    @media (max-width: 719px) {
+      /* 窄螢幕：名冊收成對話上方的下拉選單，不能出現橫向捲動。 */
+      .task-chat { grid-template-columns: minmax(0, 1fr); }
+      .bot-roster { display: none; }
+      .chat-bot-name { display: none; }
+      .chat-bot-select { display: block; }
+      .chat-header { padding: 8px 12px; }
+      .chat-messages { padding: 14px 12px; }
+      .chat-input { padding: 12px; }
+      .msg { max-width: 100%; }
     }
     .chat-messages {
       flex: 1;
@@ -1006,6 +1131,16 @@
 
       <section id="view-new-task" class="view">
         <div class="task-chat" aria-label="對話與建立任務">
+          <aside class="bot-roster" aria-label="bot 名冊">
+            <div class="bot-roster-title">BOT · 名冊</div>
+            <div class="bot-roster-list" id="bot-roster-list"></div>
+          </aside>
+          <div class="chat-pane">
+          <div class="chat-header">
+            <div class="chat-bot-name" id="chat-bot-name">助理</div>
+            <select class="chat-bot-select" id="chat-bot-select" aria-label="選擇 bot"></select>
+            <button class="chat-new-button" id="chat-new-button" type="button" title="開新對話（送 /new）">新對話</button>
+          </div>
           <div class="chat-messages" id="task-chat-messages" aria-live="polite"></div>
           <div class="chat-login-notice" id="task-chat-login" role="status" hidden>
             尚未登入，不能對話或建立任務。請到跑 <code>npm run web</code> 的終端機，點「登入 WebUI：」後面那條登入連結。
@@ -1016,6 +1151,7 @@
               <button class="chat-submit" id="task-chat-send" type="button" title="送出" aria-label="送出">▶</button>
               <span class="chat-state-badge" id="task-chat-status">IDLE · 待機</span>
             </div>
+          </div>
           </div>
         </div>
       </section>
@@ -1155,6 +1291,18 @@
       // null = 還沒查過 /api/session；false = 沒有登入 cookie，對話分頁停用送出。
       loggedIn: null,
       chatTasks: {},
+      // bot 名冊：null = 還沒讀到 GET /api/bots（送出時不帶 bot_id，用預設 bot）。
+      bots: null,
+      defaultBotId: null,
+      currentBotId: null,
+      // 每個 bot 最後一則訊息的時間（botId → ISO 字串），名冊用。
+      botLastTs: {},
+      // 對話 id → GET /api/conversations/:id 讀回來的訊息；chatLocal 是只存在這個分頁的訊息（指令回覆、任務進度）。
+      chatServer: {},
+      chatLocal: {},
+      chatLoadSeq: {},
+      // 送出中顯示「…」等待泡泡的對話 id；null = 沒有在等。
+      chatPendingConversation: null,
       chatMessages: [
         {
           role: 'assistant',
@@ -1169,6 +1317,8 @@
       hud: '/api/hud',
       tasks: '/api/tasks',
       chat: '/api/chat',
+      bots: '/api/bots',
+      conversations: '/api/conversations/',
       events: '/api/events',
       inbox: '/api/inbox',
       memory: '/api/memory',
@@ -1200,6 +1350,7 @@
       port: '連接埠',
       worker_mode: 'Worker 模式',
       chat_mode: '聊天模式',
+      bots: '聊天 bot',
       default_worker_timeout_sec: '預設逾時秒數',
       max_worker_timeout_sec: '最大逾時秒數',
       memory_source: '記憶來源',
@@ -1213,6 +1364,7 @@
       memory_dir: '記憶目錄',
       worker_mode: 'Worker 模式',
       chat_mode: '聊天模式',
+      bots: '聊天 bot',
       port: '連接埠',
       doctor_fetch: '診斷報告'
     };
@@ -1324,7 +1476,7 @@
     // 用 textContent 建訊息節點：模型回答等外部內容一律當純文字，不經 innerHTML。
     function chatMessageNode(message) {
       var node = document.createElement('div');
-      node.className = 'msg ' + safeChatRole(message.role) + (message.answer ? ' answer' : '');
+      node.className = 'msg ' + safeChatRole(message.role) + (message.answer ? ' answer' : '') + (message.pending ? ' pending' : '');
       var text = document.createElement('div');
       text.className = 'text';
       text.textContent = message.text || '';
@@ -1350,6 +1502,219 @@
       return null;
     }
 
+    // ── bot 名冊與對話（J3）──────────────────────────────────
+    var CHAT_BASE_CONVERSATION_ID = 'webui';
+    var CHAT_BOT_STORAGE_KEY = 'aiwff_runtime_chat_bot';
+    var CHAT_WELCOME_MESSAGE = state.chatMessages[0];
+
+    function readStoredBotId() {
+      try {
+        var value = localStorage.getItem(CHAT_BOT_STORAGE_KEY);
+        return typeof value === 'string' && value ? value : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function storeBotId(botId) {
+      try { localStorage.setItem(CHAT_BOT_STORAGE_KEY, botId); } catch (_) {}
+    }
+
+    function findChatBot(botId) {
+      if (!state.bots) return null;
+      for (var i = 0; i < state.bots.length; i += 1) {
+        if (state.bots[i].id === botId) return state.bots[i];
+      }
+      return null;
+    }
+
+    function currentChatBot() {
+      return findChatBot(state.currentBotId);
+    }
+
+    // 跟後端同一條規則：預設 bot 沿用 webui，其他 bot 加後綴 -<botId>。名冊還沒讀到時就是 webui。
+    function chatConversationId(bot) {
+      return bot && !bot.is_default ? CHAT_BASE_CONVERSATION_ID + '-' + bot.id : CHAT_BASE_CONVERSATION_ID;
+    }
+
+    function currentConversationId() {
+      return chatConversationId(currentChatBot());
+    }
+
+    function chatTimeLabel(ts) {
+      var date = new Date(ts);
+      if (!isFinite(date.getTime())) return '';
+      var pad = function(value) { return String(value).padStart(2, '0'); };
+      var now = new Date();
+      var hm = pad(date.getHours()) + ':' + pad(date.getMinutes());
+      if (date.toDateString() === now.toDateString()) return hm;
+      return pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' + hm;
+    }
+
+    function serverChatMessage(entry) {
+      var time = chatTimeLabel(entry.ts);
+      if (entry.role === 'user') {
+        return { role: 'user', text: entry.text, meta: '你' + (time ? ' · ' + time : ''), ts: entry.ts };
+      }
+      if (entry.role === 'assistant') {
+        return { role: 'assistant', text: entry.text, meta: '回答' + (time ? ' · ' + time : ''), ts: entry.ts, answer: true };
+      }
+      return { role: 'system', text: entry.text, meta: '系統' + (time ? ' · ' + time : ''), ts: entry.ts, kind: entry.kind || null };
+    }
+
+    // 畫面上的訊息 = 歡迎訊息 + 伺服器的對話紀錄 + 這個分頁自己的訊息，依時間排。
+    // 伺服器記的「已建任務 xxxxxxxx」若這個分頁已經有同一個任務的「任務已建立」，就不重複畫。
+    function rebuildChatMessages() {
+      var conversationId = currentConversationId();
+      var local = state.chatLocal[conversationId] || [];
+      var localTaskPrefixes = local.filter(function(message) { return message.taskId; }).map(function(message) {
+        return String(message.taskId).slice(0, 8);
+      });
+      var server = (state.chatServer[conversationId] || []).filter(function(message) {
+        if (message.kind !== 'task_created') return true;
+        return !localTaskPrefixes.some(function(prefix) { return String(message.text).indexOf(prefix) >= 0; });
+      });
+      var merged = server.concat(local).map(function(message, index) { return { message: message, index: index }; });
+      merged.sort(function(a, b) {
+        var left = Date.parse(a.message.ts || '') || 0;
+        var right = Date.parse(b.message.ts || '') || 0;
+        return left === right ? a.index - b.index : left - right;
+      });
+      state.chatMessages = [CHAT_WELCOME_MESSAGE].concat(merged.map(function(item) { return item.message; }));
+    }
+
+    function addLocalChatMessage(conversationId, message) {
+      if (!state.chatLocal[conversationId]) state.chatLocal[conversationId] = [];
+      state.chatLocal[conversationId].push(message);
+    }
+
+    function noteBotActivity(conversationId, ts) {
+      (state.bots || []).forEach(function(bot) {
+        if (chatConversationId(bot) !== conversationId) return;
+        if (!state.botLastTs[bot.id] || String(ts) > String(state.botLastTs[bot.id])) state.botLastTs[bot.id] = ts;
+      });
+    }
+
+    function renderBotRoster() {
+      var list = byId('bot-roster-list');
+      var select = byId('chat-bot-select');
+      var bot = currentChatBot();
+      setText('chat-bot-name', bot ? bot.name : '助理');
+      if (list) list.textContent = '';
+      if (select) select.textContent = '';
+      if (!state.bots) {
+        if (list) {
+          var notice = document.createElement('div');
+          notice.className = 'bot-roster-empty';
+          notice.textContent = state.loggedIn === false ? '登入後才看得到名冊' : '讀取名冊中…';
+          list.appendChild(notice);
+        }
+        return;
+      }
+      state.bots.forEach(function(item) {
+        var active = item.id === state.currentBotId;
+        if (list) {
+          var button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'bot-entry' + (active ? ' active' : '');
+          button.dataset.botId = item.id;
+          button.setAttribute('aria-pressed', active ? 'true' : 'false');
+          var name = document.createElement('span');
+          name.className = 'bot-entry-name';
+          name.textContent = item.name;
+          var time = document.createElement('span');
+          time.className = 'bot-entry-time';
+          time.textContent = state.botLastTs[item.id] ? chatTimeLabel(state.botLastTs[item.id]) : '';
+          var desc = document.createElement('span');
+          desc.className = 'bot-entry-desc';
+          desc.textContent = item.description || '';
+          button.appendChild(name);
+          button.appendChild(time);
+          button.appendChild(desc);
+          button.addEventListener('click', function() { selectChatBot(item.id); });
+          list.appendChild(button);
+        }
+        if (select) {
+          var option = document.createElement('option');
+          option.value = item.id;
+          option.textContent = item.name;
+          if (active) option.selected = true;
+          select.appendChild(option);
+        }
+      });
+      if (select) select.value = state.currentBotId || '';
+    }
+
+    // 讀一個 bot 的對話紀錄。送出中（不是送出流程自己叫的）就不套用，免得把等待泡泡蓋掉；
+    // 同一段對話有更新的讀取時，舊的回應直接丟掉。
+    async function loadChatConversation(bot, options) {
+      var force = !!(options && options.force);
+      var conversationId = chatConversationId(bot);
+      var seq = (state.chatLoadSeq[conversationId] || 0) + 1;
+      state.chatLoadSeq[conversationId] = seq;
+      var data = await fetchJson(routes.conversations + encodeURIComponent(conversationId), { credentials: 'same-origin' });
+      // 送出流程自己叫的（force）一定套用：那是這一輪剛寫進去的內容。
+      if (!force && state.chatLoadSeq[conversationId] !== seq) return;
+      var messages = (data.messages || []).map(serverChatMessage);
+      state.chatServer[conversationId] = messages;
+      if (bot) {
+        state.botLastTs[bot.id] = messages.length ? messages[messages.length - 1].ts : (state.botLastTs[bot.id] || null);
+      }
+      if ((state.chatBusy && !force) || conversationId !== currentConversationId()) {
+        renderBotRoster();
+        return;
+      }
+      rebuildChatMessages();
+      renderBotRoster();
+      renderChat();
+    }
+
+    // GET /api/bots：選上次記在 localStorage 的 bot，不在名冊裡就用預設 bot；再把每個 bot 的對話讀回來。
+    async function loadChatBots() {
+      var data = await fetchJson(routes.bots, { credentials: 'same-origin' });
+      var bots = Array.isArray(data.bots) ? data.bots : [];
+      if (!bots.length) return;
+      state.bots = bots;
+      state.defaultBotId = data.default_bot_id || bots[0].id;
+      if (!findChatBot(state.currentBotId)) {
+        var stored = readStoredBotId();
+        state.currentBotId = findChatBot(stored) ? stored : state.defaultBotId;
+      }
+      if (!state.chatBusy) rebuildChatMessages();
+      renderBotRoster();
+      await Promise.all(bots.map(function(bot) {
+        return loadChatConversation(bot).catch(function() {});
+      }));
+    }
+
+    // refresh 每輪都叫：名冊沒讀到就重讀，讀到了就把目前 bot 的對話畫回來。送出中不做。
+    async function refreshChatView() {
+      if (state.chatBusy) return;
+      try {
+        if (!state.bots) {
+          await loadChatBots();
+        } else {
+          await loadChatConversation(currentChatBot());
+        }
+      } catch (_) {
+        // 讀不到（未登入、連線中斷）就沿用畫面上的內容。
+        if (!state.bots) renderBotRoster();
+      }
+    }
+
+    function selectChatBot(botId) {
+      if (state.chatBusy || !findChatBot(botId)) {
+        renderBotRoster();
+        return Promise.resolve();
+      }
+      state.currentBotId = botId;
+      storeBotId(botId);
+      rebuildChatMessages();
+      renderBotRoster();
+      renderChat();
+      return loadChatConversation(currentChatBot()).catch(function() {});
+    }
+
     function renderChat() {
       var box = byId('task-chat-messages');
       if (!box) return;
@@ -1357,6 +1722,11 @@
       state.chatMessages.forEach(function(message) {
         box.appendChild(chatMessageNode(message));
       });
+      if (state.chatPendingConversation && state.chatPendingConversation === currentConversationId()) {
+        box.appendChild(chatMessageNode({ role: 'assistant', text: '…', meta: '等回覆', pending: true }));
+      }
+      var newButton = byId('chat-new-button');
+      if (newButton) newButton.disabled = state.chatBusy || state.loggedIn === false;
       var active = activeTrackedTask();
       if (!state.chatBusy) {
         setChatBadge(active ? ('任務 · ' + statusText(active.status)) : 'IDLE · 待機');
@@ -1366,10 +1736,18 @@
       }, 0);
     }
 
+    // extra.conversationId：訊息屬於哪段對話（預設是目前的 bot）；extra.transient：只畫這一次，
+    // 不記進這個分頁的訊息（例如送出中的使用者訊息，伺服器回來之後會有正式的那一則）。
     function appendChatMessage(role, text, meta, deferRender, extra) {
-      var message = { role: role, text: text, meta: meta || timeMeta('系統') };
+      var message = { role: role, text: text, meta: meta || timeMeta('系統'), ts: new Date().toISOString() };
       if (extra && extra.answer) message.answer = true;
-      state.chatMessages.push(message);
+      if (extra && extra.taskId) message.taskId = extra.taskId;
+      var conversationId = (extra && extra.conversationId) || currentConversationId();
+      if (!(extra && extra.transient)) {
+        addLocalChatMessage(conversationId, message);
+        noteBotActivity(conversationId, message.ts);
+      }
+      if (conversationId === currentConversationId()) state.chatMessages.push(message);
       if (!deferRender) renderChat();
     }
 
@@ -1391,22 +1769,24 @@
       return lines.join('\n');
     }
 
-    function rememberChatTask(task) {
+    function rememberChatTask(task, conversationId) {
       if (!task || !task.id) return;
       state.chatTasks[task.id] = {
-        lastStatus: task.status || 'pending'
+        lastStatus: task.status || 'pending',
+        conversationId: conversationId || currentConversationId()
       };
     }
 
     // 任務完成後讀 GET /api/tasks/:id/result（需登入 cookie），把回答當純文字附在聊天框。
     async function showTaskAnswer(taskId) {
       var text;
-      var extra = null;
+      var tracked = state.chatTasks[taskId] || {};
+      var extra = { conversationId: tracked.conversationId };
       try {
         var data = await fetchJson('/api/tasks/' + encodeURIComponent(taskId) + '/result', { credentials: 'same-origin' });
         text = String(data.content || '').trim() || '（產出是空的）';
         if (data.truncated) text += '\n\n…（內容超過 64KB，已截斷；完整內容請看產出檔）';
-        extra = { answer: true };
+        extra.answer = true;
       } catch (error) {
         text = '回答讀取失敗：' + error.message;
       }
@@ -1420,7 +1800,7 @@
         if (!task) return;
         if (task.status && task.status !== tracked.lastStatus) {
           tracked.lastStatus = task.status;
-          appendChatMessage('assistant', taskStatusMessage(task, false), timeMeta('系統'), true);
+          appendChatMessage('assistant', taskStatusMessage(task, false), timeMeta('系統'), true, { conversationId: tracked.conversationId });
         }
         // 每個任務只讀一次回答（refresh 每輪都會跑到這裡）。
         if (task.status === 'done' && !tracked.answerRequested) {
@@ -2251,6 +2631,7 @@
       updateSyncChip();
       renderLoadFail();
       await refreshSession();
+      await refreshChatView();
     }
 
     // 資料新鮮度／連線狀態（借鏡 multi-agent orchestration dashboard：面板必須讓人一眼看出資料是不是 stale）
@@ -2376,6 +2757,8 @@
       if (button) button.disabled = loggedOut || state.chatBusy;
       var input = byId('task-chat-text');
       if (input) input.disabled = loggedOut;
+      var newButton = byId('chat-new-button');
+      if (newButton) newButton.disabled = loggedOut || state.chatBusy;
       if (loggedOut && !state.chatBusy) setChatBadge('未登入 · 停用');
     }
 
@@ -2389,53 +2772,106 @@
       renderLoginGate();
     }
 
-    async function sendChatTask() {
+    // 送一則到 POST /api/chat。送出當下就記下是哪個 bot、哪段對話，送出中切不了 bot。
+    async function sendChatText(text, options) {
       var input = byId('task-chat-text');
       var button = byId('task-chat-send');
-      var text = input ? input.value.trim() : '';
+      var fromInput = !!(options && options.fromInput);
       if (!text || state.chatBusy || state.loggedIn === false) return;
+      var botId = state.currentBotId;
+      var conversationId = currentConversationId();
       state.chatBusy = true;
       if (button) button.disabled = true;
       setChatBadge('送出中 · 等回覆');
-      appendChatMessage('user', text, timeMeta('你'));
+      var userMessage = { role: 'user', text: text, meta: timeMeta('你'), ts: new Date().toISOString() };
+      state.chatMessages.push(userMessage);
+      state.chatPendingConversation = conversationId;
+      renderChat();
       try {
         // POST /api/chat 跟 TG 同一套路由：一般訊息直接回答，/task 或明確要做事才建任務。
+        // conversation_id 一律送 webui，非預設 bot 的後綴由後端依 bot_id 加上。
+        var body = { text: text, conversation_id: CHAT_BASE_CONVERSATION_ID };
+        if (botId) body.bot_id = botId;
         var data = await fetchJson(routes.chat, {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ text: text, conversation_id: 'webui' })
+          body: JSON.stringify(body)
         });
-        if (data.kind === 'task' && data.task) {
-          rememberChatTask(data.task);
-          var lines = taskStatusMessage(data.task, true);
-          if (data.hint) lines += '\n' + data.hint;
-          appendChatMessage('assistant', lines, timeMeta('系統'));
-        } else if (data.kind === 'chat' && !data.notice) {
-          appendChatMessage('assistant', String(data.reply || '').trim() || '（回答是空的）', timeMeta('回答'), false, { answer: true });
+        state.chatPendingConversation = null;
+        var target = { conversationId: conversationId };
+        if (data.kind === 'chat' && !data.notice) {
+          // 這一輪已經寫進伺服器的對話紀錄：重讀一次，畫面跟重新整理後看到的一樣。
+          var shown = false;
+          try {
+            await loadChatConversation(findChatBot(botId), { force: true });
+            var latest = state.chatServer[conversationId] || [];
+            shown = latest.length > 0 && latest[latest.length - 1].answer === true;
+          } catch (_) {}
+          if (!shown) {
+            addLocalChatMessage(conversationId, userMessage);
+            appendChatMessage('assistant', String(data.reply || '').trim() || '（回答是空的）', timeMeta('回答'), false, { answer: true, conversationId: conversationId });
+          }
         } else {
-          appendChatMessage('assistant', String(data.reply || ''), timeMeta('系統'));
+          if (data.kind === 'command' && data.command === '/new') {
+            state.chatLocal[conversationId] = [];
+            state.chatServer[conversationId] = [];
+            if (conversationId === currentConversationId()) rebuildChatMessages();
+          } else {
+            addLocalChatMessage(conversationId, userMessage);
+          }
+          if (data.kind === 'task' && data.task) {
+            rememberChatTask(data.task, conversationId);
+            var lines = taskStatusMessage(data.task, true);
+            if (data.hint) lines += '\n' + data.hint;
+            appendChatMessage('assistant', lines, timeMeta('系統'), false, { conversationId: conversationId, taskId: data.task.id });
+          } else {
+            appendChatMessage('assistant', String(data.reply || ''), timeMeta('系統'), false, target);
+          }
         }
-        if (input) {
+        if (fromInput && input) {
           input.value = '';
           input.style.height = 'auto';
         }
         await refresh();
       } catch (error) {
-        appendChatMessage('assistant', '送出失敗：' + error.message, timeMeta('系統'));
+        state.chatPendingConversation = null;
+        addLocalChatMessage(conversationId, userMessage);
+        appendChatMessage('assistant', '送出失敗：' + error.message, timeMeta('系統'), false, { conversationId: conversationId });
         // runtime 重啟會換 token，舊 cookie 失效 → 重查登入狀態。
         await refreshSession();
       } finally {
         state.chatBusy = false;
+        state.chatPendingConversation = null;
         if (button) button.disabled = state.loggedIn === false;
         renderChat();
+        renderBotRoster();
         renderLoginGate();
       }
+    }
+
+    async function sendChatTask() {
+      var input = byId('task-chat-text');
+      var text = input ? input.value.trim() : '';
+      await sendChatText(text, { fromInput: true });
+    }
+
+    // 「新對話」按鈕：送 /new，後端把目前 bot 的對話標成重新開始。
+    function startNewChat() {
+      return sendChatText('/new');
     }
 
     var chatInput = byId('task-chat-text');
     var chatSend = byId('task-chat-send');
     if (chatSend) chatSend.addEventListener('click', sendChatTask);
+    var chatNewButton = byId('chat-new-button');
+    if (chatNewButton) chatNewButton.addEventListener('click', startNewChat);
+    var chatBotSelect = byId('chat-bot-select');
+    if (chatBotSelect) {
+      chatBotSelect.addEventListener('change', function() {
+        selectChatBot(chatBotSelect.value);
+      });
+    }
     if (chatInput) {
       chatInput.addEventListener('keydown', function(event) {
         if (event.key === 'Enter' && !event.shiftKey) {
@@ -2592,7 +3028,10 @@
       requestAnimationFrame(frame);
     })();
 
+    renderBotRoster();
     refresh();
+    // 名冊與對話不等整輪 refresh：載入時就先讀一次。
+    refreshChatView();
     setInterval(refresh, 5000);
   </script>
 </body>

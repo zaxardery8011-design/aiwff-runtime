@@ -4,8 +4,10 @@
 
 // 指令：不分大小寫、可帶 @bot（TG 群組裡會送 /tasks@MyBot）。
 // /new 與 /reset 同義：開新對話，instruction 一律回 /new。
-const COMMAND_RE = /^\/(start|tasks|help|new|reset)(?:@[A-Za-z0-9_]+)?$/i;
+const COMMAND_RE = /^\/(start|tasks|help|new|reset|bots)(?:@[A-Za-z0-9_]+)?$/i;
 const COMMAND_ALIASES = { reset: 'new' };
+// /bot <id>：切換 bot。id 原樣帶回（不在這裡驗格式），後面緊接英數字就不算（/botany 不是 /bot）。
+const BOT_CMD_RE = /^\/bot(?:@[A-Za-z0-9_]+)?(?![A-Za-z0-9_])\s*([\s\S]*)$/i;
 // /task、/chat：不分大小寫、可帶 @bot、可省略後面的空格（/task寫一個…）；
 // 後面緊接英數字就不算（/tasks、/taskforce 不是 /task）。
 const TASK_CMD_RE = /^\/task(?:@[A-Za-z0-9_]+)?(?![A-Za-z0-9_])\s*([\s\S]*)$/i;
@@ -43,7 +45,8 @@ function looksLikeAction(text) {
   return ZH_REQUEST_RE.test(text) || ZH_MEASURE_RE.test(text) || ZH_PLEASE_RE.test(text) || EN_ACTION_RE.test(text);
 }
 
-// 回傳 { kind: 'command'|'task'|'chat', instruction, hint?, notice? }
+// 回傳 { kind: 'command'|'task'|'chat', instruction, arg?, hint?, notice? }
+// - arg：只有 /bot 會帶，是指令後面的文字（要切換的 bot id）。
 // - hint：關鍵詞自動判成任務時帶上，回覆要多一行「不是要建任務？下次用 /chat 開頭」。
 // - notice='task_disabled'：只聊天模式收到 /task，回覆說明不建任務，不呼叫模型。
 function route(rawText, rawMode) {
@@ -53,6 +56,10 @@ function route(rawText, rawMode) {
   if (command) {
     const name = command[1].toLowerCase();
     return { kind: 'command', instruction: `/${COMMAND_ALIASES[name] || name}` };
+  }
+  const botCmd = text.match(BOT_CMD_RE);
+  if (botCmd) {
+    return { kind: 'command', instruction: '/bot', arg: (botCmd[1] || '').trim() };
   }
 
   const taskCmd = text.match(TASK_CMD_RE);
