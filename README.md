@@ -173,7 +173,7 @@ npm start
 
 Then verify it:
 
-1. Open the login link printed in the terminal (`登入 WebUI：http://127.0.0.1:3100/?token=...`). Without it the WebUI still loads, but the chat tab cannot create tasks.
+1. Open the login link printed in the terminal (`登入 WebUI：http://127.0.0.1:3100/?token=...`). Without it the WebUI still loads, but the chat tab cannot create tasks. If `AIWFF_RUNTIME_TOKEN` is not set, every restart generates a new token, so open the newest link after a restart. When stdout is not a terminal (for example a daemon log), the log only shows a masked link and the full link is written to `data/webui_login_url.txt`.
 2. Send any message to your Telegram Bot.
 3. Confirm a new task appears in the WebUI.
 4. Wait for the Telegram completion notice.
