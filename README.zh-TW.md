@@ -123,6 +123,18 @@ minimal-brain 設計有 8 個元件。Phase 2 先做最實用的核心：daemon�
 
 ## 快速開始
 
+### Windows 一行安裝
+
+打開 PowerShell 或命令提示字元，貼這一行。不用系統管理員權限，也不用先裝 Node 或 git：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; iwr -UseBasicParsing https://raw.githubusercontent.com/zaxardery8011-design/aiwff-runtime/master/install.ps1 -OutFile ([IO.Path]::GetTempPath()+'aiwff-install.ps1'); & ([IO.Path]::GetTempPath()+'aiwff-install.ps1')"
+```
+
+它會問你接哪個大腦（Claude、本機 Ollama，或先用模擬），問一句確認大腦真的回得來，最後打開瀏覽器。同一顆小主腦也能接到 Claude 桌面端。
+
+接大腦、移除、結束碼見[安裝手冊](docs/zh-TW/install.md)，桌面端見 [desktop.md](docs/zh-TW/desktop.md)。Mac、Linux 目前請用下面的手動流程。
+
 ### 貼上就能裝
 
 整段複製貼上即可。它會 clone repo、建好設定檔，並跑完一次完整的 mock 任務生命週期——不需要 API key、不需要 Telegram、不需要 Claude 訂閱。

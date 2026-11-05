@@ -118,6 +118,18 @@ You send a Telegram task
 
 ## Quick Start
 
+### One-line install (Windows)
+
+Open PowerShell or Command Prompt and paste this line. No admin rights needed, and you do not need Node or git first:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; iwr -UseBasicParsing https://raw.githubusercontent.com/zaxardery8011-design/aiwff-runtime/master/install.ps1 -OutFile ([IO.Path]::GetTempPath()+'aiwff-install.ps1'); & ([IO.Path]::GetTempPath()+'aiwff-install.ps1')"
+```
+
+It asks which brain to connect (Claude, local Ollama, or the mock for now), checks that the brain really answers one question, then opens your browser. The same runtime can also be connected to Claude Desktop.
+
+The manual is in Traditional Chinese: [install](docs/zh-TW/install.md), [Claude Desktop](docs/zh-TW/desktop.md). On macOS and Linux, use the steps below.
+
 ### Paste to install
 
 Copy the whole block. It clones the repo, sets up config, and runs a full mock task lifecycle — no API key, no Telegram, no Claude subscription needed.

@@ -5,27 +5,97 @@
 > 這份是**安裝手冊**，教你怎麼把它裝起來、跑通第一次。學會裝好之後怎麼「用」它，見 [使用手冊 usage.md](usage.md)。
 > 英文完整規格 → [../../README.md](../../README.md)。
 
-> **Windows 一鍵安裝（試用版）**：不想照下面一步一步裝，可以用 repo 根目錄的 `install.ps1`。
-> Windows PowerShell 5.1 就能跑，不需要系統管理員權限。它會自動做這些事：
-> - 從官方來源下載免安裝版 Node、MinGit、pwsh，版本寫死，SHA256 對不上就中止；
-> - 抓 aiwff-runtime、soplint、execution-proofs 三個 repo，裝好依賴；
-> - 產生 `.env` 和登入 token（token 不會印在畫面上）；
-> - 跑一次 doctor。
->
-> ```powershell
-> iwr -UseBasicParsing https://raw.githubusercontent.com/zaxardery8011-design/aiwff-runtime/master/install.ps1 -OutFile install.ps1
-> powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Name demo
-> ```
->
-> 預設裝到 `C:\AIWFF-<Name>\`，安裝時會問要不要登入後自動啟動（直接按 Enter＝要）。
-> 常用開關：
-> - `-DryRun`：只列出計畫，什麼都不改；
-> - `-SkipAutostart`：不設自動啟動；
-> - `-Unattended`：不問問題；
-> - `-UseSystemTools`：用電腦上已經有的 node 和 git；
-> - `-Root <資料夾>`：改安裝位置。
->
-> 結束碼：0＝完成、2＝非互動環境沒指定開關、4＝裝好了但健康檢查沒過。
+## 一行安裝（Windows）
+
+打開 PowerShell 或命令提示字元，貼這一行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; iwr -UseBasicParsing https://raw.githubusercontent.com/zaxardery8011-design/aiwff-runtime/master/install.ps1 -OutFile ([IO.Path]::GetTempPath()+'aiwff-install.ps1'); & ([IO.Path]::GetTempPath()+'aiwff-install.ps1')"
+```
+
+不用系統管理員權限，也不用先裝 Node 或 git。它會做這些事：
+
+- 從官方來源下載免安裝版 Node、MinGit、pwsh，版本寫死，SHA256 對不上就中止；
+- 抓 aiwff-runtime、soplint、execution-proofs 三個 repo，裝好依賴；
+- 產生 `.env` 和登入 token（token 不會印在畫面上）；
+- 問你三件事：要不要登入後自動啟動、接哪個大腦、要不要接 Claude 桌面端（有偵測到才問）；
+- 跑一次 doctor，再問大腦一句話，確認它真的回得來；
+- 在桌面放一個捷徑，打開瀏覽器。
+
+下載和解壓要幾分鐘，這段沒有畫面是正常的。斷網中止時，再貼一次同一行，會從斷掉的地方接著裝。
+
+預設裝到 `C:\AIWFF-<你的帳號>\`。帳號名裡只留英文、數字、`_` 和 `-`：全中文帳號會裝到 `C:\AIWFF-default\`，`小明 Lin` 會裝到 `C:\AIWFF-Lin\`。同一台電腦有兩個全中文帳號時，要用 `-Name` 或 `-Root` 分開，不然會共用同一個資料夾。畫面最後幾行會告訴你實際裝在哪、接的是什麼大腦、網址、下一步怎麼做。
+
+安裝資料夾只開放給你的帳號、SYSTEM 和系統管理員：裡面有 token，也有開機會跑的程式。`-Root` 指到已經有其他檔案的資料夾時，權限不會動，畫面會警告；這種情況建議換一個新資料夾。
+
+之後要開 WebUI：雙擊桌面的 AIWFF 捷徑（或安裝資料夾的 `open-webui.cmd`），它會自動登入。直接打網址不會登入。打第一句話要切到瀏覽器的「對話 / 新任務」分頁。
+
+### 接大腦
+
+| 選項 | 誰來回話 | 要花錢嗎 | 要先準備什麼 |
+|---|---|---|---|
+| Claude | 你電腦上的 Claude CLI | 用掉你的訂閱額度；環境或 `.env` 有 `ANTHROPIC_API_KEY` 時改走 API 計費 | 裝好 [Claude Code](https://code.claude.com/docs/en/setup) 或 [Claude 桌面端](https://claude.com/download)，再登入 |
+| Ollama | 你電腦上的本機模型 | 不用 | 裝好 [Ollama](https://ollama.com/download) 並打開，至少有一個聊天模型（例如 `ollama pull qwen2.5:3b`） |
+| 模擬 | 內建的固定回覆，沒接 AI | 不用 | 不用 |
+
+安裝時選單直接按 Enter＝建議項。選到還不能用的項目，它會講原因和下載網址，裝好後回到同一個選單再選。之後想換：
+
+1. 雙擊安裝資料夾的 `connect-brain.cmd`（開發環境也可以跑 `npm run connect`）。
+2. 雙擊安裝資料夾的 `restart-runtime.cmd`，新的大腦才會生效。
+
+要接 Claude 但還沒登入也沒關係：先選模擬裝完，雙擊 `claude-login.cmd` 登入，再做這兩步。
+
+**接 Claude 目前的限制**：聊天可以，背景任務交不出結果，見 3.3.3 的已知限制。
+
+不想被問，可以直接指定：`-Brain claude`、`-Brain ollama`、`-Brain mock`。帶 `-Unattended` 卻沒帶 `-Brain` 時維持模擬：用掉你的額度，一定要你同意過。重裝時已經有 `.env`、又沒帶 `-Brain`，就不動你的設定；沒有人在場時也不會問大腦第一句。API 計費又沒有人在場時，就算帶了 `-Brain claude` 也不問。
+
+每次改 `.env` 前，舊內容會存成 `.env.bak`，只留最近一份，裡面有 token，不要傳給別人。
+
+### 接 Claude 桌面端
+
+裝好後，同一顆小主腦在 Claude 桌面端也叫得到，做法和工具清單見 [desktop.md](desktop.md)。
+
+### 移除
+
+雙擊安裝資料夾的 `uninstall.cmd`。
+
+它會停掉這個資料夾的小主腦、解除開機排程、拿掉桌面端接線和桌面捷徑。**資料不會刪**，最後會印出資料夾路徑，要全部刪掉請自己刪。
+
+### 常用開關
+
+要帶開關時，在 PowerShell 裡先下載再跑（`iwr` 只有 PowerShell 有，命令提示字元不行）：
+
+```powershell
+iwr -UseBasicParsing https://raw.githubusercontent.com/zaxardery8011-design/aiwff-runtime/master/install.ps1 -OutFile install.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Name demo
+```
+
+- `-DryRun`：只列出計畫，什麼都不改；
+- `-Root <資料夾>`：改安裝位置；
+- `-SkipAutostart`：不設自動啟動；
+- `-Unattended`：不問問題；
+- `-UseSystemTools`：用電腦上已經有的 node 和 git；
+- `-ConnectDesktop`、`-NoDesktop`：接或不接 Claude 桌面端，不問；
+- `-ReplaceDesktop`：桌面端接著別的安裝資料夾時，換成這一個；
+- `-NoShortcut`：不放桌面捷徑；
+- `-NoBrowser`：裝完不開瀏覽器。
+
+### 結束碼
+
+| 碼 | 意思 |
+|---|---|
+| 0 | 完成。模擬也是 0，收尾畫面會寫「現在是模擬，還沒接 AI」 |
+| 1 | 安裝出錯，畫面會寫原因；最常見是網路斷了，再貼一次同一行就會續裝。`-Mode uninstall`、`-Mode restart` 找不到安裝，或程序收不掉，也是 1 |
+| 2 | 非互動環境沒指定開關，什麼都沒建 |
+| 3 | `-Mode assess` 還沒做 |
+| 4 | 裝好了，但健康檢查沒過，或 port 被別的程式佔著。`-Mode restart` 重開後沒回應也是 4 |
+| 5 | 裝好了，但大腦沒回話，或你選的大腦沒接上。畫面會寫白話原因；修好後雙擊 `connect-brain.cmd`，再雙擊 `restart-runtime.cmd` |
+
+這張表是 `powershell -File` 看到的。一行安裝走 `-Command`，外面只分得出 0 和 1，畫面的文字一樣。要在腳本裡判斷，下載後用 `-File` 跑。
+
+**port 被佔著**：畫面會告訴你要改哪個檔的 `PORT`，改完再跑一次安裝。
+
+想一步一步手動裝，或想看懂每一步在做什麼，往下看。
 
 ---
 
@@ -44,7 +114,7 @@
 - 一條完整跑通的「建任務 → 執行 → 寫結果」流程，全部留在你本機的檔案裡（`data/` 目錄下）。
 - （可選）接上 Telegram，之後可以用手機傳訊息丟任務、收結果。
 
-**先講最重要的一句：預設就能免費跑通。** 第一次安裝走的是 **mock（模擬）模式**，不需要任何 API key、不需要付費帳號、不需要 Telegram，就能看到一次完整的任務生命週期。要不要接「會真的呼叫 AI」的付費模式，是你**跑通 mock 之後**才需要做的選擇——費用怎麼算，下一節 §1 先講清楚，不讓你裝到一半才發現要付錢。
+**先講最重要的一句：預設就能免費跑通。** 下面的手動安裝走的是 **mock（模擬）模式**，不需要任何 API key、不需要付費帳號、不需要 Telegram，就能看到一次完整的任務生命週期。要不要接「會真的呼叫 AI」的付費模式，是你**跑通 mock 之後**才需要做的選擇——費用怎麼算，下一節 §1 先講清楚，不讓你裝到一半才發現要付錢。
 
 **這份手冊的路線圖**
 
@@ -62,6 +132,8 @@
 ## §1 前置需求與費用說明（裝之前一定要先看）
 
 ### 1.1 你需要準備的東西
+
+> 走最上面的一行安裝：Node、git 它會自己帶，不用先裝。這張表是手動安裝用的。
 
 | 項目 | 需要嗎 | 怎麼確認 | 備註 |
 |---|---|---|---|
@@ -242,12 +314,14 @@ npm run web        # 等同 npm start，兩個指令都會起同一個 WebUI
 
 §2 做完，你的小主腦已經裝好、跑起來了，但它還是 **mock（模擬）**：你打什麼，它都只回示範產物，**還沒有接任何 AI 模型**。這一章教你接上真的模型，讓它第一次真的回你話。
 
+> **用一行安裝的人**：雙擊安裝資料夾的 `connect-brain.cmd` 選大腦，再雙擊 `restart-runtime.cmd`，就可以直接跳到 3.4。3.2、3.3 是手動改 `.env` 的做法。
+
 ### 3.0 先確認：我現在是不是還在 mock？
 
 符合下面任一條，你就還在 mock：
 
 - WebUI 首頁（HUD）的「模式」顯示 `mock（示範）`。
-- 在「對話」分頁送一句話，任務完成後產出是 `data/artifacts/<task_id>.result.json`，裡面的 `summary` 只寫 `Mock worker completed task: <你打的標題>`，不是在回答你。
+- 在「對話」分頁送一句話，回的是固定句 `（mock）收到你的訊息。…`，不是在回答你。
 
 這不是壞掉，是預設就這樣（見 §1.2）。往下選一條路接上模型。
 
@@ -256,7 +330,7 @@ npm run web        # 等同 npm start，兩個指令都會起同一個 WebUI
 | 路線 | 誰來回話 | 要花錢嗎 | 能做什麼 | 適合 |
 |---|---|---|---|---|
 | **A. 本機模型（OpenAI 相容端點）** | 你自己電腦上跑的模型，例如 ollama | ❌ 不用金鑰、不用訂閱 | 只回文字：問答、摘要、分類、改寫；**不能動檔案、不能跑工具** | 想先免費看到它真的回話 |
-| **B. 真 Claude worker** | 你本機的 Claude CLI | ✅ 需要 Claude 付費訂閱（見 §1.3） | 能讀寫 repo 內檔案、用工具把任務做完 | 要它真的動手做事 |
+| **B. 真 Claude worker** | 你本機的 Claude CLI | ✅ 需要 Claude 付費訂閱（見 §1.3） | 聊天回話；任務要能寫檔才做得完，目前交不出結果（見 3.3.3 已知限制） | 要 Claude 來回話 |
 
 兩條路都是改 `.env` 再重開 `npm run web`，不會自動切換。走完任一條，都到 3.4 做同一個完成測試。
 
@@ -285,7 +359,7 @@ npm run web        # 等同 npm start，兩個指令都會起同一個 WebUI
    - 網址要帶 `/v1`；`11434` 是 ollama 的預設 port。用 LM Studio、vLLM 等其他 OpenAI 相容服務，換成它們的網址即可。
    - `AIWFF_OPENAI_API_KEY` 本機 ollama 不用填；服務要金鑰才填，它只寫在你本機 `.env`，不進 git（§1.4）。
 
-3. **重開 runtime**：先在跑 `npm run web` 的終端機按 `Ctrl+C` 停掉，再跑一次 `npm run web`。HUD 的「模式」會變成 `openai_compatible`。
+3. **重開 runtime**：先在跑 `npm run web` 的終端機按 `Ctrl+C` 停掉，再跑一次 `npm run web`。用一行安裝的沒有這個終端機，改雙擊 `restart-runtime.cmd`。HUD 的「模式」會變成 `openai_compatible`。
 
 接著做 3.4 的完成測試。
 
@@ -301,7 +375,7 @@ npm run web        # 等同 npm start，兩個指令都會起同一個 WebUI
 claude --version
 ```
 
-如果系統找不到 `claude`，或 CLI 要求你先登入，請先依 Claude CLI 當下顯示的官方流程處理。這份手冊不替你建立帳號、購買方案，也不替你跳過 Claude CLI 的安全提示。
+如果系統找不到 `claude`，到 [Claude Code 官方安裝頁](https://code.claude.com/docs/en/setup) 裝好。CLI 要求你先登入時，跑 `claude auth login`，或雙擊安裝資料夾的 `claude-login.cmd`。這份手冊不替你建立帳號、購買方案，也不替你跳過 Claude CLI 的安全提示。
 
 #### 3.3.2 修改 `.env`
 
@@ -314,11 +388,11 @@ CLAUDE_CMD=claude
 CLAUDE_BYPASS_APPROVALS=
 ```
 
-`MOCK_WORKER=1` 會強制走 mock；要跑真 worker，請把它設成 `0` 或留空。`CLAUDE_BYPASS_APPROVALS` 預設留空，代表不加 `--dangerously-skip-permissions`。
+`MOCK_WORKER=1` 會強制走 mock；要跑真 worker，請把它設成 `0` 或留空。`ENABLE_REAL_CLAUDE_WORKER=1` 也一定要設：只清 `MOCK_WORKER` 的話，它會靜靜留在 mock。`CLAUDE_BYPASS_APPROVALS` 預設留空，代表不加 `--dangerously-skip-permissions`。
 
 #### 3.3.3 重開 runtime
 
-先按 `Ctrl+C` 停掉原本的 `npm run web`，再跑一次：
+先按 `Ctrl+C` 停掉原本的 `npm run web`，再跑一次（用一行安裝的改雙擊 `restart-runtime.cmd`）：
 
 ```bash
 npm run web
@@ -326,7 +400,9 @@ npm run web
 
 HUD 的「模式」會變成 `claude（真實 worker）`。真 worker 產出的最後一行應符合 `CLAUDE.md` 契約，寫成 `DONE: ...`。
 
-如果 Claude CLI 跳出核可提示，這是正常安全設計；逐次確認，或先回到 `MOCK_WORKER=1` 用免費 mock 模式驗流程。
+工具要經過核可是正常的安全設計，不要為了省事開 bypass。想先驗流程，回到 `MOCK_WORKER=1` 用免費 mock 模式。
+
+> **已知限制**：聊天不受影響，但任務在背景跑，沒有人按允許。沒開放權限時，真任務連結果檔都寫不了，會停在「等你回答」；到 WebUI 回答也解不開，只是再花一次額度。也有可能重試 3 次才停。
 
 接著做 3.4 的完成測試。
 
@@ -334,19 +410,20 @@ HUD 的「模式」會變成 `claude（真實 worker）`。真 worker 產出的�
 
 不管走 A 還是 B，都用同一個方式確認：
 
-1. 在 WebUI 切到「對話 / 新任務」分頁，送一句：`你好，你是誰？`
-2. 等對話分頁出現「狀態：完成」和產出路徑，用檔案總管或編輯器打開那個檔 `data/artifacts/<task_id>.result.md`。WebUI 目前只顯示路徑，不會直接把回答內容秀在畫面上。
+1. 在 WebUI 切到「對話 / 新任務」分頁，送一句：`你好，用一句話介紹你自己。`
+2. 等幾秒，回答會直接出現在對話框裡，不用開檔案。
 3. 判斷：
 
 | 你看到的 | 代表 |
 |---|---|
-| 一段真的在回答你的文字 | ✅ **接上了，這章完成**。之後怎麼給它個性與記憶，見 [usage.md](usage.md) §6 |
-| 產出是 `.result.json`、內容是 `Mock worker completed task: ...` | ❌ 還在 mock：`MOCK_WORKER` 沒清空，或改完 `.env` 沒重開 `npm run web` |
-| 任務變成 `failed` | ❌ 有設定沒接好，看 3.5 |
+| 對話框出現一段真的在回答你的文字 | ✅ **接上了，這章完成**。之後怎麼給它個性與記憶，見 [usage.md](usage.md) §6 |
+| 對話框出現 `（mock）收到你的訊息。…` | ❌ 還在 mock：`MOCK_WORKER` 沒清空，或改完 `.env` 沒重開 |
+| 對話框出現錯誤訊息 | ❌ 有設定沒接好，看 3.5 |
+| 跳出「要建任務嗎」的確認卡 | 不是壞掉。這句話像指令，它想建成任務；換一句問句再試 |
 
 ### 3.5 接不上時先對這張表
 
-任務失敗的原因會顯示在 WebUI「任務」分頁那筆任務底下，也會記在 `data/tasks/<task_id>.progress.jsonl`。
+對話失敗的原因會直接出現在對話框。任務失敗的原因會顯示在 WebUI「任務」分頁那筆任務底下，也會記在 `data/tasks/<task_id>.progress.jsonl`。
 
 | 你看到的錯誤 | 原因 | 處理 |
 |---|---|---|
@@ -354,8 +431,8 @@ HUD 的「模式」會變成 `claude（真實 worker）`。真 worker 產出的�
 | `fetch failed`、連線被拒 | ollama 沒在跑，或網址／port 不對 | 確認 ollama 有開、`ollama list` 能跑；網址是 `http://127.0.0.1:11434/v1` |
 | `HTTP 404`，訊息提到 model | 模型名稱跟 `ollama list` 不一致，或還沒 `ollama pull` | 從 `ollama list` 複製名稱貼進 `AIWFF_OPENAI_MODEL` |
 | 等很久最後逾時 | 模型太大，電腦跑不動或第一次載入很慢 | 換小一點的模型，或第一次送出後多等一下再試 |
-| 找不到 `claude` 命令 | 路線 B 沒裝 Claude CLI，或 Windows 的 PATH 找不到 `claude.cmd` | 先讓 `claude --version` 能跑；Windows 也可在 `.env` 把 `CLAUDE_CMD` 設成完整路徑 |
-| 模式還是 `mock（示範）` | `MOCK_WORKER` 還是 `1`，或沒重開 | 清空 `MOCK_WORKER`，停掉再重跑 `npm run web` |
+| 找不到 `claude` 命令 | 路線 B 沒裝 Claude CLI，或 Windows 的 PATH 找不到 `claude.cmd` | 先讓 `claude --version` 能跑。只裝 Claude 桌面端的話，`start-runtime.cmd` 每次啟動會自己找內附版，雙擊 `restart-runtime.cmd` 再試。`CLAUDE_CMD` 不要設成含空白的完整路徑，runtime 跑不起來；把那個資料夾加進 PATH |
+| 模式還是 `mock（示範）` | `MOCK_WORKER` 還是 `1`、接 Claude 卻沒設 `ENABLE_REAL_CLAUDE_WORKER=1`，或沒重開 | 雙擊 `connect-brain.cmd`（開發環境跑 `npm run connect`）重選一次，或照 3.2、3.3 補齊，再重開 |
 
 都對不上：到 §5.2 開 Issue，附上你選的路線、`.env` 裡跟模型有關的幾行（**金鑰遮掉**）和完整錯誤訊息。
 
@@ -410,7 +487,7 @@ npm run web
 | PowerShell 設環境變數沒效果 | 用了 bash 的 `VAR=value 命令` 寫法 | Windows PowerShell 改用 `$env:VAR='value'; 命令`（bash / macOS / Linux 才用前綴寫法） |
 | 跑完 demo 找不到產出 | 沒看 demo 輸出裡印的路徑，或終端機在錯的目錄 | 確認你在 repo 根目錄；mock 產出在 `data/artifacts/<task_id>.result.json` |
 | Telegram 一直不啟動 | `TG_BOT_TOKEN` 有填但 `ADMIN_TG_CHAT_ID` 留空 | 補上你的數字 chat id 再重跑（見 §4） |
-| 真 worker 一直跳核可提示 | 這是正常的安全設計 | 不要設 bypass 旗標去跳過；逐次核可，或先回 mock 模式驗流程 |
+| 真任務停在等你回答，問能不能開放權限 | 背景任務沒有地方按允許（見 3.3.3 已知限制） | 不要設 bypass 旗標去跳過；先用聊天，或回 mock 模式驗流程 |
 
 > 更多開發者向的排錯，見專案 [`INSTALL_AI.md`](../../INSTALL_AI.md) 第 6 節與 [`docs/architecture.md`](../architecture.md)。
 
