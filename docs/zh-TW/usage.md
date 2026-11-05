@@ -140,7 +140,7 @@ AIWFF Runtime listening on http://127.0.0.1:3100
 ### 5.2 真 Claude worker：`<id>.result.md`
 
 - 副檔名是 **`.result.md`**（Markdown，給人讀的報告）。
-- 這是真 Claude 依專案根目錄 `CLAUDE.md` 的輸出契約寫的：讀懂任務 → 用工具做完 → 把結果存到 `data/artifacts/<task_id>.result.md` → 最後一行寫 `DONE: <一句話說完成了什麼>`。
+- 這是真 Claude 依專案根目錄 `CLAUDE.md` 的輸出契約寫的：讀懂任務 → 用工具做完 → 把結果寫到任務指定的路徑 → 最後一行寫 `DONE: <一句話說完成了什麼>`。跑完後結果都在 `data/artifacts/<task_id>.result.md`。
 - 看到最後那行 `DONE:`，就是這個 worker 自報完成的訊號。
 
 ### 5.3 怎麼找到最新一筆產出

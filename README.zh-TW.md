@@ -266,10 +266,11 @@ MOCK_WORKER=1
 TG_BOT_TOKEN=<your_bot_token>
 MOCK_WORKER=
 ENABLE_REAL_CLAUDE_WORKER=1
+AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits
 AIWFF_MODE=both
 ```
 
-`ADMIN_TG_CHAT_ID` 先留空啟動，對 bot 傳 `/start`，從終端機拿到 chat ID（設定模式），填進 `ADMIN_TG_CHAT_ID` 後重開。之後一般訊息直接聊天回答，`/task …` 才建任務。
+`ADMIN_TG_CHAT_ID` 先留空啟動，對 bot 傳 `/start`，從終端機拿到 chat ID（設定模式），填進 `ADMIN_TG_CHAT_ID` 後重開。之後一般訊息直接聊天回答，`/task …` 才建任務。只聊天用不到 `AIWFF_CLAUDE_PERMISSION_MODE`，但沒有它，任務連結果檔都寫不了。
 
 ### Telegram 聊天的行為
 
@@ -305,7 +306,7 @@ Use tools and execute the task until it is complete.
 ## Execution Rules
 1. Understand the intent, not only the literal wording.
 2. Use tools to complete the task: Read / Write / Edit / Bash / Glob / Grep.
-3. Save the result to `data/artifacts/<task_id>.result.md`.
+3. Save the result to the path given in the task.
 4. The final line must be: `DONE: <one sentence describing what you completed>`.
 
 ## Boundaries
@@ -331,7 +332,7 @@ Use tools and execute the task until it is complete.
 
 把 `.env.example` 複製成 `.env` 後再改。`.env` 是本機設定檔，通常不應該提交到 git。
 
-目前 `.env.example` 有這些欄位（`AIWFF_CHAT_TIMEOUT_SEC`、`AIWFF_CONVERSATIONS_DIR`、`AIWFF_CONFIRM_TTL_SEC` 三列例外：還沒寫進 `.env.example`，要用就自己加到 `.env`。`AIWFF_CONFIRM_AUTO_TASK` 在 `.env.example` 裡只有註解）。`.env.example` 已經寫了 `AIWFF_MODE=both`，照抄成 `.env` 就會開聊天；完全沒設這個變數時，程式內的預設仍是 `task`：
+目前 `.env.example` 有這些欄位（`AIWFF_CHAT_TIMEOUT_SEC`、`AIWFF_CONVERSATIONS_DIR`、`AIWFF_CONFIRM_TTL_SEC`、`AIWFF_CLAUDE_PERMISSION_MODE` 四列例外：還沒寫進 `.env.example`，要用就自己加到 `.env`。`AIWFF_CONFIRM_AUTO_TASK` 在 `.env.example` 裡只有註解）。`.env.example` 已經寫了 `AIWFF_MODE=both`，照抄成 `.env` 就會開聊天；完全沒設這個變數時，程式內的預設仍是 `task`：
 
 | 變數 | 必填？ | 預設 / 空值 | 誰會讀 | 說明 |
 |---|---:|---|---|---|
@@ -342,6 +343,7 @@ Use tools and execute the task until it is complete.
 | `MOCK_WORKER` | 否 | `1` | `agent/index.js` | 對外安全預設：使用 mock worker，不呼叫 Claude CLI |
 | `ENABLE_REAL_CLAUDE_WORKER` | 真 Claude worker 必填 | 空 | `agent/index.js` | 只有你真的要讓 Claude CLI 執行任務時才設成 `1` |
 | `CLAUDE_BYPASS_APPROVALS` | 危險模式選填 | 空 | `agent/index.js` | 只有你明確想讓 `claude --print` 加上 `--dangerously-skip-permissions` 時才設成 `1` |
+| `AIWFF_CLAUDE_PERMISSION_MODE` | 否 | 空 | `agent/index.js` | 只收 `acceptEdits`，其他值會被忽略並在 stderr 警告。設了之後 Claude 任務只能改自己的工作資料夾，工具只有 `Read,Write,Edit,Glob,Grep`，不載 MCP，跑完由 runtime 把結果搬進 `data/artifacts`；留空時任務連結果檔都寫不了。`npm run connect` 選 Claude 時會寫好 |
 | `AIWFF_MODE` | 否 | `task` | `agent/index.js` | Telegram 訊息、`POST /api/chat`、WebUI 對話框怎麼分流。`task`（預設，跟還沒有聊天模式時一樣）：每則訊息都建任務。`both`：一般訊息直接聊天回答，`/task …` 開頭（或「幫我…」這類明確要做事、又不是問句的訊息）才建任務，`/chat …` 強制聊天（`/task`、`/chat` 不分大小寫、可帶 `@bot`）。`chat`：只聊天、不建任務。留空或值不認得就用 `task`，所以要你自己設 `AIWFF_MODE=both`（或 `chat`）才會開聊天。`AIWFF_WORKER_PROVIDER=agy` 沒有聊天路徑，請維持 `task`；agy 搭 `both` 或 `chat` 時 `/api/doctor` 會標成不正常。`/api/doctor` 會顯示目前模式。聊天呼叫唯讀、無工具（`claude --print --tools ""`，逾時見 `AIWFF_CHAT_TIMEOUT_SEC`），不寫 `data/tasks`；`MOCK_WORKER=1` 時回固定字串。同一段對話的前文會重播進 prompt（見[聊天的對話記憶](#聊天的對話記憶)） |
 | `AIWFF_CONVERSATIONS_DIR` | 否 | `data/conversations` | `agent/conversation-store.js` | 聊天對話紀錄寫在哪裡（每段對話一個 `<conversation_id>.jsonl`） |
 | `AIWFF_CONFIRM_AUTO_TASK` | 否 | 開 | `agent/index.js` | `AIWFF_MODE=both` 下自動判成任務的訊息要不要先跳確認卡。沒設或 `1`：開，按「建立任務」才開工；`0`：關，跟以前一樣直接建任務。見[聊天和任務接成一條線](#聊天和任務接成一條線) |

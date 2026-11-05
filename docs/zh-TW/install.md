@@ -45,7 +45,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager
 
 要接 Claude 但還沒登入也沒關係：先選模擬裝完，雙擊 `claude-login.cmd` 登入，再做這兩步。
 
-**接 Claude 目前的限制**：聊天可以，背景任務交不出結果，見 3.3.3 的已知限制。
+**接 Claude 的範圍**：聊天照常。背景任務只能改自己的工作資料夾，不能跑命令，見 3.3.3。
 
 不想被問，可以直接指定：`-Brain claude`、`-Brain ollama`、`-Brain mock`。帶 `-Unattended` 卻沒帶 `-Brain` 時維持模擬：用掉你的額度，一定要你同意過。重裝時已經有 `.env`、又沒帶 `-Brain`，就不動你的設定；沒有人在場時也不會問大腦第一句。API 計費又沒有人在場時，就算帶了 `-Brain claude` 也不問。
 
@@ -79,6 +79,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Name demo
 - `-ReplaceDesktop`：桌面端接著別的安裝資料夾時，換成這一個；
 - `-NoShortcut`：不放桌面捷徑；
 - `-NoBrowser`：裝完不開瀏覽器。
+
+### 試裝
+
+想在公開前試一個還沒合進 master 的分支，把上面下載網址的 `master` 換成分支名，再帶 `-Branch`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Root C:\AIWFF-try -Branch feat/xxx
+```
+
+`-Branch` 只影響 aiwff-runtime，另外兩個 repo 照舊。要用新的資料夾：同一個 `-Root` 裝過別的分支時，安裝會中止，不會幫你切換。
 
 ### 結束碼
 
@@ -330,7 +340,7 @@ npm run web        # 等同 npm start，兩個指令都會起同一個 WebUI
 | 路線 | 誰來回話 | 要花錢嗎 | 能做什麼 | 適合 |
 |---|---|---|---|---|
 | **A. 本機模型（OpenAI 相容端點）** | 你自己電腦上跑的模型，例如 ollama | ❌ 不用金鑰、不用訂閱 | 只回文字：問答、摘要、分類、改寫；**不能動檔案、不能跑工具** | 想先免費看到它真的回話 |
-| **B. 真 Claude worker** | 你本機的 Claude CLI | ✅ 需要 Claude 付費訂閱（見 §1.3） | 聊天回話；任務要能寫檔才做得完，目前交不出結果（見 3.3.3 已知限制） | 要 Claude 來回話 |
+| **B. 真 Claude worker** | 你本機的 Claude CLI | ✅ 需要 Claude 付費訂閱（見 §1.3） | 聊天回話；任務只能改自己的工作資料夾，不能跑命令（見 3.3.3） | 要 Claude 來回話 |
 
 兩條路都是改 `.env` 再重開 `npm run web`，不會自動切換。走完任一條，都到 3.4 做同一個完成測試。
 
@@ -386,9 +396,10 @@ MOCK_WORKER=0
 ENABLE_REAL_CLAUDE_WORKER=1
 CLAUDE_CMD=claude
 CLAUDE_BYPASS_APPROVALS=
+AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits
 ```
 
-`MOCK_WORKER=1` 會強制走 mock；要跑真 worker，請把它設成 `0` 或留空。`ENABLE_REAL_CLAUDE_WORKER=1` 也一定要設：只清 `MOCK_WORKER` 的話，它會靜靜留在 mock。`CLAUDE_BYPASS_APPROVALS` 預設留空，代表不加 `--dangerously-skip-permissions`。
+`MOCK_WORKER=1` 會強制走 mock；要跑真 worker，請把它設成 `0` 或留空。`ENABLE_REAL_CLAUDE_WORKER=1` 也一定要設：只清 `MOCK_WORKER` 的話，它會靜靜留在 mock。`CLAUDE_BYPASS_APPROVALS` 預設留空，代表不加 `--dangerously-skip-permissions`。`AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits` 讓背景任務寫得了檔，只收這個值，範圍見 3.3.3。`npm run connect` 選 Claude 時會一起寫好。
 
 #### 3.3.3 重開 runtime
 
@@ -402,7 +413,14 @@ HUD 的「模式」會變成 `claude（真實 worker）`。真 worker 產出的�
 
 工具要經過核可是正常的安全設計，不要為了省事開 bypass。想先驗流程，回到 `MOCK_WORKER=1` 用免費 mock 模式。
 
-> **已知限制**：聊天不受影響，但任務在背景跑，沒有人按允許。沒開放權限時，真任務連結果檔都寫不了，會停在「等你回答」；到 WebUI 回答也解不開，只是再花一次額度。也有可能重試 3 次才停。
+> **Claude 大腦的任務能做什麼**：任務在背景跑，沒有人按允許，所以範圍是事先定好的。
+>
+> - 只能改自己的工作資料夾（`data/workspaces/<任務 id>`）。別的地方寫不進去，別件任務的結果也碰不到：結果先寫在工作資料夾，跑完才由小主腦收進 `data/artifacts`。
+> - 工具只有讀檔、寫檔、改檔、找檔。不能跑命令、程式或腳本，安裝套件這類工作做不了，也不能上網，你在 Claude 裝的 MCP 連接器這裡不會載入。
+> - 例外：如果你在 Claude 的全域設定放行過讀寫檔（`permissions.allow` 有 `Read`、`Write`、`Edit`），背景任務會跟著放寬，讀寫得到工作資料夾外面，`.env` 也包含在內。跑命令的工具不受影響，一樣沒有。
+> - 做不到的工作會停在「等你回答」，問能不能開放權限。這種問題到 WebUI 回答也解不開，只是再花一次額度。
+>
+> **舊安裝**：`.env` 沒有 `AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits` 時，真任務連結果檔都寫不了，會停在「等你回答」，也有可能重試 3 次才停。重裝時不會自動改你的 `.env`，要自己開：跑 `npm run connect`（或雙擊 `connect-brain.cmd`）選 Claude，再重開小主腦。
 
 接著做 3.4 的完成測試。
 
@@ -487,7 +505,7 @@ npm run web
 | PowerShell 設環境變數沒效果 | 用了 bash 的 `VAR=value 命令` 寫法 | Windows PowerShell 改用 `$env:VAR='value'; 命令`（bash / macOS / Linux 才用前綴寫法） |
 | 跑完 demo 找不到產出 | 沒看 demo 輸出裡印的路徑，或終端機在錯的目錄 | 確認你在 repo 根目錄；mock 產出在 `data/artifacts/<task_id>.result.json` |
 | Telegram 一直不啟動 | `TG_BOT_TOKEN` 有填但 `ADMIN_TG_CHAT_ID` 留空 | 補上你的數字 chat id 再重跑（見 §4） |
-| 真任務停在等你回答，問能不能開放權限 | 背景任務沒有地方按允許（見 3.3.3 已知限制） | 不要設 bypass 旗標去跳過；先用聊天，或回 mock 模式驗流程 |
+| 真任務停在等你回答，問能不能開放權限 | 這件工作超出範圍，背景又沒有地方按允許（見 3.3.3） | 不要設 bypass 旗標去跳過。舊安裝先跑 `npm run connect`（或雙擊 `connect-brain.cmd`）選 Claude；已經開放還是問，就是這件工作要跑命令或動別的資料夾，改用聊天或自己動手 |
 
 > 更多開發者向的排錯，見專案 [`INSTALL_AI.md`](../../INSTALL_AI.md) 第 6 節與 [`docs/architecture.md`](../architecture.md)。
 

@@ -260,10 +260,11 @@ Paste this prompt into a local coding agent when you want a mock-only install an
 TG_BOT_TOKEN=<your_bot_token>
 MOCK_WORKER=
 ENABLE_REAL_CLAUDE_WORKER=1
+AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits
 AIWFF_MODE=both
 ```
 
-Start with `ADMIN_TG_CHAT_ID` empty, send `/start` to get your chat ID from the terminal (setup mode), fill in `ADMIN_TG_CHAT_ID`, and restart. Plain messages then get a chat answer; `/task …` creates a task.
+Start with `ADMIN_TG_CHAT_ID` empty, send `/start` to get your chat ID from the terminal (setup mode), fill in `ADMIN_TG_CHAT_ID`, and restart. Plain messages then get a chat answer; `/task …` creates a task. Chat works without `AIWFF_CLAUDE_PERMISSION_MODE`, but a task cannot write its result without it.
 
 ### How Telegram chat behaves
 
@@ -299,7 +300,7 @@ Use tools and execute the task until it is complete.
 ## Execution Rules
 1. Understand the intent, not only the literal wording.
 2. Use tools to complete the task: Read / Write / Edit / Bash / Glob / Grep.
-3. Save the result to `data/artifacts/<task_id>.result.md`.
+3. Save the result to the path given in the task.
 4. The final line must be: `DONE: <one sentence describing what you completed>`.
 
 ## Boundaries
@@ -323,7 +324,7 @@ Prebuilt personas live in [templates/claude/](templates/claude/): dev partner, r
 
 ## Configuration
 
-Copy `.env.example` to `.env`. The current `.env.example` exposes these fields (except `AIWFF_CHAT_TIMEOUT_SEC`, `AIWFF_CONVERSATIONS_DIR` and `AIWFF_CONFIRM_TTL_SEC`, which are not in `.env.example` yet; add them to `.env` yourself if you need them. `AIWFF_CONFIRM_AUTO_TASK` is there only as a comment). `.env.example` sets `AIWFF_MODE=both`, so a copied `.env` turns chat on; the built-in default when the variable is unset is still `task`:
+Copy `.env.example` to `.env`. The current `.env.example` exposes these fields (except `AIWFF_CHAT_TIMEOUT_SEC`, `AIWFF_CONVERSATIONS_DIR`, `AIWFF_CONFIRM_TTL_SEC` and `AIWFF_CLAUDE_PERMISSION_MODE`, which are not in `.env.example` yet; add them to `.env` yourself if you need them. `AIWFF_CONFIRM_AUTO_TASK` is there only as a comment). `.env.example` sets `AIWFF_MODE=both`, so a copied `.env` turns chat on; the built-in default when the variable is unset is still `task`:
 
 | Variable | Required? | Default / empty value | Used by | Description |
 |---|---:|---|---|---|
@@ -334,6 +335,7 @@ Copy `.env.example` to `.env`. The current `.env.example` exposes these fields (
 | `MOCK_WORKER` | No | `1` | `agent/index.js` | Public-safe default: use the mock worker instead of Claude CLI |
 | `ENABLE_REAL_CLAUDE_WORKER` | Required for real Claude worker | empty | `agent/index.js` | Set to `1` only when you intentionally want Claude CLI execution |
 | `CLAUDE_BYPASS_APPROVALS` | Optional unsafe mode | empty | `agent/index.js` | Set to `1` only if you intentionally want `--dangerously-skip-permissions` on `claude --print` |
+| `AIWFF_CLAUDE_PERMISSION_MODE` | No | empty | `agent/index.js` | Only `acceptEdits` is accepted; any other value is ignored with a warning on stderr. With it, a Claude task can edit only its own workspace, gets the tools `Read,Write,Edit,Glob,Grep` and no MCP servers, and the runtime moves its result to `data/artifacts` when the run ends. Left empty, a task cannot even write its result file. `npm run connect` sets it when you pick Claude |
 | `AIWFF_MODE` | No | `task` | `agent/index.js` | How Telegram messages, `POST /api/chat` and the WebUI chat box are routed. `task` (default, same as before chat mode existed): every message creates a task. `both`: plain messages get a direct chat answer, `/task …` (or a clear action request such as "幫我…" that is not a question) creates a task, `/chat …` forces chat (`/task` and `/chat` are case-insensitive and accept an `@bot` suffix). `chat`: never create tasks. Empty or unknown values use `task`, so chat is only on when you set `AIWFF_MODE=both` (or `chat`) yourself. `AIWFF_WORKER_PROVIDER=agy` has no chat path: keep it on `task`, because `/api/doctor` flags `both` or `chat` with agy as not OK. `/api/doctor` shows the active mode. Chat calls are read-only and tool-less (`claude --print --tools ""`, timeout set by `AIWFF_CHAT_TIMEOUT_SEC`) and never write `data/tasks`; with `MOCK_WORKER=1` they return a fixed string. Earlier turns of the same conversation are replayed into the prompt (see [Chat conversation memory](#chat-conversation-memory)) |
 | `AIWFF_CONVERSATIONS_DIR` | No | `data/conversations` | `agent/conversation-store.js` | Where chat conversation logs are written (one `<conversation_id>.jsonl` per conversation) |
 | `AIWFF_CONFIRM_AUTO_TASK` | No | on | `agent/index.js` | Confirmation card for messages that `AIWFF_MODE=both` only guesses to be a task. Unset or `1`: on, the task starts only after you press `建立任務`. `0`: off, the task is created directly as before. See [Chat and tasks](#chat-and-tasks) |

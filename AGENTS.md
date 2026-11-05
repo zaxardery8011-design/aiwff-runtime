@@ -25,3 +25,5 @@ npm run verify-demo
 npm run test
 ```
 
+Run `npm run test` in a dev clone. A repo path with spaces or non-ASCII characters, a `.env` in the repo, or a repo under `suite/` (the one-line install location) turns some tests red even when the product is fine.
+

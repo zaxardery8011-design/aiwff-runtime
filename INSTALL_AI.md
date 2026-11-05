@@ -93,9 +93,10 @@ AI 請照下面順序做，每一步把實際輸出記下來，最後彙整進�
    ```env
    MOCK_WORKER=0
    ENABLE_REAL_CLAUDE_WORKER=1
+   AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits
    ```
-   `MOCK_WORKER=1` 會強制走 mock；要跑真 worker，請設成 `0` 或留空。
-3. 提醒使用者：真 worker 執行時，Claude CLI **會出現核可提示（approval prompt）**；這是正常的安全設計，不要為了跳過提示而去設 bypass 旗標。
+   `MOCK_WORKER=1` 會強制走 mock；要跑真 worker，請設成 `0` 或留空。`AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits` 讓背景任務寫得了自己的工作資料夾，只收這個值；沒有這個鍵，任務連結果檔都寫不了。
+3. 提醒使用者：背景任務沒有人按允許，**不會跳核可提示**，所以範圍是事先定好的：只能改自己的工作資料夾，不能跑命令、程式或腳本，也不能上網。超出範圍的工作會停在「等你回答」，問能不能開放權限，這種問題回答也解不開，只是再花一次額度。不要為了放寬範圍去設 bypass 旗標。
 4. 只有在使用者理解上述風險並確認後才啟動；否則維持 mock。
 
 ---
@@ -148,7 +149,7 @@ artifact 路徑：<data/artifacts/<id>.result.md>
 | PowerShell 設 env 無效 | 用了 bash 的 `VAR=value cmd` 語法 | 改用 `$env:VAR='value'; cmd` |
 | 跑完 demo 找不到 artifact | 沒看 demo 輸出裡的路徑，或 cwd 跑錯地方 | 確認 cwd 是 repo 根目錄；mock artifact 在 `data/artifacts/<task_id>.result.json` |
 | Telegram 不啟動 | `TG_BOT_TOKEN` 有填但 `ADMIN_TG_CHAT_ID` 為空 | 補上數字 chat id（見第 4 節），存檔重跑；兩者要一致 |
-| 真 worker 一直跳核可提示 | 這是正常安全設計 | 不要設 bypass 旗標去跳過；逐次核可，或先回 mock 模式驗證流程 |
+| 真任務停在「等你回答」，問能不能開放權限 | 工作超出範圍（只能改自己的工作資料夾，不能跑命令），或 `.env` 沒有 `AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits` | 回答解不開，同一件不要重開。沒有這個鍵就補上再重開小主腦；不要設 bypass 旗標 |
 
 ---
 

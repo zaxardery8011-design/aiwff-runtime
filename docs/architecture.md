@@ -52,7 +52,7 @@ POST /api/tasks or Telegram message
   -> daemon starts the selected worker
   -> worker changes the task to running
   -> worker appends data/tasks/<id>.progress.jsonl
-  -> worker writes data/artifacts/<id>.result.*
+  -> worker writes data/artifacts/<id>.result.* (a Claude worker with acceptEdits writes RESULT.md in its workspace, the daemon moves it)
   -> worker marks data/tasks/<id>.json as done or failed
   -> onTaskSettled: a task with conversation_id gets a task_result record in that conversation
      (and, for tg- conversations whose derived chat id is ADMIN_TG_CHAT_ID, a Telegram notice)
@@ -107,7 +107,7 @@ CLAUDE_BYPASS_APPROVALS=1
 AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS=1
 ```
 
-If `CLAUDE_BYPASS_APPROVALS` is set alone, the daemon ignores it and logs a `SECURITY WARNING`. Real Claude workers start in `data/workspaces/<task_id>` instead of the repository root, receive `--add-dir data/artifacts`, and default to `--disallowedTools Bash,PowerShell`. `AIWFF_CLAUDE_ALLOWED_TOOLS` can explicitly pass an allowlist through `--allowedTools`.
+If `CLAUDE_BYPASS_APPROVALS` is set alone, the daemon ignores it and logs a `SECURITY WARNING`. Real Claude workers start in `data/workspaces/<task_id>` instead of the repository root, receive `--add-dir data/artifacts`, and default to `--disallowedTools Bash,PowerShell`. `AIWFF_CLAUDE_ALLOWED_TOOLS` can explicitly pass an allowlist through `--allowedTools`. Nobody can approve anything in `--print`, so `AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits` adds `--permission-mode acceptEdits` and tightens the rest: no `--add-dir`, because `data/artifacts` is shared by every task; `--tools Read,Write,Edit,Glob,Grep --strict-mcp-config`, so the tool list does not depend on the CLI version or on the user's global settings. The worker writes `RESULT.md` in its workspace and the daemon moves it to `data/artifacts/<id>.result.md` after a clean exit, ignoring anything that is not a regular file. No other value is accepted. On Windows the daemon also sets `NoDefaultCurrentDirectoryInExePath=1`, otherwise `cmd.exe` would run a `claude.cmd` the worker left in its workspace on the next resume.
 
 ## Runtime Guardrails
 
@@ -128,8 +128,8 @@ These are the current enforced boundaries and remaining gaps. Each row reflects 
 | Task question read: `GET /api/tasks/:id/question` | Same runtime token as `GET /api/tasks/:id/result`; missing or invalid token → 401. `:id` must be a UUID (else 400). Returns `question`, `resume_question`, `resume_answer` and `waiting_for_answer`. `GET /api/tasks`, `GET /api/tasks/:id` and the HUD's `latest_tasks` drop those three fields and only return `has_question`. | The progress tail (`GET /api/tasks/:id/progress`, open) still contains the worker's stdout lines, including the `BLOCKED:` line. |
 | Read API: other `GET /api/*` | The remaining read endpoints are available without token checks, including task, progress, events, inbox, logs, memory, settings, doctor, health, and HUD reads. | This is the widest remaining known gap: local read access is unauthenticated. |
 | Real Claude worker cwd | Real Claude workers run from `data/workspaces/<task_id>`, not the repository root. | This reduces accidental repo-root access through cwd, but does not by itself prevent absolute-path access. |
-| Artifact writes from Claude | Real Claude workers receive `--add-dir data/artifacts`, preserving the intended artifact output path. | This is a Claude CLI boundary, not an operating-system write-denial boundary. |
-| Claude tools | Real Claude workers default to `--disallowedTools Bash,PowerShell`; `AIWFF_CLAUDE_ALLOWED_TOOLS` can explicitly pass `--allowedTools`. | On Windows there is no Landlock, Seatbelt, or equivalent OS sandbox here; tool flags are CLI-level restrictions only. |
+| Artifact writes from Claude | With `AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits` a worker cannot reach `data/artifacts`: it writes `RESULT.md` in its workspace and the daemon moves it, so tasks cannot edit each other's results. Without it, workers receive `--add-dir data/artifacts` and cannot write at all unless something else allows it. | This is a Claude CLI boundary, not an operating-system write-denial boundary. agy still gets `--add-dir data/artifacts`. |
+| Claude tools | With `AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits` workers get only `Read,Write,Edit,Glob,Grep` and no MCP servers. Without it they default to `--disallowedTools Bash,PowerShell`. `AIWFF_CLAUDE_ALLOWED_TOOLS` can explicitly pass `--allowedTools`; it does not add tools to the `--tools` list. | On Windows there is no Landlock, Seatbelt, or equivalent OS sandbox here; tool flags are CLI-level restrictions only. Without `acceptEdits` the deny list names two tools, not every tool that can run a command: the CLI's `Monitor` tool still runs simple read-only commands such as `node -v`. A user-level `permissions.allow` rule for `Read`, `Write` or `Edit` still widens where those tools reach, `.env` included, because worker settings are not isolated from the user's Claude settings. |
 | Dangerous Claude bypass | `--dangerously-skip-permissions` requires both `CLAUDE_BYPASS_APPROVALS=1` and `AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS=1`; enabled or ignored bypass attempts log a `SECURITY WARNING`. | The bypass remains dangerous when explicitly double opted in. |
 
 ## Mock-first Boundaries
