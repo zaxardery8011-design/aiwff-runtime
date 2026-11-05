@@ -180,6 +180,8 @@ npm start
 接著檢查：
 
 1. 用瀏覽器打開終端機印出的登入連結（`登入 WebUI：http://127.0.0.1:3100/?token=...`）。沒用登入連結也看得到畫面，但對話分頁不能建立任務。
+   - 之後再回來：沒設 `AIWFF_RUNTIME_TOKEN` 時，每次重啟都會換新 token，舊連結或書籤會顯示 `登入連結無效`。請用最新一次啟動印出的連結，或在 `.env` 設 `AIWFF_RUNTIME_TOKEN` 固定連結。
+   - 輸出導到 log 檔、不是終端機時，log 裡只有遮罩版連結，完整連結在 `data/webui_login_url.txt`。
 2. 如果有接 Telegram，傳任意訊息給你的 bot。
 3. 確認 WebUI 出現新任務。
 4. 等 Telegram 或 WebUI 顯示完成。
