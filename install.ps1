@@ -12,6 +12,7 @@
   Switches:
     -Root <dir>        default C:\AIWFF-<Name>; normalized to a full path (/ and \ both ok)
     -Source <path|url> clone aiwff-runtime from here instead of GitHub; optional repos are skipped
+    -Branch <name>     clone and pull this branch of aiwff-runtime; for trying a branch before it ships
     -Brain <b>         ask (default) | claude | ollama | mock, see "Brain" below
     -UseSystemTools    use node/git/npm already on PATH instead of portable downloads
     -SkipAutostart     never register the logon scheduled task and no autostart prompt; the brain
@@ -51,6 +52,7 @@ param(
   [string]$Name = $env:USERNAME,
   [string]$Root = '',
   [string]$Source = '',
+  [string]$Branch = '',
   [ValidateSet('ask','claude','ollama','mock')][string]$Brain = 'ask',
   [switch]$UseSystemTools,
   [switch]$SkipAutostart,
@@ -132,6 +134,11 @@ function Invoke-Git([string[]]$GitArgs) {
     $env:GIT_TERMINAL_PROMPT = $saved[0]; $env:GCM_INTERACTIVE = $saved[1]
     $env:GIT_ASKPASS = $saved[2]; $env:SSH_ASKPASS = $saved[3]
   }
+}
+
+function Get-GitBranch([string]$Dir) {
+  $ErrorActionPreference = 'Continue'
+  return "$(& $gitExe -C $Dir symbolic-ref --quiet --short HEAD 2>$null)".Trim()
 }
 
 # First non-empty value of a key in .env, the same rule as loadDotEnv in agent/index.js.
@@ -270,6 +277,13 @@ if ($Source.StartsWith('-')) {
   exit 1
 }
 
+# Checked by hand, not with git check-ref-format: a portable install has no git yet, and -DryRun
+# has to refuse too. The pattern is narrower than git's, the second test is what it lets through.
+if ($Branch -and ($Branch -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*\z' -or $Branch -match '\.\.|\.lock(/|\z)|\.(/|\z)')) {
+  Write-Host "[abort  ] -Branch must be a plain branch name (letters, digits, . _ - /) and cannot start with '-'; nothing changed" -ForegroundColor Red
+  exit 1
+}
+
 if (-not $Name) { $Name = 'default' }
 $safe = ($Name -replace '[^A-Za-z0-9_-]','')
 if (-not $safe) { $safe = 'default' }
@@ -336,8 +350,8 @@ if ($Mode -eq 'uninstall') {
   $left = Stop-RootProcess
   foreach ($link in $links) { Remove-Item -LiteralPath $link.FullName -Force }
   if ($left) { Write-Host "[FAILED ] $left process(es) of this Root are still running" -ForegroundColor Red; exit 1 }
-  if ($nodeExe -and (Test-Path -LiteralPath $summaryJs)) { $null = Invoke-Console $nodeExe @($summaryJs, '--uninstall', '--root', $Root, '--desktop', $desktopArg) }
-  else { Step "stopped and unwired. The data stays in $Root; delete that folder yourself if you want it gone" }
+  if ($nodeExe -and (Test-Path -LiteralPath $summaryJs)) { $null = Invoke-Console $nodeExe @($summaryJs, '--uninstall', '--root', $Root, '--desktop', $desktopArg, '--stopped', "$($procs.Count)") }
+  else { Step "$(if ($procs.Count) { 'stopped and unwired' } else { 'nothing was running; unwired' }). The data stays in $Root; delete that folder yourself if you want it gone" }
   exit 0
 }
 
@@ -389,7 +403,8 @@ $rootIsOurs = -not @(Get-ChildItem -LiteralPath $Root -Force -ErrorAction Silent
 
 $autoTxt = if ($askAutostart -and $DryRun) { 'ask(Enter=Yes)' } else { "$Autostart" }
 $toolTxt = if ($UseSystemTools) { 'system' } else { 'portable' }
-Step "mode=fresh name=$safe root=$Root autostart=$autoTxt nostart=$([bool]$NoStart) browser=$(-not $NoBrowser) tools=$toolTxt brain=$brainPlan/$Brain desktop=$desktopPlan shortcut=$(-not $NoShortcut)"
+$branchTxt = if ($Branch) { " branch=$Branch" } else { '' }
+Step "mode=fresh name=$safe root=$Root autostart=$autoTxt nostart=$([bool]$NoStart) browser=$(-not $NoBrowser) tools=$toolTxt brain=$brainPlan/$Brain desktop=$desktopPlan shortcut=$(-not $NoShortcut)$branchTxt"
 if ($DryRun) {
   if ($askAutostart -and $noTty) {
     Step "would ABORT with exit 2 before creating anything: non-interactive session ($noTty); add -Unattended or -SkipAutostart"
@@ -401,7 +416,10 @@ if ($DryRun) {
   else { Step "would leave the permissions of $Root alone: it already holds other files; only suite\ gets limited" }
   if ($UseSystemTools) { Step 'would use node / git / npm.cmd found on PATH (no downloads)' }
   else { Step "would download unless already complete (sha256-verified, abort on mismatch): $NODE_URL ; $GIT_URL ; $PWSH_URL" }
-  if ($Source) { Step "would clone aiwff-runtime from $Source into suite\ (pull --ff-only if present); optional repos skipped" }
+  $otherBranch = 'a clone on another branch stops the install'
+  if ($Source -and $Branch) { Step "would clone aiwff-runtime from $Source, branch $Branch into suite\ (pull --ff-only if present; $otherBranch); optional repos skipped" }
+  elseif ($Source) { Step "would clone aiwff-runtime from $Source into suite\ (pull --ff-only if present); optional repos skipped" }
+  elseif ($Branch) { Step "would clone into suite\ (pull --ff-only if present; never prompts for credentials): aiwff-runtime from branch $Branch ($otherBranch); soplint, execution-proofs (default branch, optional)" }
   else { Step "would clone into suite\ (pull --ff-only if present; never prompts for credentials): $($REPOS -join ', ') (only aiwff-runtime is required)" }
   Step 'would install deps: npm ci where package-lock.json exists, else npm install --no-package-lock; npm run build in execution-proofs'
   Step 'would write suite\aiwff-runtime\.env from .env.example with a generated AIWFF_RUNTIME_TOKEN (an existing .env is kept)'
@@ -504,8 +522,16 @@ $gotRepos = @(); $missRepos = @()
 foreach ($r in $repoList) {
   $dst = Join-Path $suite $r
   $from = if ($Source -and $r -eq 'aiwff-runtime') { $Source } else { "$GH/$r.git" }
-  if (Test-Path (Join-Path $dst '.git')) { $rc = Invoke-Git @('-C', $dst, 'pull', '--ff-only', '-q') }
-  else { $rc = Invoke-Git @('clone', '-q', '--depth', '1', '--', $from, $dst) }
+  $branchArgs = @(if ($Branch -and $r -eq 'aiwff-runtime') { '--branch', $Branch })
+  if (Test-Path (Join-Path $dst '.git')) {
+    # A plain pull would stay on the old branch and still end in "done".
+    if ($branchArgs -and (Get-GitBranch $dst) -cne $Branch) {
+      Write-Host "[abort  ] $dst is on another branch, not $Branch; it was left as it is. To try a branch, use a new -Root" -ForegroundColor Red
+      exit 1
+    }
+    $rc = Invoke-Git @('-C', $dst, 'pull', '--ff-only', '-q')
+  }
+  else { $rc = Invoke-Git (@('clone', '-q', '--depth', '1') + $branchArgs + @('--', $from, $dst)) }
   if ($rc -ne 0) {
     if ($r -eq 'aiwff-runtime') { throw "git failed for $r (exit $rc)" }
     Write-Warning "git failed for $r (exit $rc; optional, skipped)"

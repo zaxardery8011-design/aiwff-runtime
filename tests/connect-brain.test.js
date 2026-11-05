@@ -46,11 +46,11 @@ function tempDir(t) {
 
 function writeFakeClaude(dir, json, exitCode = 0) {
   fs.mkdirSync(dir, { recursive: true });
-  const jsonFile = path.join(dir, 'auth.json');
-  fs.writeFileSync(jsonFile, json);
+  fs.writeFileSync(path.join(dir, 'auth.json'), json);
   // Windows 找 claude.cmd，其他平台找沒副檔名的 claude（CI 是 ubuntu）。
-  fs.writeFileSync(path.join(dir, 'claude.cmd'), `@echo off\r\ntype "${jsonFile}"\r\nexit /b ${exitCode}\r\n`);
-  fs.writeFileSync(path.join(dir, 'claude'), `#!/bin/sh\ncat "${jsonFile}"\nexit ${exitCode}\n`, { mode: 0o755 });
+  // 內容全 ASCII，路徑走 %~dp0：暫存目錄有中文時，寫絕對路徑會被 cmd 的 code page 讀壞。
+  fs.writeFileSync(path.join(dir, 'claude.cmd'), `@echo off\r\ntype "%~dp0auth.json"\r\nexit /b ${exitCode}\r\n`);
+  fs.writeFileSync(path.join(dir, 'claude'), `#!/bin/sh\ncat "\${0%/*}/auth.json"\nexit ${exitCode}\n`, { mode: 0o755 });
 }
 
 function writeFakeOllamaBinary(tmp) {
@@ -217,6 +217,8 @@ test('--use claude changes only its keys, keeps every other line byte for byte, 
   assert.ok(lines.includes('CLAUDE_CMD=claude'));
   assert.ok(lines.includes('AIWFF_WORKER_PROVIDER='));
   assert.ok(lines.includes('AIWFF_MODE=both'));
+  // 背景任務沒有人按允許，不開這個連結果檔都寫不了。
+  assert.ok(lines.includes('AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits'));
   // runtime 的聊天逾時預設 30 秒，比第一句驗證的 120 秒短；接真大腦時要一起拉長。
   assert.ok(lines.includes('AIWFF_CHAT_TIMEOUT_SEC=120'));
   for (const kept of ['PORT=3100', 'AIWFF_RUNTIME_TOKEN=test-token-value', 'CLAUDE_BYPASS_APPROVALS=', 'AGY_CMD=agy', '# 聊天模式：both 是一般訊息直接聊天']) {
@@ -454,6 +456,25 @@ test('--use mock restores the defaults after ollama', async (t) => {
   assert.equal(parsed.AIWFF_MODE, 'both');
 });
 
+test('only claude gets the permission mode: an old .env gains it once, ollama and mock clear it', async (t) => {
+  const tmp = tempDir(t);
+  writeFakeClaude(path.join(tmp, 'bin'), LOGGED_IN);
+  const url = await startFakeOllama(t, [QWEN]);
+  const envFile = setupEnvFile(tmp);
+  const env = childEnv(tmp, { AIWFF_OLLAMA_URL: url });
+  const mode = () => parseEnvText(fs.readFileSync(envFile, 'utf8')).AIWFF_CLAUDE_PERMISSION_MODE;
+  assert.equal((await runScript(['--use', 'claude', '--env-path', envFile], { env })).code, 0);
+  assert.equal(mode(), 'acceptEdits');
+  assert.equal((await runScript(['--use', 'claude', '--env-path', envFile], { env })).code, 0);
+  assert.equal(fs.readFileSync(envFile, 'utf8').match(/^AIWFF_CLAUDE_PERMISSION_MODE=/gm).length, 1);
+  assert.equal((await runScript(['--use', 'ollama', '--env-path', envFile], { env })).code, 0);
+  assert.equal(mode(), '');
+  assert.equal((await runScript(['--use', 'claude', '--env-path', envFile], { env })).code, 0);
+  assert.equal(mode(), 'acceptEdits');
+  assert.equal((await runScript(['--use', 'mock', '--env-path', envFile], { env })).code, 0);
+  assert.equal(mode(), '');
+});
+
 test('every mode ensures AIWFF_MODE=both, even when the key is missing or only commented out', async (t) => {
   const tmp = tempDir(t);
   fs.mkdirSync(path.join(tmp, 'bin'));
@@ -660,7 +681,8 @@ test('install.ps1 -DryRun plans every new switch', { skip: process.platform !== 
   assert.match(base.out, /brain stays mock/i);
   assert.match(base.out, /desktop: not connected/i);
   assert.match(base.out, /open-webui\.cmd/);
-  assert.match(base.out, new RegExp(path.join(tmp, 'desk').replace(/\\/g, '\\\\')));
+  // 只比 ASCII 那段：PowerShell 的輸出不是 UTF-8，暫存目錄有中文時整條路徑比不到。
+  assert.match(base.out, new RegExp(path.join(path.basename(tmp), 'desk').replace(/\\/g, '\\\\')));
   assert.match(base.out, /first-reply/);
   assert.match(base.out, /exit 5/);
 
@@ -693,6 +715,50 @@ test('install.ps1 -DryRun plans every new switch', { skip: process.platform !== 
   const option = dryRun(root, ['-SkipAutostart', '-UseSystemTools', '-Unattended', '-Source', '--upload-pack=x'], desk);
   assert.equal(option.code, 1, option.out);
   assert.match(option.out, /-Source cannot start/);
+  assert.equal(fs.existsSync(root), false);
+});
+
+test('install.ps1 -Branch is planned for aiwff-runtime only and -DryRun shows it', { skip: process.platform !== 'win32' }, (t) => {
+  const tmp = tempDir(t);
+  const root = path.join(tmp, 'try root');
+  const flags = ['-SkipAutostart', '-UseSystemTools', '-Unattended'];
+  const desk = { AIWFF_DESKTOP_DIR: path.join(tmp, 'desk') };
+
+  const plain = dryRun(root, flags, desk);
+  assert.equal(plain.code, 0, plain.out);
+  assert.doesNotMatch(plain.out, /branch/i);
+
+  const github = dryRun(root, [...flags, '-Branch', 'feat/oneclick-v0-20261105'], desk);
+  assert.equal(github.code, 0, github.out);
+  assert.match(github.out, /branch=feat\/oneclick-v0-20261105/);
+  assert.match(github.out, /aiwff-runtime from branch feat\/oneclick-v0-20261105/);
+  // 另外兩個 repo 照舊走預設分支。
+  assert.match(github.out, /soplint, execution-proofs \(default branch/);
+
+  const source = dryRun(root, [...flags, '-Source', 'C:\\src\\repo', '-Branch', 'try-1.2_a'], desk);
+  assert.equal(source.code, 0, source.out);
+  assert.match(source.out, /clone aiwff-runtime from C:\\src\\repo, branch try-1\.2_a/);
+  assert.equal(fs.existsSync(root), false);
+});
+
+test('install.ps1 refuses a -Branch git would misread, before anything is created', { skip: process.platform !== 'win32' }, (t) => {
+  const tmp = tempDir(t);
+  const root = path.join(tmp, 'bad branch root');
+  const flags = ['-SkipAutostart', '-UseSystemTools', '-Unattended'];
+  const refused = [
+    '--upload-pack=x', 'a b', 'a..b', 'a/', '/a', 'a//b', '.a', 'a/.b', 'a.lock', 'a.lock/b', 'a.', 'a@{b', 'a~1', 'a^', 'a:b', 'a?b', 'a*', 'a[b', 'a\\b', 'a;b', '中文',
+  ];
+  for (const name of refused) {
+    const result = dryRun(root, [...flags, '-Branch', name]);
+    assert.equal(result.code, 1, `${name}: ${result.out}`);
+    assert.match(result.out, /-Branch/, name);
+    assert.equal(fs.existsSync(root), false, name);
+  }
+  // PowerShell 的 -File 會把單一個 - 開頭的值當成參數名字，要走 -Command 才到得了我們的檢查。
+  const command = `& '${INSTALLER}' -Root '${root}' -DryRun -SkipAutostart -UseSystemTools -Unattended -Branch '-x'; exit $LASTEXITCODE`;
+  const dash = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { encoding: 'utf8' });
+  assert.equal(dash.status, 1, `${dash.stdout}${dash.stderr}`);
+  assert.match(dash.stdout, /-Branch/);
   assert.equal(fs.existsSync(root), false);
 });
 

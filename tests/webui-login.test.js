@@ -1,6 +1,7 @@
 // WebUI 一次性登入連結（Jupyter 模式）測試。
 // 在同一個 process 內起 runtime server（不 spawn daemon），每個測試結束自己 close。
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const http = require('node:http');
 const net = require('node:net');
 const path = require('node:path');
@@ -8,6 +9,15 @@ const test = require('node:test');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const FIXED_TOKEN = 'webui-login-fixed-token';
+
+// 全站的 select 是 width:100%，它在頂列會把「重新整理」擠成直排四個字；實際畫面用截圖驗。
+test('topbar controls size to their own text and stay on one line', () => {
+  const html = fs.readFileSync(path.join(ROOT_DIR, 'agent', 'webui.html'), 'utf8');
+  const rule = html.match(/\.top-btn \{([^}]*)\}/)[1];
+  assert.match(rule, /white-space: nowrap;/);
+  assert.match(rule, /flex-shrink: 0;/);
+  assert.match(rule, /width: auto;/);
+});
 
 function getOpenPort() {
   return new Promise((resolve, reject) => {
