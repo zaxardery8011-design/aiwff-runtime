@@ -1,12 +1,22 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const { detectClaude, readEnvFile } = require('./connect-brain');
+const { RECONNECT, detectClaude, readEnvFile } = require('./connect-brain');
 const { QUESTION } = require('./first-reply');
 
 const isOn = (value) => value === '1' || String(value).toLowerCase() === 'true';
 const provider = (env) => String(env.AIWFF_WORKER_PROVIDER || '').trim().toLowerCase();
 const usesClaude = (env) => !isOn(env.MOCK_WORKER) && provider(env) !== 'openai_compatible' && isOn(env.ENABLE_REAL_CLAUDE_WORKER);
+
+function claudeTaskLine(env) {
+  if (isOn(env.CLAUDE_BYPASS_APPROVALS) && isOn(env.AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS)) {
+    return '開了跳過核可，背景任務動得到這個帳號的所有檔案。';
+  }
+  // 既有 .env 沒帶 -Brain 時不改，這種人只有這裡看得到要怎麼開。
+  return env.AIWFF_CLAUDE_PERMISSION_MODE === 'acceptEdits'
+    ? '背景任務只能改自己的工作資料夾，不能跑命令。'
+    : `背景任務還沒開放寫檔，交不出結果。要開：${RECONNECT}，選 Claude，再重開小主腦。`;
+}
 
 // 判定順序跟 runtime 一樣：MOCK_WORKER 優先於一切，再來 openai_compatible，最後 claude。
 function brainLine({ env, root, apiBilling }) {
@@ -16,7 +26,7 @@ function brainLine({ env, root, apiBilling }) {
   }
   if (usesClaude(env)) {
     const billing = apiBilling ? '會走 API 計費，不是訂閱額度' : '會用掉你的訂閱額度';
-    return `大腦：Claude（${billing}）。聊天可以，背景任務目前交不出結果，見手冊。`;
+    return `大腦：Claude（${billing}）。${claudeTaskLine(env)}`;
   }
   return `大腦：現在是模擬，還沒接 AI。要接上：雙擊 ${path.join(root, 'connect-brain.cmd')}`;
 }
@@ -86,9 +96,9 @@ function buildSummaryLines(state) {
   ].filter(Boolean);
 }
 
-function buildUninstallLines({ root, desktopTouched }) {
+function buildUninstallLines({ root, desktopTouched, stopped }) {
   return [
-    '已停掉小主腦，開機排程和桌面捷徑都拿掉了。',
+    stopped ? '已停掉小主腦，開機排程和桌面捷徑都拿掉了。' : '沒有找到在跑的小主腦，沒有停任何程式。開機排程和桌面捷徑都拿掉了。',
     `資料都還在：${root}。要全部刪掉，請自己刪這個資料夾。`,
     desktopTouched ? '如果 Claude 桌面端開著，要從系統匣完全結束再開，才算完全斷開。' : null,
   ].filter(Boolean);
@@ -146,7 +156,7 @@ async function main() {
     return askDesktop();
   }
   if (args.uninstall) {
-    buildUninstallLines({ root: args.root, desktopTouched: args.desktop === 'touched' }).forEach((line) => console.log(line));
+    buildUninstallLines({ root: args.root, desktopTouched: args.desktop === 'touched', stopped: Number(args.stopped) > 0 }).forEach((line) => console.log(line));
     return 0;
   }
   const env = readEnvFile(path.join(args.root, 'suite', 'aiwff-runtime', '.env'));

@@ -396,8 +396,25 @@ test('summary names the real brain and the desktop state', () => {
   assert.match(claude, /額度/);
   assert.doesNotMatch(claude, /模擬/);
   assert.match(claude, /完全結束/);
-  // 聊天能回，但任務做不完：不講的話使用者交了任務才發現。
+  // 聊天能回，任務要開放寫檔才交得出結果：舊 .env 沒有這個鍵，要講怎麼開。
   assert.match(claude, /背景任務/);
+  assert.match(claude, /npm run connect/);
+  assert.match(claude, /connect-brain\.cmd/);
+  // 開好的人看到的是實際範圍，不能再講交不出結果。
+  const opened = buildSummaryLines({
+    ...BASE_STATE,
+    env: { ENABLE_REAL_CLAUDE_WORKER: '1', AIWFF_CLAUDE_PERMISSION_MODE: 'acceptEdits' },
+    reply: { result: 'real' },
+  }).join('\n');
+  assert.match(opened, /只能改自己的工作資料夾，不能跑命令/);
+  assert.doesNotMatch(opened, /交不出結果/);
+  assert.doesNotMatch(opened, /connect-brain\.cmd/);
+  // 雙重確認都開時範圍不是工作資料夾，不能還講只能改那裡；只開一個 runtime 不認。
+  const bypass = { ENABLE_REAL_CLAUDE_WORKER: '1', AIWFF_CLAUDE_PERMISSION_MODE: 'acceptEdits', CLAUDE_BYPASS_APPROVALS: '1' };
+  const bypassBoth = buildSummaryLines({ ...BASE_STATE, env: { ...bypass, AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS: '1' } }).join('\n');
+  assert.match(bypassBoth, /跳過核可/);
+  assert.doesNotMatch(bypassBoth, /只能改自己的工作資料夾/);
+  assert.match(buildSummaryLines({ ...BASE_STATE, env: bypass }).join('\n'), /只能改自己的工作資料夾/);
   const ollamaEnv = { AIWFF_WORKER_PROVIDER: 'OpenAI_Compatible', AIWFF_OPENAI_BASE_URL: 'http://127.0.0.1:11434/v1', AIWFF_OPENAI_MODEL: 'qwen2.5:3b' };
   const ollama = buildSummaryLines({ ...BASE_STATE, env: ollamaEnv, reply: { result: 'real' } }).join('\n');
   assert.match(ollama, /Ollama/);
@@ -497,6 +514,21 @@ test('--ask-desktop: Enter and y mean yes, n means no, Chinese counts, anything 
   assert.equal(unclear.code, 10);
   assert.match(unclear.stdout, /請打 y 或 n/);
   assert.equal((await run(SUMMARY, ['--ask-desktop'], { input: 'no thanks\ny\n' })).code, 0);
+});
+
+test('uninstall lines only say stopped when something was stopped', async (t) => {
+  assert.match(buildUninstallLines({ root: 'C:\\AIWFF-demo', stopped: 3 }).join('\n'), /已停掉小主腦/);
+  const idle = buildUninstallLines({ root: 'C:\\AIWFF-demo', stopped: 0 }).join('\n');
+  assert.doesNotMatch(idle, /已停掉/);
+  assert.match(idle, /沒有找到在跑的小主腦/);
+  assert.match(idle, /資料都還在/);
+  const { root } = installedRoot(t);
+  const none = await run(SUMMARY, ['--uninstall', '--root', root, '--desktop', 'no', '--stopped', '0']);
+  assert.equal(none.code, 0, none.all);
+  assert.doesNotMatch(none.stdout, /已停掉/);
+  const some = await run(SUMMARY, ['--uninstall', '--root', root, '--desktop', 'no', '--stopped', '5']);
+  assert.equal(some.code, 0, some.all);
+  assert.match(some.stdout, /已停掉小主腦/);
 });
 
 test('uninstall lines keep the data, give the folder and the Desktop restart hint', async (t) => {

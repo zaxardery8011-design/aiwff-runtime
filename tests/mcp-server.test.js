@@ -163,6 +163,7 @@ function makeRuntime(state = {}) {
     ],
     workerMode: state.workerMode || 'claude',
     chatMode: state.chatMode || 'both',
+    claudeTaskScope: state.claudeTaskScope || 'closed',
     postStatus: state.postStatus || 201,
   };
   runtime.server = http.createServer((req, res) => {
@@ -190,7 +191,7 @@ function makeRuntime(state = {}) {
         return;
       }
       if (req.method === 'GET' && url.pathname === '/api/settings') {
-        sendJson(res, 200, { ok: true, worker_mode: runtime.workerMode, chat_mode: runtime.chatMode });
+        sendJson(res, 200, { ok: true, worker_mode: runtime.workerMode, chat_mode: runtime.chatMode, claude_task_scope: runtime.claudeTaskScope });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/api/tasks') {
@@ -259,12 +260,12 @@ function makeRuntime(state = {}) {
   return runtime;
 }
 
-async function withRuntime(state, body) {
+async function withRuntime(state, body, extraEnvLines = '') {
   const runtime = makeRuntime(state);
   await runtime.listen();
   let client = null;
   try {
-    client = new McpClient(makeRoot(`PORT=${runtime.port}\r\nAIWFF_RUNTIME_TOKEN=${TOKEN}\r\n`));
+    client = new McpClient(makeRoot(`PORT=${runtime.port}\r\nAIWFF_RUNTIME_TOKEN=${TOKEN}\r\n${extraEnvLines}`));
     await body(client, runtime);
   } finally {
     if (client) {
@@ -395,8 +396,12 @@ test('工具清單固定順序，名稱合法，都有描述和 schema，new_tas
     const newTask = first.result.tools.find((tool) => tool.name === 'aiwff_new_task');
     assert.match(newTask.description, /額度/);
     assert.deepEqual(newTask.inputSchema.required, ['instruction']);
-    // 模型看不到手冊，已知限制要在描述裡。
+    // 模型看不到手冊，實際範圍要在描述裡。
     assert.match(newTask.description, /不要重開/);
+    assert.match(newTask.description, /只能改自己的工作資料夾/);
+    assert.match(newTask.description, /不能跑命令/);
+    assert.match(newTask.description, /以回傳文字為準/);
+    assert.doesNotMatch(newTask.description, /連結果檔都寫不了/);
     // client 靠這兩個旗標分得出哪個工具會花額度。
     assert.equal(newTask.annotations.destructiveHint, true);
     for (const tool of first.result.tools.filter((item) => item !== newTask)) {
@@ -494,10 +499,27 @@ test('aiwff_status：mock 要講明是模擬，還沒接 AI', async () => {
   await withRuntime({ workerMode: 'mock' }, async (client) => {
     const text = resultText(await client.callTool('aiwff_status'));
     assert.match(text, /模擬.*還沒接 AI/);
-    // 可攜版的 node 不在 PATH：模型轉述「跑 npm run connect」使用者照做會錯。
-    assert.match(text, /connect-brain\.cmd/);
-    assert.doesNotMatch(text, /npm run/);
+    // 沒有安裝資料夾的 clone 沒有那支 .cmd，講 npm run connect。
+    assert.match(text, /npm run connect/);
+    assert.doesNotMatch(text, /connect-brain\.cmd/);
   });
+});
+
+test('裝好的 Root 有 connect-brain.cmd 時講雙擊：可攜版的 node 不在 PATH，npm run 跑不了', async () => {
+  const runtime = makeRuntime({ workerMode: 'mock' });
+  await runtime.listen();
+  const root = makeRoot(`PORT=${runtime.port}\r\nAIWFF_RUNTIME_TOKEN=${TOKEN}\r\n`);
+  const connector = path.resolve(root, '..', '..', 'connect-brain.cmd');
+  fs.writeFileSync(connector, '@echo off\r\n');
+  const client = new McpClient(root);
+  try {
+    const text = resultText(await client.callTool('aiwff_status'));
+    assert.ok(text.includes(connector), text);
+    assert.doesNotMatch(text, /npm run/);
+  } finally {
+    await client.close();
+    await runtime.close();
+  }
 });
 
 test('runtime 沒開：五個工具都回 isError 和開法，server 不掛；開起來後同一個程序接得上', async () => {
@@ -651,9 +673,27 @@ test('aiwff_new_task：AIWFF_MODE=chat 時拒絕，不比 WebUI 鬆', async () =
   });
 });
 
-test('aiwff_new_task：Claude 大腦回傳講清楚限制，別的大腦不講', async () => {
-  await withRuntime({ workerMode: 'claude' }, async (client) => {
-    assert.match(resultText(await client.callTool('aiwff_new_task', { instruction: '做事' })), /不要重開/);
+// .env 改了沒重開時 runtime 還是舊設定：範圍一律看 runtime 回報，.env 怎麼寫都不算。
+const OPENED_IN_ENV_ONLY = 'AIWFF_CLAUDE_PERMISSION_MODE=acceptEdits\r\n';
+
+test('aiwff_new_task：Claude 大腦回傳講 runtime 實際的範圍，沒開放講怎麼開，別的大腦不講', async () => {
+  await withRuntime({ workerMode: 'claude', claudeTaskScope: 'workspace' }, async (client) => {
+    const text = resultText(await client.callTool('aiwff_new_task', { instruction: '做事' }));
+    assert.match(text, /只能改自己的工作資料夾/);
+    assert.match(text, /不能跑命令/);
+    assert.match(text, /不要重開/);
+    assert.doesNotMatch(text, /連結果檔都寫不了/);
+  });
+  await withRuntime({ workerMode: 'claude', claudeTaskScope: 'closed' }, async (client) => {
+    const text = resultText(await client.callTool('aiwff_new_task', { instruction: '做事' }));
+    assert.match(text, /連結果檔都寫不了/);
+    assert.match(text, /npm run connect/);
+    assert.match(text, /不要重開/);
+  }, OPENED_IN_ENV_ONLY);
+  await withRuntime({ workerMode: 'claude', claudeTaskScope: 'unrestricted' }, async (client) => {
+    const text = resultText(await client.callTool('aiwff_new_task', { instruction: '做事' }));
+    assert.match(text, /跳過核可/);
+    assert.doesNotMatch(text, /只能改自己的工作資料夾/);
   });
   await withRuntime({ workerMode: 'openai_compatible' }, async (client) => {
     assert.doesNotMatch(resultText(await client.callTool('aiwff_new_task', { instruction: '做事' })), /不要重開/);
@@ -756,6 +796,21 @@ test('aiwff_task_result：failed、blocked 回原因，不是 result not ready',
       assert.equal(runtime.requests.some((item) => item.path.endsWith('/result')), false);
     });
   }
+});
+
+test('aiwff_task_result：等回答時分開放過和沒開放，開放過的不再講交不出結果', async () => {
+  const task = { id: TASK_ID, title: '報告', status: 'blocked', blocked_reason: 'question', has_question: true };
+  await withRuntime({ tasks: [task], claudeTaskScope: 'workspace' }, async (client) => {
+    const text = resultText(await client.callTool('aiwff_task_result', { task_id: TASK_ID }));
+    assert.match(text, /等使用者回答/);
+    assert.match(text, /只能改自己的工作資料夾/);
+    assert.doesNotMatch(text, /連結果檔都寫不了/);
+  });
+  await withRuntime({ tasks: [task], claudeTaskScope: 'closed' }, async (client) => {
+    const text = resultText(await client.callTool('aiwff_task_result', { task_id: TASK_ID }));
+    assert.match(text, /連結果檔都寫不了/);
+    assert.match(text, /npm run connect/);
+  }, OPENED_IN_ENV_ONLY);
 });
 
 test('aiwff_task_result：查無、空 id 回 isError；id 會編碼不能串路徑', async () => {

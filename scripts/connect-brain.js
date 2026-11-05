@@ -230,6 +230,8 @@ function planClaude(claude, current) {
       // 內附 exe 也寫 claude：runtime 用 cmd /d /s /c 起它，含空白的完整路徑會被切斷，版本資料夾更新後也會過期。
       // start-runtime.cmd 每次啟動用 --claude-dir 找最新的資料夾補進 PATH。
       CLAUDE_CMD: 'claude',
+      // 背景任務沒有人按允許，不開這個連結果檔都寫不了。見 agent/index.js 的 appendClaudeBoundaryArgs。
+      AIWFF_CLAUDE_PERMISSION_MODE: 'acceptEdits',
       AIWFF_WORKER_PROVIDER: '',
       AIWFF_CHAT_TIMEOUT_SEC: current.AIWFF_CHAT_TIMEOUT_SEC || REAL_CHAT_TIMEOUT_SEC,
     },
@@ -256,6 +258,7 @@ function planOllama(ollama, model, current) {
     updates: {
       AIWFF_MODE: 'both',
       MOCK_WORKER: '',
+      AIWFF_CLAUDE_PERMISSION_MODE: '',
       AIWFF_WORKER_PROVIDER: 'openai_compatible',
       AIWFF_OPENAI_BASE_URL: `${ollama.url}/v1`,
       AIWFF_OPENAI_MODEL: chosen,
@@ -272,6 +275,7 @@ function planMock() {
       MOCK_WORKER: '1',
       ENABLE_REAL_CLAUDE_WORKER: '',
       CLAUDE_CMD: 'claude',
+      AIWFF_CLAUDE_PERMISSION_MODE: '',
       AIWFF_WORKER_PROVIDER: '',
       AIWFF_OPENAI_BASE_URL: '',
       AIWFF_OPENAI_MODEL: '',

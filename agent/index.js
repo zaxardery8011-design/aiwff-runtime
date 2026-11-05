@@ -1056,6 +1056,7 @@ function getSettingsSnapshot() {
     worker_mode: runtimeWorkerMode(),
     chat_mode: runtimeChatMode(),
     confirm_auto_task: confirmAutoTaskEnabled(),
+    claude_task_scope: claudeTaskScope(),
     bots: botsSettingsSnapshot(),
     default_worker_timeout_sec: DEFAULT_WORKER_TIMEOUT_SEC,
     max_worker_timeout_sec: MAX_WORKER_TIMEOUT_SEC,
@@ -1651,7 +1652,8 @@ function onTaskSettled(task) {
 }
 
 // askQuestions：只有 Claude worker 會判讀 BLOCKED: 問題，agy 那條不教它問（問了也接不住，只會變成沒產出的失敗）。
-function buildClaudePrompt(task, { askQuestions = true } = {}) {
+// workspaceResult：worker 碰不到 data/artifacts 時，結果和上一棒的舊結果都放它自己的工作資料夾。
+function buildClaudePrompt(task, { askQuestions = true, workspaceResult = false } = {}) {
   const systemPrompt = readTextFileIfExists(path.join(ROOT_DIR, 'CLAUDE.md'));
   const facts = readTextFileIfExists(path.join(MEMORY_DIR, 'facts.md'));
   const preferences = readTextFileIfExists(path.join(MEMORY_DIR, 'preferences.md'));
@@ -1667,9 +1669,9 @@ ${preferences}
 指令: ${task.instruction}
 任務ID: ${task.id}
 
-${buildCheckpointPromptSection(task)}
+${buildCheckpointPromptSection(task, workspaceResult ? previousWorkerResultPath(task.id) : previousArtifactPath(task.id))}
 
-結果請寫到: ${artifactResultPath(task.id)}
+結果請寫到: ${workspaceResult ? workerResultPath(task.id) : artifactResultPath(task.id)}
 最後一行必須寫: DONE: <一句話說你完成了什麼>
 ${askQuestions ? QUESTION_PROMPT_SECTION : ''}`;
 }
@@ -1743,6 +1745,37 @@ function checkpointPath(taskId) {
   return path.join(taskWorkspacePath(taskId), CHECKPOINT_FILENAME);
 }
 
+// 開了 acceptEdits 的 Claude worker 碰不到 data/artifacts：結果先寫在自己的 workspace，
+// 收尾由 runtime 搬過去，其他任務才改不到它。
+const WORKER_RESULT_FILENAME = 'RESULT.md';
+const WORKER_PREVIOUS_RESULT_FILENAME = 'RESULT.prev.md';
+
+function workerResultPath(taskId) {
+  return path.join(taskWorkspacePath(taskId), WORKER_RESULT_FILENAME);
+}
+
+function previousWorkerResultPath(taskId) {
+  return path.join(taskWorkspacePath(taskId), WORKER_PREVIOUS_RESULT_FILENAME);
+}
+
+// 回傳這件任務有沒有結果檔。worker 已經結束才呼叫。lstat 不跟著連結走：
+// worker 種的連結不能把 .env 這類別的檔案變成任務結果。
+function collectWorkerResult(taskId) {
+  const staged = workerResultPath(taskId);
+  try {
+    if (fs.lstatSync(staged).isFile()) {
+      fs.renameSync(staged, artifactResultPath(taskId));
+    } else {
+      logStderr(`worker result ignored, not a regular file (${taskId})`, staged);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      logStderr(`worker result could not be collected (${taskId})`, error);
+    }
+  }
+  return fs.existsSync(artifactResultPath(taskId));
+}
+
 // 讀 checkpoint：回傳 { steps, rejected, partial }。
 // - steps：已完成的步驟（去重、保留先後）；檔不在就是空陣列，等於從頭做。
 // - 只採用「以換行結尾」的行：最後一行沒換行，代表上一棒寫到一半被砍，那一步不算做完（partial 記下它）。
@@ -1794,19 +1827,22 @@ function previousArtifactPath(taskId, prevSuffix = '.result.prev.md') {
 
 function setAsidePreviousArtifacts(taskId) {
   const moved = [];
-  for (const [suffix, prevSuffix] of PREVIOUS_ARTIFACT_SUFFIXES) {
-    const current = path.join(ARTIFACTS_DIR, `${taskId}${suffix}`);
+  const pairs = PREVIOUS_ARTIFACT_SUFFIXES.map(([suffix, prevSuffix]) => [
+    path.join(ARTIFACTS_DIR, `${taskId}${suffix}`),
+    previousArtifactPath(taskId, prevSuffix),
+  ]);
+  pairs.push([workerResultPath(taskId), previousWorkerResultPath(taskId)]);
+  for (const [current, previous] of pairs) {
     if (!fs.existsSync(current)) {
       continue;
     }
-    const previous = previousArtifactPath(taskId, prevSuffix);
     fs.renameSync(current, previous);
     moved.push(previous);
   }
   return moved;
 }
 
-function buildCheckpointPromptSection(task) {
+function buildCheckpointPromptSection(task, previous) {
   const lines = [
     '## 斷點續傳',
     `每做完一個步驟，就在 ${checkpointPath(task.id)} 追加一行，寫那個步驟的名稱（一行一步，每行結尾要換行，不要改舊的行）。`,
@@ -1818,7 +1854,6 @@ function buildCheckpointPromptSection(task) {
       lines.push(`- ${step}`);
     }
   }
-  const previous = previousArtifactPath(task.id);
   if (fs.existsSync(previous)) {
     lines.push(`上一棒留下的結果檔（可能沒寫完）已改名為 ${previous}，可以參考；這一棒要把完整結果重新寫到下面的結果路徑。`);
   }
@@ -1926,8 +1961,10 @@ function classifyEnvFailure(output, { spawnError = null, command = '' } = {}) {
 // spawn 前先確認 worker 指令找得到。CLAUDE_CMD 設成打錯的完整路徑時，Windows 的 cmd.exe
 // 回的是跟著語系走的錯誤字（中文版在管道裡是亂碼、含空白的路徑還會被切斷），靠錯誤字判不出來；
 // 所以含路徑分隔符的就直接看檔案在不在，裸指令名就照 cmd／shell 的規則在 PATH（Windows 再加 PATHEXT 與 cwd）上找。
+// searchCwd 要跟真正起程序的方式一致：Claude 那條的 cmd.exe 不看 cwd（見 spawnClaudeProcess），算進來就會把
+// worker 種在 workspace 的檔案當成「找得到」。
 // 只回答「找不找得到」；找得到但跑不起來的，照舊交給 spawn 的錯誤與 classifyEnvFailure。
-function workerCommandExists(command, cwd = ROOT_DIR) {
+function workerCommandExists(command, cwd = ROOT_DIR, { searchCwd = true } = {}) {
   const name = String(command || '').trim().replace(/^"(.*)"$/, '$1');
   if (!name) {
     return false;
@@ -1951,7 +1988,7 @@ function workerCommandExists(command, cwd = ROOT_DIR) {
     .split(path.delimiter)
     .map((dir) => dir.trim().replace(/^"(.*)"$/, '$1'))
     .filter(Boolean);
-  if (isWindows) {
+  if (isWindows && searchCwd) {
     dirs.unshift(cwd);
   }
   return dirs.some((dir) => existsWithExtensions(path.join(dir, name)));
@@ -1979,8 +2016,35 @@ function shouldUseDangerousClaudeBypass() {
   return envFlag('CLAUDE_BYPASS_APPROVALS') && envFlag('AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS');
 }
 
+// --print 沒有人按允許，不開的話 worker 連自己的結果檔都寫不了。acceptEdits 放行工作資料夾和 --add-dir 裡的
+// 檔案編輯，所以開了它邊界要一起收：不帶 --add-dir（data/artifacts 是所有任務共用的，結果改寫在工作資料夾，
+// 見 collectWorkerResult）；工具走白名單、不載 MCP，不跟著使用者全域設定多出命令工具和連接器。
+// 只收這一個值：跳過核可只走 CLAUDE_BYPASS_APPROVALS 那條雙重確認。
+const ACCEPTED_CLAUDE_PERMISSION_MODE = 'acceptEdits';
+const CLAUDE_WORKER_TOOLS = 'Read,Write,Edit,Glob,Grep';
+
+function claudeEditsEnabled() {
+  return String(process.env.AIWFF_CLAUDE_PERMISSION_MODE || '').trim() === ACCEPTED_CLAUDE_PERMISSION_MODE;
+}
+
+// 給 /api/settings：MCP 要講 runtime 實際的範圍，.env 改了沒重開時兩邊不一樣。
+function claudeTaskScope() {
+  if (shouldUseDangerousClaudeBypass()) {
+    return 'unrestricted';
+  }
+  return claudeEditsEnabled() ? 'workspace' : 'closed';
+}
+
 function appendClaudeBoundaryArgs(args) {
-  args.push('--add-dir', ARTIFACTS_DIR);
+  const permissionMode = String(process.env.AIWFF_CLAUDE_PERMISSION_MODE || '').trim();
+  if (claudeEditsEnabled()) {
+    args.push('--permission-mode', permissionMode, '--tools', CLAUDE_WORKER_TOOLS, '--strict-mcp-config');
+  } else {
+    args.push('--add-dir', ARTIFACTS_DIR);
+    if (permissionMode) {
+      logStderr('SECURITY WARNING', `AIWFF_CLAUDE_PERMISSION_MODE ignored; only ${ACCEPTED_CLAUDE_PERMISSION_MODE} is accepted.`);
+    }
+  }
 
   const allowedTools = String(process.env.AIWFF_CLAUDE_ALLOWED_TOOLS || '').trim();
   if (allowedTools) {
@@ -2003,9 +2067,12 @@ function spawnClaudeProcess(claudeCmd, args, optionsOverride = {}) {
     return spawn(claudeCmd, args, options);
   }
 
+  // cmd.exe 找裸指令時預設先看目前資料夾，而 cwd 是 worker 寫得到的 workspace：它在裡面放一個 claude.cmd，
+  // 下一棒續跑就變成跑它，等於繞過 --disallowedTools。這個變數讓 cmd.exe 只看 PATH。
   const commandLine = [quoteWindowsCommand(claudeCmd), ...args.map(quoteWindowsCommand)].join(' ');
   return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], {
     ...options,
+    env: { ...options.env, NoDefaultCurrentDirectoryInExePath: '1' },
     windowsVerbatimArguments: true,
   });
 }
@@ -2013,7 +2080,7 @@ function spawnClaudeProcess(claudeCmd, args, optionsOverride = {}) {
 function spawnClaudeWorker(task, attempt = 1) {
   ensureDirectories();
   const claudeCmd = process.env.CLAUDE_CMD || 'claude';
-  const fullPrompt = buildClaudePrompt(task);
+  const fullPrompt = buildClaudePrompt(task, { workspaceResult: claudeEditsEnabled() });
   const runningTask = updateTaskStatus(task, 'running');
   const timeoutMs = normalizeWorkerTimeoutSec(task) * 1000;
   const workerCwd = taskWorkspacePath(task.id);
@@ -2032,7 +2099,7 @@ function spawnClaudeWorker(task, attempt = 1) {
     logStderr(warning, `task=${task.id}`);
     appendProgressText(task.id, warning);
   }
-  if (!workerCommandExists(claudeCmd, workerCwd)) {
+  if (!workerCommandExists(claudeCmd, workerCwd, { searchCwd: false })) {
     settleEnvFailure(runningTask, `worker command not found: ${claudeCmd}`, envFailureOf('missing_tool'), attempt);
     return;
   }
@@ -2097,7 +2164,7 @@ function spawnClaudeWorker(task, attempt = 1) {
       // 兩邊都空就明講「兩條管道都沒輸出」，別讓帳上只剩一個數字。
       const tail = stderr.trim().slice(-1000) || stdout.trim().slice(-1000);
       failureReason = `Claude exited with ${exitReason}: ${tail || 'no stderr or stdout output'}`;
-    } else if (!fs.existsSync(artifactResultPath(task.id))) {
+    } else if (!collectWorkerResult(task.id)) {
       // worker 問問題：不算失敗、不重試，停成 blocked 等人回答。
       const question = workerQuestionFromStdout(stdout);
       if (question) {
@@ -4432,6 +4499,9 @@ module.exports = {
   workerCommandExists,
   // worker 子程序的環境變數：拿掉 runtime 自己的密鑰，其他照舊。
   buildWorkerEnv,
+  // Claude worker 的邊界：權限參數和起程序的方式，要直接驗得到「工作資料夾的東西不會被當成 claude 跑」。
+  appendClaudeBoundaryArgs,
+  spawnClaudeProcess,
   taskEventSummary,
   MAX_TASK_RETRIES,
   RETRY_BACKOFF_MS,

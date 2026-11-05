@@ -15,6 +15,7 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 const ENV_PATH = path.join(ROOT_DIR, '.env');
 // install.ps1 把 repo 放在 <Root>\suite\aiwff-runtime，launcher 在 <Root>。
 const LAUNCHER_PATH = path.resolve(ROOT_DIR, '..', '..', 'start-runtime.cmd');
+const CONNECT_BRAIN_PATH = path.resolve(ROOT_DIR, '..', '..', 'connect-brain.cmd');
 
 const SERVER_INFO = { name: 'aiwff', version: '0.1.0' };
 const MODERN_VERSION = '2026-07-28';
@@ -44,14 +45,14 @@ const REDACTED = '[已遮蔽]';
 const NO_ARGUMENTS_SCHEMA = { type: 'object', additionalProperties: false };
 
 const BRAIN_LABELS = {
-  mock: 'mock（模擬，還沒接 AI，任務不會真的做事；要接 AI 就雙擊安裝資料夾的 connect-brain.cmd）',
   claude: 'claude（Claude CLI）',
   openai_compatible: 'openai_compatible（OpenAI 相容端點，例如本機 Ollama）',
 };
 
-// 模型看不到手冊，所以 Claude 大腦交不出結果這件事要寫在工具描述和回傳文字裡，不然它會重開一件再花一次。
+// 模型看不到手冊，所以 Claude 大腦的實際範圍要寫在工具描述和回傳文字裡，不然它會重開一件再花一次。
 const CLAUDE_TASK_LIMIT =
-  '目前的限制：大腦是 Claude 時，背景任務沒有人按允許，連結果檔都寫不了，多半停在等使用者回答，也可能重試 3 次才停，都會用掉額度。同一件不要重開。';
+  '背景任務只能改自己的工作資料夾，不能跑命令、程式或腳本，也不能上網。做不到的工作會停下來問使用者，問的是開放權限時回答解不開，同一件不要重開。';
+const CLAUDE_TASK_UNRESTRICTED = '這個小主腦開了跳過核可，背景任務動得到這個帳號的所有檔案。要交辦什麼，先跟使用者確認過。';
 
 // 協定層的錯：走 JSON-RPC error。
 class RpcError extends Error {
@@ -104,6 +105,29 @@ function runtimeConfig() {
 
 function launchHint() {
   return fs.existsSync(LAUNCHER_PATH) ? `雙擊 ${LAUNCHER_PATH}` : `在 ${ROOT_DIR} 跑 npm run web`;
+}
+
+function connectHint() {
+  return fs.existsSync(CONNECT_BRAIN_PATH) ? `雙擊 ${CONNECT_BRAIN_PATH}` : `在 ${ROOT_DIR} 跑 npm run connect`;
+}
+
+function brainLabel(mode) {
+  if (mode === 'mock') {
+    return `mock（模擬，還沒接 AI，任務不會真的做事；要接 AI 就${connectHint()}）`;
+  }
+  return BRAIN_LABELS[mode] || mode;
+}
+
+// 看 runtime 回報的值，不看 .env：改了 .env 沒重開時，任務跑的還是舊設定。
+function claudeTaskNote(scope) {
+  if (scope === 'workspace') {
+    return CLAUDE_TASK_LIMIT;
+  }
+  if (scope === 'unrestricted') {
+    return CLAUDE_TASK_UNRESTRICTED;
+  }
+  // 既有 .env 沒帶 -Brain 時安裝不會改它，這種小主腦的任務還是交不出結果。
+  return `這個小主腦還沒開放寫檔：背景任務沒有人按允許，連結果檔都寫不了，多半停在等使用者回答，也可能重試 3 次才停，都會用掉額度。同一件不要重開。要開放：${connectHint()}，選 Claude，再重開小主腦。`;
 }
 
 function callRuntime(method, route, { body, auth = false } = {}) {
@@ -174,7 +198,7 @@ async function toolStatus() {
   const running = counts.running || 0;
   return [
     `小主腦運作中（http://127.0.0.1:${hud.port}，已開 ${hud.uptime_sec} 秒）`,
-    `大腦模式：${BRAIN_LABELS[hud.worker_mode] || hud.worker_mode}`,
+    `大腦模式：${brainLabel(hud.worker_mode)}`,
     `進行中任務：${pending + running} 件（排隊 ${pending}、執行中 ${running}）`,
     `其他任務：卡住 ${counts.blocked || 0}、失敗 ${counts.failed || 0}、完成 ${counts.done || 0}`,
   ].join('\n');
@@ -198,7 +222,7 @@ async function toolNewTask(args) {
   // POST /api/tasks 回裸任務物件，不像其他端點包 {ok,…}。
   const task = assertOk(await callRuntime('POST', '/api/tasks', { body, auth: true }));
   const accepted = `已交給小主腦背景跑。任務 id：${task.id}，狀態：${task.status}。跑完用 aiwff_task_result 帶這個 id 讀結果。`;
-  return settings.worker_mode === 'claude' ? `${accepted}\n${CLAUDE_TASK_LIMIT}` : accepted;
+  return settings.worker_mode === 'claude' ? `${accepted}\n${claudeTaskNote(settings.claude_task_scope)}` : accepted;
 }
 
 async function toolTasks(args) {
@@ -214,13 +238,14 @@ async function toolTasks(args) {
   return [`最近 ${rows.length} 件任務（共 ${tasks.length} 件，新到舊）：`, ...rows].join('\n');
 }
 
-function unfinishedTaskText(task) {
+async function unfinishedTaskText(task) {
   if (task.status === 'failed') {
     return `任務失敗：${task.error || task.last_error || '沒有記錄原因'}`;
   }
   if (task.status === 'blocked') {
     if (task.has_question) {
-      return '任務在等使用者回答，請到 WebUI 回答後才會續跑。如果它問的是能不能開放寫入權限，回答解不開：這是 Claude 大腦目前的限制，同一件不要重開。';
+      const settings = assertOk(await callRuntime('GET', '/api/settings'));
+      return `任務在等使用者回答，請到 WebUI 回答後才會續跑。如果它問的是開放權限，回答解不開。${claudeTaskNote(settings.claude_task_scope)}`;
     }
     return `任務卡住了（${task.blocked_reason || '沒有記錄原因'}）${task.last_error ? `：${task.last_error}` : ''}`;
   }
@@ -240,7 +265,7 @@ async function toolTaskResult(args) {
   const { task } = assertOk(taskResponse);
   // failed、blocked 的 /result 只回 result not ready，原因要從任務本身讀。
   if (task.status !== 'done') {
-    return unfinishedTaskText(task);
+    return await unfinishedTaskText(task);
   }
   const result = assertOk(await callRuntime('GET', `${route}/result`, { auth: true }));
   return String(result.content);
@@ -277,7 +302,7 @@ const TOOLS = [
   {
     name: 'aiwff_new_task',
     description:
-      `把一件工作交給小主腦在背景跑，跟 WebUI 建任務同一條路。會用掉使用者接的大腦額度（Claude 訂閱或 API 用量），只在使用者明確要交辦時才呼叫，不要拿來試跑。立刻回任務 id，不等結果；結果用 aiwff_task_result 讀。${CLAUDE_TASK_LIMIT}`,
+      `把一件工作交給小主腦在背景跑，跟 WebUI 建任務同一條路。會用掉使用者接的大腦額度（Claude 訂閱或 API 用量），只在使用者明確要交辦時才呼叫，不要拿來試跑。立刻回任務 id，不等結果；結果用 aiwff_task_result 讀。大腦是 Claude 時，範圍以回傳文字為準，一般是：${CLAUDE_TASK_LIMIT}`,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: {
       type: 'object',
