@@ -2932,6 +2932,7 @@
         state.lastSyncMs = Date.now();
         state.online = true;
         state.loadError = null;
+        updateDoneSignal();
       } catch (error) {
         // 其他清單保留上次成功的資料；原因交給失敗行顯示（renderHeader 會蓋掉 health-text）
         state.health = null;
@@ -2943,6 +2944,26 @@
       renderLoadFail();
       await refreshSession();
       await refreshChatView();
+    }
+
+    // 分頁在背景時任務完成：標題前加「(N) ✓」，回到前景就清掉。
+    // 只算「進入背景之後才變成 done」的任務：進背景時（或背景中第一次讀到清單時）記下已 done 的 id，
+    // 重新整理、斷線重連後重送的舊 done 都在這份名單裡，不會被算進去。
+    var doneSignal = { baseline: null, count: 0, baseTitle: document.title };
+    function updateDoneSignal() {
+      var doneIds = (state.tasks || []).filter(function(task) { return task.status === 'done'; }).map(function(task) { return task.id; });
+      if (!document.hidden) {
+        doneSignal.baseline = null;
+        doneSignal.count = 0;
+      } else if (!doneSignal.baseline) {
+        if (state.lastSyncMs) {
+          doneSignal.baseline = {};
+          doneIds.forEach(function(id) { doneSignal.baseline[id] = true; });
+        }
+      } else {
+        doneSignal.count = doneIds.filter(function(id) { return !doneSignal.baseline[id]; }).length;
+      }
+      document.title = doneSignal.count ? '(' + doneSignal.count + ') ✓ ' + doneSignal.baseTitle : doneSignal.baseTitle;
     }
 
     // 資料新鮮度／連線狀態（借鏡 multi-agent orchestration dashboard：面板必須讓人一眼看出資料是不是 stale）
@@ -3349,6 +3370,8 @@
     // 清單與對話不等整輪 refresh：載入時就先讀一次。
     refreshChatView();
     setInterval(refresh, 5000);
+    // visibilitychange 在 document 上觸發、會冒泡到 window
+    window.addEventListener('visibilitychange', updateDoneSignal);
   </script>
 </body>
 </html>
