@@ -667,6 +667,7 @@
       background: color-mix(in oklch, var(--bg-2), var(--accent) 10%);
     }
     .log-block { display: grid; gap: 8px; margin-bottom: 12px; }
+    .progress-summary { text-align: left; font: inherit; color: inherit; background: transparent; border: 1px solid var(--border-soft); border-radius: 6px; padding: 6px 8px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     /* JARVIS HUD reactor overlay, adapted to public-safe runtime endpoints. */
     #view-hud { position: relative; }
@@ -1305,6 +1306,8 @@
       progress: {},
       // 進度讀取失敗的具名原因（taskId → 文字）；有值時畫失敗行，不畫成空白進度
       progressErrors: {},
+      // 進度摘要列點開的任務（taskId → true）
+      progressExpanded: {},
       // 各清單的截斷資訊（後端 truncation 欄位原樣存放），null = 後端未提供
       truncation: { events: null, inbox: null, progress: {}, trace: {} },
       traceTaskId: null,
@@ -2308,13 +2311,24 @@
       }).join('') : empty('尚無近期事件');
       setHtml('events-list', truncationRow(state.truncation.events) + html);
 
+      // 連續多行進度收成一列摘要（行數＋最新一行），點開才看全部（借鏡 opencode 活動列）；
+      // 展開狀態記在 state.progressExpanded，5 秒重畫不會被收回去。
       var progressRows = Object.keys(state.progress).map(function(taskId) {
         var lines = state.progress[taskId] || [];
         var error = state.progressErrors[taskId];
+        var body = '';
+        if (lines.length > 1) {
+          var open = !!state.progressExpanded[taskId];
+          body = '<button type="button" class="progress-summary" data-progress-toggle="' + escapeHtml(taskId) + '" aria-expanded="' + (open ? 'true' : 'false') + '">' +
+            (open ? '▾' : '▸') + ' ' + lines.length + ' 行進度 · 最新：<span class="soft">' + escapeHtml(lines[lines.length - 1]) + '</span></button>' +
+            (open ? '<pre>' + escapeHtml(lines.join('\n')) + '</pre>' : '');
+        } else if (lines.length || !error) {
+          body = '<pre>' + escapeHtml(lines.join('\n')) + '</pre>';
+        }
         return '<div class="log-block"><b class="mono">' + escapeHtml(taskId) + '</b>' +
           truncationRow(state.truncation.progress[taskId]) +
           (error ? '<div class="fail">進度讀取失敗：' + escapeHtml(error) + '</div>' : '') +
-          (lines.length || !error ? '<pre>' + escapeHtml(lines.join('\n')) + '</pre>' : '') + '</div>';
+          body + '</div>';
       });
       setHtml('progress-list', progressRows.join('') || empty('尚無進度紀錄'));
     }
@@ -3051,6 +3065,17 @@
 
     bindAnswerCards('tasks-list');
     bindAnswerCards('blocked-list');
+
+    var progressList = byId('progress-list');
+    if (progressList) {
+      progressList.addEventListener('click', function(event) {
+        var button = event.target.closest('[data-progress-toggle]');
+        if (!button) return;
+        var taskId = button.dataset.progressToggle;
+        state.progressExpanded[taskId] = !state.progressExpanded[taskId];
+        renderEvents();
+      });
+    }
 
     var memoryList = byId('memory-list');
     if (memoryList) {

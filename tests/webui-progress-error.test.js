@@ -19,10 +19,10 @@ function extractFunction(name) {
   throw new Error('function ' + name + ' 括號不成對');
 }
 
-function render(progress, progressErrors) {
+function render(progress, progressErrors, progressExpanded = {}) {
   const out = {};
   const context = {
-    state: { events: [], progress, progressErrors, truncation: { events: null, progress: {} } },
+    state: { events: [], progress, progressErrors, progressExpanded, truncation: { events: null, progress: {} } },
     setHtml: (id, html) => { out[id] = html; },
     truncationRow: () => '',
     empty: (text) => '<empty>' + text + '</empty>',
@@ -50,4 +50,23 @@ test('讀取成功：照常顯示內容、沒有錯誤行', () => {
   const html = render({ t1: ['line a'] }, {});
   assert.doesNotMatch(html, /進度讀取失敗/);
   assert.match(html, /<pre>line a<\/pre>/);
+});
+
+test('多行進度預設收成一列摘要：行數＋最新一行，不展開全文', () => {
+  const html = render({ t1: ['step 1', 'step 2', 'step <3>'] }, {});
+  assert.match(html, /data-progress-toggle="t1" aria-expanded="false"/);
+  assert.match(html, /3 行進度 · 最新：<span class="soft">step &lt;3&gt;<\/span>/);
+  assert.doesNotMatch(html, /<pre>/);
+});
+
+test('點開後摘要列保留、下面列出全部進度', () => {
+  const html = render({ t1: ['step 1', 'step 2'] }, {}, { t1: true });
+  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, /<pre>step 1\nstep 2<\/pre>/);
+});
+
+test('多行進度＋讀取失敗：錯誤行和摘要列都在', () => {
+  const html = render({ t1: ['a', 'b'] }, { t1: '網路問題' });
+  assert.match(html, /進度讀取失敗：網路問題/);
+  assert.match(html, /2 行進度/);
 });
