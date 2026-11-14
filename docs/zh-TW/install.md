@@ -278,8 +278,8 @@ npm run demo
 
 ```text
 AIWFF Runtime listening on http://127.0.0.1:54330
-Task ID: 10fe665b-ffc3-4099-9d27-8cfd552cb17d
-Artifact: ...\data\artifacts\10fe665b-ffc3-4099-9d27-8cfd552cb17d.result.json
+Task ID: 00000000-0000-0000-0000-000000000000
+Artifact: ...\data\artifacts\00000000-0000-0000-0000-000000000000.result.json
 Status: done
 ✓ Demo completed — task lifecycle verified
 ```
@@ -295,9 +295,9 @@ npm run verify-demo
 這支會去檢查最新的 `.result.json` 是否存在、非空、`completed_at` 有值、任務狀態是 `done`。三行 `PASS` 就代表流程真的跑通了：
 
 ```text
-PASS artifact exists and is non-empty: ...\data\artifacts\10fe665b-...result.json
+PASS artifact exists and is non-empty: ...\data\artifacts\00000000-...result.json
 PASS artifact completed_at present: 2026-07-05T13:47:39.516Z
-PASS task status is done: 10fe665b-ffc3-4099-9d27-8cfd552cb17d
+PASS task status is done: 00000000-0000-0000-0000-000000000000
 ```
 
 ### 步驟 8：開瀏覽器控制台（WebUI）
