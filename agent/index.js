@@ -1024,6 +1024,23 @@ function botsDoctorCheck() {
   return { ok: false, detail: `${summary}；警告：${catalog.warnings.join('；')}`, warnings: catalog.warnings };
 }
 
+// doctor 的 features_off：一列講清楚哪些功能被環境變數關掉或換成模擬，免得把 mock 回覆當成真的。
+// 只是提醒，不算失敗（ok 永遠 true）；off 列出每一項的原因。
+function featuresOffCheck() {
+  const off = [];
+  if (chatBackend() === 'mock') {
+    off.push(
+      envFlag('MOCK_WORKER')
+        ? '任務和聊天用模擬回覆（MOCK_WORKER 有設）'
+        : '任務和聊天用模擬回覆（ENABLE_REAL_CLAUDE_WORKER 沒開）'
+    );
+  }
+  if (!process.env.TG_BOT_TOKEN) {
+    off.push('Telegram 關閉（TG_BOT_TOKEN 未填）');
+  }
+  return { ok: true, detail: off.length ? off.join('；') : '沒有功能被關掉或換成模擬', off };
+}
+
 function getDoctorReport() {
   const nodeMajor = Number(process.versions.node.split('.')[0]);
   const checks = [
@@ -1035,6 +1052,7 @@ function getDoctorReport() {
     { id: 'chat_mode', ...chatModeCheck() },
     { id: 'telegram', ...telegramDoctorCheck() },
     { id: 'bots', ...botsDoctorCheck() },
+    { id: 'features_off', ...featuresOffCheck() },
     { id: 'port', ok: true, detail: String(PORT) },
   ];
   return {
@@ -4345,6 +4363,7 @@ module.exports = {
   appendProgressText,
   listTasks,
   failedTaskBacklog,
+  featuresOffCheck,
   // 0 筆的具名理由是純函式，開出入口才驗得到「三種 0 分得開」。
   taskQueryZeroReason,
   installProcessGuards,
