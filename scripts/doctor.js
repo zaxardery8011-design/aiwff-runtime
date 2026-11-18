@@ -41,8 +41,51 @@ const RULE = {
   ENV_INVALID_ASSIGNMENT: 'env.parse.invalid_assignment',
   ENV_UNMATCHED_QUOTE: 'env.parse.unmatched_quote',
   ENV_UNSAFE_FLAG: 'env.unsafe_flag',
+  ENV_UNKNOWN_KEY: 'env.unknown_key',
   DOCTOR_RUNTIME: 'doctor.runtime_error',
 };
+
+// .env 裡 runtime 會讀的鍵（盤點自 agent/、scripts/ 的 process.env 讀取與 .env.example）。
+// 不在這份清單的鍵 runtime 一律不讀：寫錯一個字母（TG_BOT_TOKN）或大小寫不對時，
+// 設定被靜默忽略、要等任務跑起來才發現。doctor 把它們逐條列出（欄位＋行號＋一句修法），
+// 但只當提醒，不翻紅燈——使用者自己放的其他鍵也會被列，不能因此擋住啟動。
+// runtime 新增讀取的鍵時要一起加進來，不然 doctor 會把它當成被忽略。
+const KNOWN_ENV_KEYS = new Set([
+  'PORT',
+  'AIWFF_RUNTIME_TOKEN',
+  'TG_BOT_TOKEN',
+  'ADMIN_TG_CHAT_ID',
+  'TG_API_BASE_URL',
+  'TG_POLL_BASE_MS',
+  'TG_POLL_MAX_BACKOFF_MS',
+  'TG_REQUEST_TIMEOUT_MS',
+  'AIWFF_MODE',
+  'AIWFF_CONFIRM_AUTO_TASK',
+  'AIWFF_CONFIRM_TTL_SEC',
+  'AIWFF_CHAT_TIMEOUT_SEC',
+  'AIWFF_BOTS_DIR',
+  'AIWFF_CHAT_STATE_FILE',
+  'AIWFF_CONVERSATIONS_DIR',
+  'CLAUDE_CMD',
+  'MOCK_WORKER',
+  'ENABLE_REAL_CLAUDE_WORKER',
+  'CLAUDE_BYPASS_APPROVALS',
+  'AIWFF_ALLOW_DANGEROUS_CLAUDE_BYPASS',
+  'AIWFF_CLAUDE_ALLOWED_TOOLS',
+  'AIWFF_CLAUDE_DISALLOWED_TOOLS',
+  'AIWFF_WORKER_PROVIDER',
+  'ENABLE_AGY_WORKER',
+  'AGY_CMD',
+  'AGY_MODEL',
+  'AGY_SKIP_PERMISSIONS',
+  'AIWFF_OPENAI_API_KEY',
+  'AIWFF_OPENAI_BASE_URL',
+  'AIWFF_OPENAI_MODEL',
+  'MAX_TASK_RESUMES',
+  'MAX_TASK_RETRIES',
+  'RETRY_BACKOFF_MS',
+  'WORKER_STALL_IDLE_SEC',
+]);
 
 function coverage(ranIds, declaredIds = DOCTOR_CHECK_IDS) {
   const ran = declaredIds.filter((id) => ranIds.includes(id));
@@ -164,9 +207,10 @@ function commandVersion(command) {
 function parseDotEnv() {
   const envPath = path.join(ROOT_DIR, '.env');
   const values = {};
+  const lineOf = {};
   const errors = [];
   if (!fs.existsSync(envPath)) {
-    return { exists: false, values, errors };
+    return { exists: false, values, lineOf, errors };
   }
 
   let raw;
@@ -176,7 +220,7 @@ function parseDotEnv() {
     // The file is there but unreadable: say why it did not load instead of
     // crashing into the generic runtime error.
     errors.push(makeReason(RULE.ENV_LOAD_FAILED, `.env exists but could not be read: ${error.message}`));
-    return { exists: true, values, errors };
+    return { exists: true, values, lineOf, errors };
   }
 
   const lines = raw.split(/\r?\n/);
@@ -200,9 +244,56 @@ function parseDotEnv() {
       value = value.slice(1, -1);
     }
     values[match[1]] = value;
+    lineOf[match[1]] = index + 1;
   });
 
-  return { exists: true, values, errors };
+  return { exists: true, values, lineOf, errors };
+}
+
+function editDistance(a, b) {
+  const prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i += 1) {
+    let diag = prev[0];
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const up = prev[j];
+      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = up;
+    }
+  }
+  return prev[b.length];
+}
+
+function closestKnownKey(key) {
+  const upper = key.toUpperCase();
+  let best = null;
+  let bestDistance = 3;
+  for (const known of KNOWN_ENV_KEYS) {
+    const distance = editDistance(upper, known);
+    if (distance < bestDistance) {
+      best = known;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+// 只列鍵名與行號，不印值（.env 裡可能是 token）。
+function envConfigFindings(parsedEnv) {
+  return Object.keys(parsedEnv.values)
+    .filter((key) => !KNOWN_ENV_KEYS.has(key))
+    .map((key) => {
+      const suggestion = closestKnownKey(key);
+      const hint = suggestion
+        ? `runtime reads ${suggestion}, not ${key}; rename it to ${suggestion}`
+        : `runtime does not read ${key}; remove it or check .env.example for the right name`;
+      return { rule_id: RULE.ENV_UNKNOWN_KEY, key, line: parsedEnv.lineOf[key], hint };
+    })
+    .sort((a, b) => a.line - b.line);
+}
+
+function formatFinding(item) {
+  return `.env line ${item.line}: ${item.key} is ignored — ${item.hint}`;
 }
 
 function envValue(parsedEnv, name) {
@@ -363,6 +454,11 @@ async function runJsonDoctor() {
     checkTelegramConfig(parsedEnv),
   ];
   const nextActions = [];
+  // 被忽略的鍵只是提醒：env_valid 的判決不變，沒有發現時輸出也一個欄位都不多。
+  const findings = envConfigFindings(parsedEnv);
+  if (findings.length) {
+    checks.find((check) => check.id === 'env_valid').findings = findings;
+  }
 
   for (const check of checks) {
     if (!check.ok) {
@@ -381,6 +477,9 @@ async function runJsonDoctor() {
       }
     }
   }
+  for (const item of findings) {
+    nextActions.push(`Check env_valid [${item.rule_id}]: ${formatFinding(item)}`);
+  }
 
   return {
     ok: checks.every((check) => check.ok),
@@ -393,6 +492,10 @@ async function runTextDoctor() {
   const node = checkNodeVersionText();
   const dir = checkTasksDirectoryText();
   const port = await checkPortAvailableText(PORT);
+  // 被忽略的 .env 鍵只印提醒，不算一項檢查、不改收尾判決；沒有發現時這段不印任何東西。
+  for (const item of envConfigFindings(parseDotEnv())) {
+    console.log(`WARN ${formatFinding(item)}`);
+  }
   // 三種收尾都要帶著分母走：PASS 沒帶分母最危險，但 WARN／FAIL 同樣會被當成「doctor 全跑過」。
   const coverageValue = coverage(TEXT_MODE_CHECK_IDS);
   const covered = formatCoverage(coverageValue);
