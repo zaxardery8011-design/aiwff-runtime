@@ -56,3 +56,22 @@ Any record added to this runtime that a later reader has to resolve ships this t
 3. **Mark every field rewritten on each write as unstable**, so no reader builds an identity or a dedup key on it.
 4. **If two producers write the same field in different formats, say so in the same row.** A reader that parses that field then branches on the producer instead of guessing.
 5. Adding a producer to an existing block updates this document in the same change. A row that no longer names a real line is a defect in this document, not a detail.
+
+## Changing the format of a block: upgrade the reader first
+
+The writer and the reader of these blocks are not always the same process, and they are not always updated together. In mock mode the worker writes the task record and the daemon reads it back; in every mode the worker appends `CHECKPOINT.txt` and the daemon reads it. A task record or checkpoint left on disk by an older run is also read by whatever version starts next — after an update, after `POST /api/tasks/<id>/resume`.
+
+So a format change ships in this order:
+
+1. **Reader first.** Change the reader so it accepts both the old and the new shape, and release that alone. Old records on disk and old workers keep working.
+2. **Writer second.** Only after every reader that can see the block accepts the new shape, switch the writer to produce it.
+3. **Drop the old shape last, if ever.** Records written before step 2 can still be on disk; removing old-shape support in the reader is a separate change, and it says what happens to those records.
+
+Doing it the other way round fails quietly in this runtime, not loudly. The readers swallow what they cannot parse instead of raising:
+
+- `taskSummary()` (`agent/index.js:569-596`) catches a failed `readJsonFile` and returns `''` — a new artifact shape it does not understand shows up as an empty summary, with no error.
+- `readCheckpoint()` (`agent/index.js:1732-1759`) drops lines that start with `#`, drops repeated lines, treats an unterminated last line as unfinished, and ignores a whole file that has NUL bytes or a UTF-16 BOM. A writer that starts emitting a new line format can lose steps from the next run's prompt; only a rejected whole file gets a named progress line, a dropped line gets nothing.
+
+When a change touches one of these blocks, the change also updates the table above (rule 5) and names, in its description, which step of this order it is.
+
+This follows the upgrade note in openai-agents-python v0.25.0, which changed its checkpoint format and asks that, when workers share checkpoints, the readers be upgraded before the writers.
