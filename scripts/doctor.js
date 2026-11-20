@@ -288,8 +288,16 @@ function checkEnvValid(parsedEnv) {
 function checkTelegramConfig(parsedEnv) {
   const token = envValue(parsedEnv, 'TG_BOT_TOKEN');
   const adminId = envValue(parsedEnv, 'ADMIN_TG_CHAT_ID');
+  // 輸出開了、目的地沒填：只說「required」讀起來像格式問題，讀的人不會知道東西正在被丟掉。
+  // runtime 這時進設定模式（bot 不回任何訊息），任務結果的 TG 推送也因 chat id 對不上 ADMIN_TG_CHAT_ID
+  // 只寫 stderr 不送——所以把後果講出來。
   if (token && !adminId) {
-    return makeCheck('tg_config_valid', false, 'ADMIN_TG_CHAT_ID is required when TG_BOT_TOKEN is set');
+    return makeCheck(
+      'tg_config_valid',
+      false,
+      'ADMIN_TG_CHAT_ID is required when TG_BOT_TOKEN is set — ' +
+        'Telegram output is enabled but has no destination, so bot replies and task-result messages will be dropped (not sent)',
+    );
   }
   return makeCheck('tg_config_valid', true, token ? 'Telegram token and admin chat id are both set' : 'Telegram token is not set');
 }
@@ -375,7 +383,7 @@ async function runJsonDoctor() {
       } else if (check.id === 'port_available') {
         nextActions.push(`Free port ${PORT} or set PORT to another value.`);
       } else if (check.id === 'tg_config_valid') {
-        nextActions.push('Set ADMIN_TG_CHAT_ID or clear TG_BOT_TOKEN.');
+        nextActions.push('Set ADMIN_TG_CHAT_ID or clear TG_BOT_TOKEN — until then Telegram output is dropped.');
       } else {
         nextActions.push(`Fix ${check.id}: ${check.detail}`);
       }
