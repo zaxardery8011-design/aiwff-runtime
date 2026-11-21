@@ -1501,8 +1501,14 @@ function notifyTelegramTaskDone(task) {
     return;
   }
   tgRequest(process.env.TG_BOT_TOKEN, 'sendMessage', { chat_id: chatId, text: telegramTaskSettledText(task) })
-    .then((data) => rememberTelegramQuestionMessage(task, chatId, data))
-    .catch(() => {});
+    .then((data) => {
+      if (data && data.ok === false) {
+        logStderr('task-done telegram', data.description || 'sendMessage returned ok:false');
+        return;
+      }
+      rememberTelegramQuestionMessage(task, chatId, data);
+    })
+    .catch((error) => logStderr('task-done telegram', error));
   delete tgPendingNotify[task.id];
 }
 
