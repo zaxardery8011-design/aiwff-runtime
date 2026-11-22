@@ -1171,7 +1171,7 @@
           </div>
           <div class="chat-messages" id="task-chat-messages" aria-live="polite"></div>
           <div class="chat-login-notice" id="task-chat-login" role="status" hidden>
-            尚未登入，不能對話或建立任務。請到跑 <code>npm run web</code> 的終端機，點「登入 WebUI：」後面那條登入連結。
+            尚未登入，不能對話或建立任務。請到跑 <code>npm run web</code> 的終端機，點「登入 WebUI：」後面那條登入連結；完整登入連結也寫在 <code>data/webui_login_url.txt</code>。
           </div>
           <div class="chat-input" id="task-chat-input-box">
             <div class="chat-input-row">
@@ -2022,7 +2022,9 @@
       var response = await fetch(route, options);
       var data = await response.json();
       if (!response.ok || data.ok === false) {
-        throw new Error(data.error || response.statusText);
+        var error = new Error(data.error || response.statusText);
+        error.status = response.status;
+        throw error;
       }
       return data;
     }
@@ -3153,7 +3155,8 @@
       } catch (error) {
         state.chatPendingConversation = null;
         addLocalChatMessage(conversationId, userMessage);
-        appendChatMessage('assistant', '送出失敗：' + error.message, timeMeta('系統'), false, { conversationId: conversationId });
+        var failText = error.status === 401 ? '登入已失效，請重新登入後再送一次' : '送出失敗：' + error.message;
+        appendChatMessage('assistant', failText, timeMeta('系統'), false, { conversationId: conversationId });
         // runtime 重啟會換 token，舊 cookie 失效 → 重查登入狀態。
         await refreshSession();
       } finally {
