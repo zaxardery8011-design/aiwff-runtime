@@ -115,6 +115,40 @@ function checkPortAvailableText(port) {
   });
 }
 
+// 真 worker 每個任務的 prompt 都帶這三個檔；agent/index.js 找不到檔時用空字串頂替，不會報錯。
+// 這裡只報「在不在、幾 bytes」，不印內容、不設大小門檻，也不算進 checks 分母或 exit code。
+const PROMPT_FILES = [
+  { relPath: 'CLAUDE.md', required: true },
+  { relPath: 'memory/facts.md', required: false },
+  { relPath: 'memory/preferences.md', required: false },
+];
+
+function reportPromptFilesText() {
+  for (const { relPath, required } of PROMPT_FILES) {
+    let stat;
+    try {
+      stat = fs.statSync(path.join(ROOT_DIR, relPath));
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        console.log(`WARN prompt file ${relPath} cannot be checked: ${error.message}`);
+      } else if (required) {
+        console.log(
+          `WARN prompt file ${relPath} not found — the real worker would run without it; ` +
+            'restore it, or copy a persona from templates/claude/',
+        );
+      } else {
+        console.log(`INFO prompt file ${relPath} not found (optional)`);
+      }
+      continue;
+    }
+    if (stat.isFile()) {
+      console.log(`INFO prompt file ${relPath} ${stat.size} bytes`);
+    } else {
+      console.log(`WARN prompt file ${relPath} is not a regular file`);
+    }
+  }
+}
+
 function makeReason(ruleId, reason) {
   return { rule_id: String(ruleId), reason: String(reason) };
 }
@@ -393,6 +427,7 @@ async function runTextDoctor() {
   const node = checkNodeVersionText();
   const dir = checkTasksDirectoryText();
   const port = await checkPortAvailableText(PORT);
+  reportPromptFilesText();
   // 三種收尾都要帶著分母走：PASS 沒帶分母最危險，但 WARN／FAIL 同樣會被當成「doctor 全跑過」。
   const coverageValue = coverage(TEXT_MODE_CHECK_IDS);
   const covered = formatCoverage(coverageValue);

@@ -1834,6 +1834,49 @@ test('doctor health record: a red verdict persists the named reason and a UTC ti
   assert.ok(text.record.coverage.not_run.includes('env_valid'), JSON.stringify(text.record.coverage));
 });
 
+test('doctor prompt files: each file the worker prompt loads is listed with its size, a missing brain file warns without changing the exit code', async () => {
+  const promptLines = (out) => out.split(/\r?\n/).filter((line) => /^(INFO|WARN) prompt file /.test(line));
+
+  // 三個檔都在：三列，bytes 對得上磁碟。
+  const present = runDoctor([], { PORT: String(await freePort()) });
+  assert.equal(present.code, 0, present.out);
+  assert.deepEqual(
+    promptLines(present.out),
+    ['CLAUDE.md', 'memory/facts.md', 'memory/preferences.md'].map(
+      (relPath) => `INFO prompt file ${relPath} ${fs.statSync(path.join(ROOT_DIR, relPath)).size} bytes`,
+    ),
+  );
+
+  // 缺檔：把 doctor.js 複製到只有一個記憶檔的暫存根目錄跑，不動 repo 自己的檔。
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aiwff-doctor-prompt-'));
+  try {
+    fs.mkdirSync(path.join(root, 'scripts'));
+    fs.mkdirSync(path.join(root, 'memory'));
+    const script = path.join(root, 'scripts', 'doctor.js');
+    fs.copyFileSync(DOCTOR_SCRIPT, script);
+    fs.writeFileSync(path.join(root, 'memory', 'facts.md'), '秘密內容'); // 4 字＝UTF-8 12 bytes
+    const result = spawnSync(process.execPath, [script], {
+      cwd: root,
+      env: { ...process.env, PORT: String(await freePort()) },
+      encoding: 'utf8',
+    });
+    const out = `${result.stdout}${result.stderr}`;
+    assert.equal(result.status, 0, out);
+    assert.match(out, /✓ Doctor passed/, out);
+    const lines = promptLines(out);
+    assert.equal(lines.length, 3, out);
+    assert.match(lines[0], /^WARN prompt file CLAUDE\.md not found — .*templates\/claude\//);
+    assert.equal(lines[1], 'INFO prompt file memory/facts.md 12 bytes');
+    assert.equal(lines[2], 'INFO prompt file memory/preferences.md not found (optional)');
+    assert.doesNotMatch(out, /秘密內容/, '只印大小，不印檔案內容');
+    const health = JSON.parse(fs.readFileSync(path.join(root, 'data', 'health', 'last-run.json'), 'utf8'));
+    assert.equal(health.ok, true);
+    assert.equal(health.coverage.ran, 3, '三個檔只是資訊列，不算進檢查分母');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // --- (11) 截斷揭露 + 進度時間戳：這一包 API 之前零測試覆蓋，連入口都沒開 ---
 // 分界說清楚：collect* 回「未切過的全量」，list* 回「切過上限的畫面用量」，
 // 兩者分得開，dropped 才有分母。以下每條測的都是「上限砍掉的東西有沒有被誠實講出來」。
