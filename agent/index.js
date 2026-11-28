@@ -1837,6 +1837,14 @@ const ENV_FAILURE_RULES = [
     hint: '登入過期或金鑰無效：重新登入 worker CLI（例如在終端機跑 claude 再 /login）或更新金鑰，再續跑這個任務',
     pattern: /^(?:Error: )?Failed to authenticate\b|^API Error: 401\b|^API Error: .*authentication_error|^(?:Error: )?Invalid[ _-]?(?:x-)?api[ _-]?key\b|^(?:Error: )?(?:OAuth token (?:has )?expired|token has expired)|^(?:Error: )?not logged in\b/i,
   },
+  // 額度／花費上限用完：金鑰是好的，重新登入沒用，要等額度重置或調高上限；跟 auth 分開，免得人去重登白忙。
+  // 只認「用完」的說法；單純的 429 限流是一時的，照一般失敗重試，不算在這裡。
+  {
+    cause: 'quota',
+    retryable: false,
+    hint: '額度或花費上限用完（不是登入問題，不用重新登入）：等額度重置、調高花費上限或換方案，再續跑這個任務',
+    pattern: /^(?:Error: )?(?:Claude AI )?usage limit reached\b|^(?:Error: )?You(?:'|’)ve (?:hit|reached) your (?:usage |spend(?:ing)? )?limit\b|^API Error: .*(?:insufficient_quota|credit balance is too low|spend(?:ing)? limit)|^(?:Error: )?(?:Your )?credit balance is too low\b|^(?:Error: )?(?:quota exceeded|insufficient_quota)\b/i,
+  },
   {
     cause: 'permission',
     retryable: false,

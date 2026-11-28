@@ -89,7 +89,7 @@
     },
     "env_cause": {
       "type": "string",
-      "enum": ["auth", "missing_tool", "permission", "network"]
+      "enum": ["auth", "quota", "missing_tool", "permission", "network"]
     },
     "env_hint": {
       "type": "string",

@@ -21,6 +21,8 @@ const AUTH_OUTPUT =
 const PERMISSION_OUTPUT = "Error: EACCES: permission denied, open '/srv/worker/output.md'";
 const NETWORK_OUTPUT = 'API Error: Connection error. (cause: getaddrinfo ENOTFOUND api.example.invalid)';
 const TASK_BUG_OUTPUT = "TypeError: Cannot read properties of undefined (reading 'rows')";
+const QUOTA_OUTPUT =
+  'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits. spend limit reached for this workspace"}}';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -124,7 +126,7 @@ function modalClaudeScript(stateDir) {
 const fs = require('fs');
 const path = require('path');
 const stateDir = ${JSON.stringify(stateDir)};
-const OUT = ${JSON.stringify({ auth: AUTH_OUTPUT, permission: PERMISSION_OUTPUT, network: NETWORK_OUTPUT, bug: TASK_BUG_OUTPUT })};
+const OUT = ${JSON.stringify({ auth: AUTH_OUTPUT, quota: QUOTA_OUTPUT, permission: PERMISSION_OUTPUT, network: NETWORK_OUTPUT, bug: TASK_BUG_OUTPUT })};
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
@@ -158,6 +160,26 @@ test('classify: login expired / bad key is auth and not worth retrying', () => {
     assert.equal(result.retryable, false);
     assert.match(result.hint, /登入/);
   }
+});
+
+test('classify: used-up quota / spend limit is quota, not auth, and not worth retrying', () => {
+  for (const output of [
+    QUOTA_OUTPUT,
+    'Claude AI usage limit reached|1764320400',
+    "You've hit your limit · resets 3pm",
+    'Your credit balance is too low to access the Anthropic API.',
+    'API Error: 429 {"error":{"type":"insufficient_quota","message":"You exceeded your current quota"}}',
+  ]) {
+    const result = classifyEnvFailure(output);
+    assert.equal(result && result.cause, 'quota', output);
+    assert.equal(result.retryable, false);
+    assert.match(result.hint, /額度/);
+    assert.match(result.hint, /不用重新登入/);
+  }
+  // 單純限流（429 rate_limit）是一時的，不算額度用完，照一般失敗重試。
+  assert.equal(classifyEnvFailure('API Error: 429 {"error":{"type":"rate_limit_error","message":"Number of requests has exceeded your rate limit"}}'), null);
+  // 任務內容裡談到額度不算。
+  assert.equal(classifyEnvFailure({ stderr: '', stdout: 'Step 3: when the usage limit reached banner shows, hide the chat box.' }), null);
 });
 
 test('classify: worker CLI that cannot be found is missing_tool, whatever the OS language', () => {
@@ -228,6 +250,7 @@ test('real worker: auth / permission / network failures stop as blocked environm
     const create = (mode) =>
       requestJson(runtime.port, 'POST', '/api/tasks', { title: mode, instruction: `MODE=${mode}`, timeout_sec: 20 }, AUTH_HEADERS);
     const auth = await create('auth');
+    const quota = await create('quota');
     const permission = await create('permission');
     const network = await create('network');
     const bug = await create('bug');
@@ -242,6 +265,15 @@ test('real worker: auth / permission / network failures stop as blocked environm
     assert.equal(authTask.error, undefined);
     const inbox = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'inbox', `${auth.id}.blocked.json`), 'utf8'));
     assert.match(inbox.summary, /^卡住（環境問題）：/);
+
+    // 額度用完跟登入分開記，供應商原始訊息留在 last_error。
+    const quotaTask = await waitForTaskStatus(runtime.port, quota.id, ['blocked', 'failed']);
+    assert.equal(quotaTask.status, 'blocked');
+    assert.equal(quotaTask.blocked_reason, 'environment');
+    assert.equal(quotaTask.env_cause, 'quota');
+    assert.match(quotaTask.env_hint, /額度/);
+    assert.match(quotaTask.last_error, /spend limit reached for this workspace/);
+    assert.equal(quotaTask.retry_count, 0);
 
     const permissionTask = await waitForTaskStatus(runtime.port, permission.id, ['blocked', 'failed']);
     assert.equal(permissionTask.status, 'blocked');
@@ -262,6 +294,7 @@ test('real worker: auth / permission / network failures stop as blocked environm
 
     // 重試次數：auth、permission 各只跑 1 次（沒燒額度），network 與一般錯誤都跑滿 2 次。
     assert.equal(runsOf(stateDir, 'auth'), 1);
+    assert.equal(runsOf(stateDir, 'quota'), 1);
     assert.equal(runsOf(stateDir, 'permission'), 1);
     assert.equal(runsOf(stateDir, 'network'), 2);
     assert.equal(runsOf(stateDir, 'bug'), 2);
